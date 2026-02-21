@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap>
+    <loc>https://shop.example.com/sitemap_products_1.xml</loc>
+    <lastmod>2024-02-01</lastmod>
+  </sitemap>
+  <sitemap>
+    <loc>https://shop.example.com/sitemap_products_2.xml</loc>
+    <lastmod>2024-02-02</lastmod>
+  </sitemap>
+  <sitemap>
+    <loc>https://shop.example.com/sitemap_pages_1.xml</loc>
+    <lastmod>2024-02-01</lastmod>
+  </sitemap>
+  <sitemap>
+    <loc>https://shop.example.com/sitemap_collections_1.xml</loc>
+    <lastmod>2024-02-01</lastmod>
+  </sitemap>
+</sitemapindex>

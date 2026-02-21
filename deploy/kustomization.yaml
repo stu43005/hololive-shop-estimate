@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: dify
+
+resources:
+  - configmap.yaml
+  - secrets.yaml
+  - crawler-pvc.yaml
+  - crawler-cronjob.yaml
+  - bot-deployment.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: estimator-king
+  app.kubernetes.io/managed-by: kustomize

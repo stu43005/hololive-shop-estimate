@@ -1,0 +1,15 @@
+{
+  "venvPath": "/tmp",
+  "venv": "test_venv",
+  "pythonVersion": "3.14",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        ".",
+        "./estimator_king",
+        "/private/tmp/test_venv/lib/python3.14/site-packages"
+      ]
+    }
+  ]
+}

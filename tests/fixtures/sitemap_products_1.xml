@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://shop.example.com/products/item-001</loc>
+    <lastmod>2024-02-01</lastmod>
+  </url>
+  <url>
+    <loc>https://shop.example.com/products/item-002</loc>
+    <lastmod>2024-02-01</lastmod>
+  </url>
+  <url>
+    <loc>https://shop.example.com/en/products/item-001-en</loc>
+    <lastmod>2024-02-01</lastmod>
+  </url>
+  <url>
+    <loc>https://shop.example.com/products/item-003</loc>
+    <lastmod>2024-02-01</lastmod>
+  </url>
+  <url>
+    <loc>https://shop.example.com/products/item-004?variant=red</loc>
+    <lastmod>2024-02-01</lastmod>
+  </url>
+</urlset>

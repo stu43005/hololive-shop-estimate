@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: estimator-king-state-pvc
+  namespace: dify
+  labels:
+    app.kubernetes.io/name: estimator-king-crawler
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

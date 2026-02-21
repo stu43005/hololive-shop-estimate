@@ -1,0 +1,11 @@
+dify-client
+requests
+beautifulsoup4
+lxml
+discord.py
+tenacity
+pyyaml
+pytest
+pytest-cov
+pytest-asyncio
+responses

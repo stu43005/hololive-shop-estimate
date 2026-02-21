@@ -1,0 +1,42 @@
+# Estimator King - Store Configuration
+# Define stores, crawl policies, and optional proxy settings
+
+stores:
+  - id: hololive
+    base_url: https://shop.hololivepro.com
+    sitemap_url: https://shop.hololivepro.com/sitemap.xml
+    
+  - id: vspo
+    base_url: https://store.vspo.jp
+    sitemap_url: https://store.vspo.jp/sitemap.xml
+
+crawler:
+  # Rate limiting (requests per second)
+  rate_limit_rps: 1.5
+  
+  # Random jitter to add to delay (0 to jitter_max seconds)
+  jitter_max: 0.5
+  
+  # Concurrent requests per domain
+  concurrency_per_domain: 3
+  
+  # Connection timeout (seconds)
+  timeout_connect: 10
+  
+  # Read timeout (seconds)
+  timeout_read: 30
+  
+  # Maximum retry attempts for failed requests
+  max_retries: 3
+
+proxy:
+  # Enable/disable proxy support
+  enabled: false
+  
+  # HTTP proxy (populated from environment if enabled)
+  # Uses HTTP_PROXY env var, falls back to empty string
+  http_proxy: ""
+  
+  # HTTPS proxy (populated from environment if enabled)
+  # Uses HTTPS_PROXY env var, falls back to empty string
+  https_proxy: ""

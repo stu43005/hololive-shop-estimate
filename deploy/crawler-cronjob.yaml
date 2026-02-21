@@ -1,0 +1,69 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: estimator-king-crawler
+  namespace: dify
+  labels:
+    app.kubernetes.io/name: estimator-king-crawler
+spec:
+  schedule: "0 2 * * 0"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 7200
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: estimator-king-crawler
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: crawler
+              image: estimator-king-crawler:latest
+              command:
+                - python
+                - -m
+                - estimator_king
+                - --config
+                - /config/stores_config.yaml
+                - --db
+                - /data/estimator_king.db
+              envFrom:
+                - configMapRef:
+                    name: estimator-king-config
+              env:
+                - name: DIFY_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: estimator-king-secrets
+                      key: DIFY_API_KEY
+                - name: DIFY_DATASET_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: estimator-king-secrets
+                      key: DIFY_DATASET_ID
+                - name: DATABASE_PATH
+                  value: "/data/estimator_king.db"
+              volumeMounts:
+                - name: state-storage
+                  mountPath: /data
+                - name: stores-config
+                  mountPath: /config
+                  readOnly: true
+              resources:
+                requests:
+                  memory: "512Mi"
+                  cpu: "250m"
+                limits:
+                  memory: "1Gi"
+                  cpu: "500m"
+          volumes:
+            - name: state-storage
+              persistentVolumeClaim:
+                claimName: estimator-king-state-pvc
+            - name: stores-config
+              configMap:
+                name: estimator-king-stores-config

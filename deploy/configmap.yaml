@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: estimator-king-config
+  namespace: dify
+  labels:
+    app.kubernetes.io/name: estimator-king
+data:
+  DIFY_BASE_URL: "https://dify.long-cod.ts.net/v1"
+  CRAWLER_LOG_LEVEL: "INFO"
+
+  # stores_config.yaml is mounted from a separate ConfigMap created from file.
+  # Ops reference command:
+  # kubectl create configmap estimator-king-stores-config \
+  #   --from-file=stores_config.yaml=./stores_config.yaml \
+  #   --namespace=dify \
+  #   --dry-run=client -o yaml | kubectl apply -f -

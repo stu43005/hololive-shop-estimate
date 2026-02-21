@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: estimator-king-bot
+  namespace: dify
+  labels:
+    app.kubernetes.io/name: estimator-king-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: estimator-king-bot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: estimator-king-bot
+    spec:
+      containers:
+        - name: bot
+          image: estimator-king-bot:latest
+          command:
+            - python
+            - -m
+            - estimator_king.bot
+            - --token
+            - $(DISCORD_TOKEN)
+          envFrom:
+            - configMapRef:
+                name: estimator-king-config
+          env:
+            - name: DISCORD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: estimator-king-secrets
+                  key: DISCORD_TOKEN
+            - name: DIFY_WORKFLOW_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: estimator-king-secrets
+                  key: DIFY_WORKFLOW_API_KEY
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"

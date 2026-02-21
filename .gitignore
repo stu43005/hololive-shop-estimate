@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Testing / Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Linting / Type checking
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables / Secrets
+.env
+.env.*
+
+# Database files (runtime data)
+*.db
+*.sqlite
+*.sqlite3
+
+# Sisyphus working state (internal tooling)
+.sisyphus/
+
+# Dify planning docs (draft notes, not project deliverables)
+estimator-plan.md
+estimator-dify-plan.md
+dify_python_sdk_research_report.md

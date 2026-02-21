@@ -1,0 +1,15 @@
+{
+  "product": {
+    "id": 1000000002,
+    "title": "VSPO Sample Product",
+    "body_html": "<div>Some intro text.</div>",
+    "variants": [
+      {
+        "id": 3000000001,
+        "title": "One Size",
+        "price": "2500",
+        "sku": "VSPO-ABC"
+      }
+    ]
+  }
+}
