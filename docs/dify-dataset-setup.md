@@ -90,14 +90,14 @@ curl -X GET "https://dify.long-cod.ts.net/v1/datasets/{dataset_id}/documents/{ba
 
 Integrate these credentials into the existing Kubernetes deployment manifests.
 
-### 5.1: Secrets (`dify-deploy/02-secrets.yaml`)
-Add the following keys to the `dify-shared-secrets` Secret. You must base64 encode the values first.
+### 5.1: Secrets (`deploy/secrets.yaml`)
+Add the following keys to the Estimator King Secret. You must base64 encode the values first.
 
 ```yaml
 apiVersion: v1
 kind: Secret
 metadata:
-  name: dify-shared-secrets
+  name: estimator-king-secrets
   namespace: dify
 data:
   # ... existing keys ...
@@ -111,14 +111,14 @@ echo -n "dataset-abc123..." | base64
 echo -n "abc123-def456-..." | base64
 ```
 
-### 5.2: ConfigMap (`dify-deploy/01-configmap.yaml`)
-Add the base URL to the `dify-shared-config` ConfigMap. These are plain text.
+### 5.2: ConfigMap (`deploy/configmap.yaml`)
+Add the base URL to the Estimator King ConfigMap. These are plain text.
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: dify-shared-config
+  name: estimator-king-config
   namespace: dify
 data:
   # ... existing keys ...
