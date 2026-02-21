@@ -35,6 +35,7 @@ Thumbs.db
 # Environment variables / Secrets
 .env
 .env.*
+!.env.example
 
 # Database files (runtime data)
 *.db
