@@ -18,19 +18,16 @@ Follow these steps to create a new dataset in the Dify web UI.
 1. Navigate to [https://dify.long-cod.ts.net](https://dify.long-cod.ts.net).
 2. Login with your credentials.
 
-### Step 2.2: Create Knowledge Base
+### Step 2.2: Create Empty Knowledge Base
 1. Click the **Knowledge** section in the top navigation bar.
 2. Click the **Create Knowledge** button (usually at the top right).
-3. Select **Create from empty** if prompted.
+3. On the data source selection page, click the **Create an empty knowledge base** link at the bottom.
+4. Enter a descriptive name, e.g., `Estimator King Products`.
+5. Click **Confirm**.
 
-### Step 2.3: Configure Dataset Settings
-1. **Name**: Enter a descriptive name, e.g., `Estimator King Products`.
-2. **Type**: Select **Text** (do not use file upload for the crawler).
-3. **Indexing Mode**: Choose **High Quality** for better retrieval accuracy.
-4. **Embedding Model**: Select the recommended model (e.g., `text-embedding-ada-002`).
-5. Click **Save & Next** or **Create**.
+> **Note**: When creating an empty Knowledge Base, the UI only asks for a name. Index method, embedding model, and retrieval settings are configured automatically when the crawler adds the first documents via API.
 
-### Step 2.4: Extract Dataset ID
+### Step 2.3: Extract Dataset ID
 1. Once the dataset is created, look at the URL in your browser's address bar.
 2. The URL format is `https://dify.long-cod.ts.net/datasets/{dataset_id}/...`
 3. Copy the `{dataset_id}` (a standard UUID). Store this value.
