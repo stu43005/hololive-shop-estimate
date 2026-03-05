@@ -5,8 +5,9 @@ the Dify Workflow API with chunking support.
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 import requests
+import json
 
 
 @dataclass
@@ -164,8 +165,13 @@ class WorkflowClient:
         except (KeyError, TypeError) as e:
             raise ValueError(f"Malformed workflow response: {e}") from e
 
-    def _parse_response(self, data: dict) -> WorkflowResult:
+    def _parse_response(self, data: dict[str, Any]) -> WorkflowResult:
         """Parse workflow API response to WorkflowResult.
+
+        Handles both string and pre-parsed estimates from the workflow output.
+        The Dify End node may return estimates as a JSON string (if the Code node
+        uses json.dumps()) or as a pre-parsed list/dict (if the Code node returns
+        a native Python structure).
 
         Args:
             data: Raw JSON response from API
@@ -177,8 +183,22 @@ class WorkflowClient:
             ValueError: If required fields missing or malformed
         """
         try:
-            # Extract estimates array
-            estimates_data = data["data"]["outputs"]["estimates"]
+            # Extract workflow run data
+            run_data = data.get("data", {})
+
+            # Extract estimates from outputs (may be string or parsed list)
+            raw_estimates = run_data.get("outputs", {}).get("estimates")
+            if raw_estimates is None:
+                raise ValueError("Missing 'estimates' in workflow outputs")
+
+            # Handle string output (Code node used json.dumps())
+            if isinstance(raw_estimates, str):
+                estimates_data = json.loads(raw_estimates)
+            else:
+                estimates_data = raw_estimates
+
+            if not isinstance(estimates_data, list):
+                raise ValueError(f"Expected estimates to be a list, got {type(estimates_data).__name__}")
 
             # Parse each estimate into ProductEstimate dataclass
             estimates = []
@@ -210,15 +230,17 @@ class WorkflowClient:
                 )
                 estimates.append(product_estimate)
 
-            # Extract optional fields
+            # Extract optional fields (elapsed_time is inside data, not top-level)
             workflow_run_id = data.get("workflow_run_id")
-            elapsed_time = data.get("elapsed_time")
+            elapsed_time = run_data.get("elapsed_time")
 
             return WorkflowResult(
                 estimates=estimates,
                 workflow_run_id=workflow_run_id,
                 elapsed_time=elapsed_time,
             )
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse estimates JSON string: {e}") from e
         except (KeyError, TypeError) as e:
             raise ValueError(f"Malformed workflow response: {e}") from e
 
