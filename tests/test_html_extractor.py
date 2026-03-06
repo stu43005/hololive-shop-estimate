@@ -75,3 +75,26 @@ def test_html_extract_whitespace_normalized_deterministically():
 def test_html_extract_repeated_call_same_output():
     html = _read_fixture("product_html_hololive_basic.html")
     assert extract_detail_sections(html) == extract_detail_sections(html)
+
+
+def test_html_extract_details_summary_sections():
+    html = _read_fixture("product_html_details_summary.html")
+    sections = extract_detail_sections(html)
+
+    assert set(sections.keys()) == {"グッズ詳細"}
+    assert "アクリルスタンド" in sections["グッズ詳細"]
+    assert "H133" in sections["グッズ詳細"]
+    assert "アクリル" in sections["グッズ詳細"]
+
+
+def test_html_extract_mixed_heading_and_details_heading_takes_priority():
+    html = _read_fixture("product_html_mixed_heading_details.html")
+    sections = extract_detail_sections(html)
+
+    assert set(sections.keys()) == {"セット詳細", "グッズ詳細"}
+    # Heading-based content wins for セット詳細
+    assert "アクリルスタンド" in sections["セット詳細"]
+    assert "ignored" not in sections["セット詳細"].lower()
+    # Details-based content fills in グッズ詳細 (no heading for it)
+    assert "W50mm" in sections["グッズ詳細"]
+    assert "アクリル製" in sections["グッズ詳細"]

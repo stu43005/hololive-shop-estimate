@@ -88,6 +88,23 @@ def _extract_text_between(start_heading: Tag, boundary_heading: Tag | None) -> s
     return _normalize_spaces(" ".join(parts))
 
 
+def _extract_details_content(details_tag: Tag) -> str:
+    """Extract text content from a <details> block, excluding its <summary>."""
+    parts: list[str] = []
+    for child in details_tag.children:
+        if isinstance(child, Tag) and child.name == "summary":
+            continue
+        if isinstance(child, Tag):
+            txt = _normalize_spaces(child.get_text(" ", strip=True))
+            if txt:
+                parts.append(txt)
+        elif isinstance(child, NavigableString):
+            txt = _normalize_spaces(str(child))
+            if txt:
+                parts.append(txt)
+    return _normalize_spaces(" ".join(parts))
+
+
 def extract_detail_sections(html: str) -> dict[str, str]:
     soup = BeautifulSoup(html or "", "lxml")
 
@@ -95,6 +112,7 @@ def extract_detail_sections(html: str) -> dict[str, str]:
 
     blocks_by_key: dict[str, list[str]] = defaultdict(list)
 
+    # --- Pass 1: heading-based extraction (h2/h3/h4) ---
     for heading in soup.find_all(HEADING_TAGS):
         if not isinstance(heading, Tag):
             continue
@@ -113,6 +131,29 @@ def extract_detail_sections(html: str) -> dict[str, str]:
 
         for key in matched_keys:
             blocks_by_key[key].append(section_text)
+
+    # --- Pass 2: <details>/<summary> extraction ---
+    for details_tag in soup.find_all("details"):
+        if not isinstance(details_tag, Tag):
+            continue
+        summary_tag = details_tag.find("summary", recursive=False)
+        if not isinstance(summary_tag, Tag):
+            continue
+        summary_text = _normalize_for_match(summary_tag.get_text(" ", strip=True))
+        if not summary_text:
+            continue
+
+        matched_keys = [
+            key for key, matcher in key_matchers.items() if matcher in summary_text
+        ]
+        if not matched_keys:
+            continue
+
+        section_text = _extract_details_content(details_tag)
+
+        for key in matched_keys:
+            if key not in blocks_by_key:
+                blocks_by_key[key].append(section_text)
 
     if not blocks_by_key:
         import logging
