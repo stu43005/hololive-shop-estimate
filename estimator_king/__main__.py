@@ -3,7 +3,6 @@
 import argparse
 import json
 import logging
-import os
 import sys
 from typing import Optional, Sequence
 
@@ -20,10 +19,9 @@ from estimator_king.sync.inactive import mark_inactive_products
 def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """Parse command-line arguments with environment variable fallbacks.
 
-    Supports:
-    - Command-line arguments (highest priority)
-    - Environment variables (fallback)
-    - Default values (lowest priority)
+    CLI args are used to override values loaded from config/env.
+    Validation of required credentials is done in main() after
+    merging CLI args into AppConfig.
 
     Args:
         args: Optional list of arguments to parse (for testing).
@@ -32,13 +30,10 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
     Returns:
         argparse.Namespace: Parsed arguments with attributes:
             - config: Path to stores configuration YAML
-            - db: SQLite database file path
-            - dify_base_url: Dify API base URL
-            - dify_api_key: Dify API key for dataset
-            - dify_dataset_id: Dify dataset UUID
-
-    Raises:
-        SystemExit: If required arguments are missing.
+            - db: SQLite database file path (or None)
+            - dify_base_url: Dify API base URL (or None)
+            - dify_api_key: Dify API key for dataset (or None)
+            - dify_dataset_id: Dify dataset UUID (or None)
     """
     parser = argparse.ArgumentParser(
         prog="estimator_king",
@@ -53,42 +48,29 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
     _ = parser.add_argument(
         "--db",
-        default=os.getenv("DATABASE_PATH", "./estimator_king.db"),
-        help="SQLite database path (env: DATABASE_PATH, default: ./estimator_king.db)",
+        default=None,
+        help="SQLite database path (overrides DATABASE_PATH env / config default)",
     )
 
     _ = parser.add_argument(
         "--dify-base-url",
-        default=os.getenv("DIFY_BASE_URL"),
-        help="Dify API base URL (env: DIFY_BASE_URL, required)",
+        default=None,
+        help="Dify API base URL (overrides DIFY_BASE_URL env)",
     )
 
     _ = parser.add_argument(
         "--dify-api-key",
-        default=os.getenv("DIFY_API_KEY"),
-        help="Dify API key for dataset (env: DIFY_API_KEY, required)",
+        default=None,
+        help="Dify API key for dataset (overrides DIFY_API_KEY env)",
     )
 
     _ = parser.add_argument(
         "--dify-dataset-id",
-        default=os.getenv("DIFY_DATASET_ID"),
-        help="Dify dataset UUID (env: DIFY_DATASET_ID, required)",
+        default=None,
+        help="Dify dataset UUID (overrides DIFY_DATASET_ID env)",
     )
 
-    parsed_args = parser.parse_args(args)
-
-    if not isinstance(parsed_args.dify_api_key, str):
-        parser.error("--dify-api-key or DIFY_API_KEY environment variable required")
-
-    if not isinstance(parsed_args.dify_base_url, str):
-        parser.error("--dify-base-url or DIFY_BASE_URL environment variable required")
-
-    if not isinstance(parsed_args.dify_dataset_id, str):
-        parser.error(
-            "--dify-dataset-id or DIFY_DATASET_ID environment variable required"
-        )
-
-    return parsed_args
+    return parser.parse_args(args)
 
 
 def run_crawler(config: AppConfig, db_path: str, dify_client: DifyKBClient) -> dict:
@@ -190,11 +172,13 @@ def main() -> None:
     Workflow:
     1. Configure logging (INFO level to stderr)
     2. Parse command-line arguments
-    3. Load AppConfig from YAML file
-    4. Initialize DifyKBClient with Dify credentials
-    5. Run crawler pipeline (orchestrate all stores)
-    6. Output JSON results to stdout
-    7. Exit with appropriate code (0=success, 1=error)
+    3. Load AppConfig from YAML file + environment variables
+    4. Override config with CLI arguments (if provided)
+    5. Validate crawler-required credentials
+    6. Initialize DifyKBClient from config
+    7. Run crawler pipeline (orchestrate all stores)
+    8. Output JSON results to stdout
+    9. Exit with appropriate code (0=success, 1=error)
     """
     # 1. Configure logging
     logging.basicConfig(
@@ -206,7 +190,7 @@ def main() -> None:
     # 2. Parse arguments
     args = parse_args()
 
-    # 3. Load config from YAML
+    # 3. Load config from YAML + env
     try:
         config = AppConfig.from_yaml(args.config)
         logging.info(f"Loaded config from {args.config}: {len(config.stores)} stores")
@@ -214,25 +198,46 @@ def main() -> None:
         logging.error(f"Failed to load config from {args.config}: {e}")
         sys.exit(1)
 
-    # 4. Initialize Dify client
+    # 4. Override config with CLI arguments (if provided)
+    if args.dify_api_key is not None:
+        config.dify_api_key = args.dify_api_key
+    if args.dify_base_url is not None:
+        config.dify_base_url = args.dify_base_url
+    if args.dify_dataset_id is not None:
+        config.dify_dataset_id = args.dify_dataset_id
+    if args.db is not None:
+        config.database_path = args.db
+
+    # 5. Validate crawler-required credentials
+    if not config.dify_api_key:
+        logging.error("DIFY_API_KEY is required (via env, config, or --dify-api-key)")
+        sys.exit(2)
+    if not config.dify_base_url:
+        logging.error("DIFY_BASE_URL is required (via env, config, or --dify-base-url)")
+        sys.exit(2)
+    if not config.dify_dataset_id:
+        logging.error("DIFY_DATASET_ID is required (via env, config, or --dify-dataset-id)")
+        sys.exit(2)
+
+    # 6. Initialize Dify client from config
     dify_client = DifyKBClient(
-        api_key=args.dify_api_key,
-        base_url=args.dify_base_url,
-        dataset_id=args.dify_dataset_id,
+        api_key=config.dify_api_key,
+        base_url=config.dify_base_url,
+        dataset_id=config.dify_dataset_id,
     )
 
-    # 5. Run crawler
+    # 7. Run crawler
     try:
-        counters = run_crawler(config, args.db, dify_client)
+        counters = run_crawler(config, config.database_path, dify_client)
         logging.info(f"Crawler completed: {counters}")
     except Exception as e:
         logging.error(f"Crawler failed: {e}")
         sys.exit(1)
 
-    # 6. Output JSON to stdout
+    # 8. Output JSON to stdout
     print(json.dumps(counters, indent=2))
 
-    # 7. Exit success
+    # 9. Exit success
     sys.exit(0)
 
 

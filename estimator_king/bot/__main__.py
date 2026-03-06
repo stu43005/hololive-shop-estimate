@@ -7,14 +7,13 @@ graceful shutdown handling for running the Discord bot as a module.
 import argparse
 import asyncio
 import logging
-import os
 import signal
 import sys
 from typing import Optional
 
 import discord
-from discord import app_commands
 
+from estimator_king.config_schema import load_config
 from estimator_king.bot.commands import setup_commands
 
 
@@ -23,7 +22,7 @@ def parse_args(args: Optional[list[str]] = None) -> argparse.Namespace:
 
     Supports:
     - Command-line arguments (highest priority)
-    - Environment variables (fallback)
+    - Environment variables (fallback via AppConfig)
     - Default values (lowest priority)
 
     Args:
@@ -32,7 +31,8 @@ def parse_args(args: Optional[list[str]] = None) -> argparse.Namespace:
 
     Returns:
         argparse.Namespace: Parsed arguments with attributes:
-            - token: Discord bot token
+            - config: Path to stores configuration YAML
+            - token: Discord bot token (or None, loaded from config/env)
             - guild_id: Optional guild ID for command sync
 
     Raises:
@@ -44,10 +44,16 @@ def parse_args(args: Optional[list[str]] = None) -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--config",
+        default="stores_config.yaml",
+        help="Path to stores configuration YAML (default: stores_config.yaml)",
+    )
+
+    parser.add_argument(
         "--token",
         type=str,
-        default=os.environ.get("DISCORD_BOT_TOKEN"),
-        help="Discord bot token (or set DISCORD_BOT_TOKEN env var)",
+        default=None,
+        help="Discord bot token (overrides DISCORD_TOKEN / DISCORD_BOT_TOKEN env)",
     )
 
     parser.add_argument(
@@ -95,14 +101,25 @@ async def main() -> None:
     # Parse arguments
     args = parse_args()
 
-    # Validate token
-    if not args.token:
-        sys.stderr.write("Error: --token required or set DISCORD_BOT_TOKEN\n")
+    # Load AppConfig from YAML + env vars
+    try:
+        config = load_config(args.config)
+    except Exception as e:
+        sys.stderr.write(f"Error: Failed to load config: {e}\n")
         sys.exit(1)
 
-    # Create bot and register commands
+    # Override config with CLI argument
+    if args.token is not None:
+        config.discord_token = args.token
+
+    # Validate bot-required credentials
+    if not config.discord_token:
+        sys.stderr.write("Error: --token required or set DISCORD_BOT_TOKEN / DISCORD_TOKEN\n")
+        sys.exit(1)
+
+    # Create bot and register commands (pass config for workflow API access)
     bot = create_bot()
-    tree = setup_commands(bot)
+    tree = setup_commands(bot, config)
 
     # on_ready event: sync commands after bot connects
     @bot.event
@@ -144,7 +161,7 @@ async def main() -> None:
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
 
     # Start bot connection
-    await bot.start(args.token)
+    await bot.start(config.discord_token)
 
 
 def _main() -> None:

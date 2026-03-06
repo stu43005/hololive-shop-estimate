@@ -1,11 +1,11 @@
 """Discord bot slash command implementation for product price estimation."""
 
-import os
 import discord
 from discord import app_commands
 from discord.ui import Modal, TextInput
 import requests
 
+from estimator_king.config_schema import AppConfig
 from estimator_king.bot.workflow_client import WorkflowClient, WorkflowResult
 
 # Constants for input validation
@@ -143,6 +143,10 @@ class ProductInputModal(Modal, title="Enter Product Names"):
         placeholder="Example:\nHololive T-Shirt\nFigure Set\nLimited Edition Merch",
     )
 
+    def __init__(self, config: AppConfig) -> None:
+        super().__init__()
+        self._config = config
+
     async def on_submit(self, interaction: discord.Interaction) -> None:
         """Handle modal submission with validation and processing.
 
@@ -172,7 +176,7 @@ class ProductInputModal(Modal, title="Enter Product Names"):
 
         await interaction.response.defer(thinking=True)
 
-        api_key = os.getenv("DIFY_WORKFLOW_API_KEY")
+        api_key = self._config.dify_workflow_api_key
         if not api_key:
             await interaction.followup.send(
                 "❌ Bot configuration error: Missing DIFY_WORKFLOW_API_KEY"
@@ -180,7 +184,11 @@ class ProductInputModal(Modal, title="Enter Product Names"):
             return
 
         try:
-            client = WorkflowClient(api_key=api_key)
+            base_url = self._config.dify_workflow_base_url
+            if base_url:
+                client = WorkflowClient(api_key=api_key, base_url=base_url)
+            else:
+                client = WorkflowClient(api_key=api_key)
             user_id = f"discord-{interaction.user.id}"
 
             result = client.estimate_products(product_list, user_id)
@@ -203,7 +211,7 @@ class ProductInputModal(Modal, title="Enter Product Names"):
             await interaction.followup.send(f"❌ Unexpected error: {e}")
 
 
-def setup_commands(bot: discord.Client) -> app_commands.CommandTree:
+def setup_commands(bot: discord.Client, config: AppConfig) -> app_commands.CommandTree:
     """Register slash commands with the bot.
 
     Creates and registers the /estimate command for collecting product names
@@ -211,6 +219,7 @@ def setup_commands(bot: discord.Client) -> app_commands.CommandTree:
 
     Args:
         bot: Discord bot client instance
+        config: Application configuration (provides workflow API credentials)
 
     Returns:
         CommandTree with registered commands
@@ -228,6 +237,6 @@ def setup_commands(bot: discord.Client) -> app_commands.CommandTree:
         Args:
             interaction: Discord interaction object from slash command invocation
         """
-        await interaction.response.send_modal(ProductInputModal())
+        await interaction.response.send_modal(ProductInputModal(config))
 
     return tree

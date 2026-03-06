@@ -138,42 +138,8 @@ class TestAppConfig:
         """Test app config validation with no stores."""
         config = AppConfig(
             stores=[],
-            dify_api_key="test-key",
-            discord_token="test-token",
         )
         with pytest.raises(ValueError, match="must define at least one store"):
-            config.validate()
-
-    def test_app_config_validation_missing_dify_key(self):
-        """Test app config validation with missing DIFY_API_KEY."""
-        config = AppConfig(
-            stores=[
-                Store(
-                    id="test",
-                    base_url="https://example.com",
-                    sitemap_url="https://example.com/sitemap.xml",
-                ),
-            ],
-            dify_api_key=None,
-            discord_token="test-token",
-        )
-        with pytest.raises(ValueError, match="DIFY_API_KEY.*required"):
-            config.validate()
-
-    def test_app_config_validation_missing_discord_token(self):
-        """Test app config validation with missing DISCORD_TOKEN."""
-        config = AppConfig(
-            stores=[
-                Store(
-                    id="test",
-                    base_url="https://example.com",
-                    sitemap_url="https://example.com/sitemap.xml",
-                ),
-            ],
-            dify_api_key="test-key",
-            discord_token=None,
-        )
-        with pytest.raises(ValueError, match="DISCORD_TOKEN.*required"):
             config.validate()
 
     def test_app_config_valid(self):
@@ -186,11 +152,23 @@ class TestAppConfig:
                     sitemap_url="https://example.com/sitemap.xml",
                 ),
             ],
-            dify_api_key="test-key",
-            discord_token="test-token",
         )
         config.validate()  # Should not raise
 
+    def test_app_config_credentials_not_validated(self):
+        """Test that validate() does NOT check credentials (entry points do that)."""
+        config = AppConfig(
+            stores=[
+                Store(
+                    id="test",
+                    base_url="https://example.com",
+                    sitemap_url="https://example.com/sitemap.xml",
+                ),
+            ],
+            dify_api_key=None,
+            discord_token=None,
+        )
+        config.validate()  # Should not raise even without credentials
 
 class TestLoadConfig:
     """Test load_config function."""
@@ -225,10 +203,16 @@ proxy:
         try:
             # Set environment variables
             monkeypatch.setenv("DIFY_API_KEY", "test-dify-key")
-            monkeypatch.setenv("DISCORD_TOKEN", "test-discord-token")
+            monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+            monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
             monkeypatch.delenv("CONFIG_PATH", raising=False)
             monkeypatch.delenv("HTTP_PROXY", raising=False)
             monkeypatch.delenv("HTTPS_PROXY", raising=False)
+            monkeypatch.delenv("DATABASE_PATH", raising=False)
+            monkeypatch.delenv("DIFY_BASE_URL", raising=False)
+            monkeypatch.delenv("DIFY_DATASET_ID", raising=False)
+            monkeypatch.delenv("DIFY_WORKFLOW_API_KEY", raising=False)
+            monkeypatch.delenv("DIFY_WORKFLOW_BASE_URL", raising=False)
 
             # Load config
             config = load_config(config_path)
@@ -253,8 +237,8 @@ proxy:
 
             # Verify env vars
             assert config.dify_api_key == "test-dify-key"
-            assert config.discord_token == "test-discord-token"
-            assert config.database_path == "/data/estimator_king.db"
+            assert config.discord_token is None
+            assert config.database_path == "./estimator_king.db"
         finally:
             os.unlink(config_path)
 
@@ -325,7 +309,7 @@ crawler:
             os.unlink(config_path)
 
     def test_config_load_missing_required_env_vars(self):
-        """Test loading config without required environment variables."""
+        """Test loading config without credentials still succeeds (credentials are optional in load_config)."""
         yaml_content = """
 stores:
   - id: test
@@ -340,9 +324,12 @@ stores:
             # Remove environment variables
             os.environ.pop("DIFY_API_KEY", None)
             os.environ.pop("DISCORD_TOKEN", None)
+            os.environ.pop("DISCORD_BOT_TOKEN", None)
 
-            with pytest.raises(ValueError, match="DIFY_API_KEY.*required"):
-                load_config(config_path)
+            # load_config no longer validates credentials — this should succeed
+            config = load_config(config_path)
+            assert config.dify_api_key is None
+            assert config.discord_token is None
         finally:
             os.unlink(config_path)
 
@@ -357,9 +344,10 @@ class TestConfigIntegration:
 
     def test_stores_config_yaml_valid(self, monkeypatch):
         """Test that stores_config.yaml is valid and loadable."""
-        # Set required environment variables
-        monkeypatch.setenv("DIFY_API_KEY", "test-key")
-        monkeypatch.setenv("DISCORD_TOKEN", "test-token")
+        # Clean env to avoid interference
+        monkeypatch.delenv("DIFY_API_KEY", raising=False)
+        monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+        monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
         monkeypatch.delenv("CONFIG_PATH", raising=False)
         monkeypatch.delenv("HTTP_PROXY", raising=False)
         monkeypatch.delenv("HTTPS_PROXY", raising=False)

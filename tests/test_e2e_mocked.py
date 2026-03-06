@@ -593,21 +593,30 @@ def test_e2e_first_run_creates_documents(
             "DIFY_API_KEY",
             "DIFY_BASE_URL",
             "DIFY_DATASET_ID",
-            "DISCORD_TOKEN",
         ):
             old_env[key] = os.environ.get(key)
 
         os.environ["DIFY_API_KEY"] = "dataset-test-key"
-        os.environ["DISCORD_TOKEN"] = "discord-test-token"
 
         args = parse_args()
         config = AppConfig.from_yaml(args.config)
+
+        # Override config with CLI args (mirrors main() behavior)
+        if args.dify_api_key:
+            config.dify_api_key = args.dify_api_key
+        if args.dify_base_url:
+            config.dify_base_url = args.dify_base_url
+        if args.dify_dataset_id:
+            config.dify_dataset_id = args.dify_dataset_id
+        if args.db:
+            config.database_path = args.db
+
         dify_client = DifyKBClient(
-            api_key=args.dify_api_key,
-            base_url=args.dify_base_url,
-            dataset_id=args.dify_dataset_id,
+            api_key=config.dify_api_key,
+            base_url=config.dify_base_url,
+            dataset_id=config.dify_dataset_id,
         )
-        counters = run_crawler(config, args.db, dify_client)
+        counters = run_crawler(config, config.database_path, dify_client)
     finally:
         sys.argv = old_argv
         for key, value in old_env.items():
@@ -844,21 +853,30 @@ def test_e2e_second_run_idempotent(test_config_path, test_db_path, test_reposito
             "DIFY_API_KEY",
             "DIFY_BASE_URL",
             "DIFY_DATASET_ID",
-            "DISCORD_TOKEN",
         ):
             old_env[key] = os.environ.get(key)
 
         os.environ["DIFY_API_KEY"] = "dataset-test-key"
-        os.environ["DISCORD_TOKEN"] = "discord-test-token"
 
         args = parse_args()
         config = AppConfig.from_yaml(args.config)
+
+        # Override config with CLI args (mirrors main() behavior)
+        if args.dify_api_key:
+            config.dify_api_key = args.dify_api_key
+        if args.dify_base_url:
+            config.dify_base_url = args.dify_base_url
+        if args.dify_dataset_id:
+            config.dify_dataset_id = args.dify_dataset_id
+        if args.db:
+            config.database_path = args.db
+
         dify_client = DifyKBClient(
-            api_key=args.dify_api_key,
-            base_url=args.dify_base_url,
-            dataset_id=args.dify_dataset_id,
+            api_key=config.dify_api_key,
+            base_url=config.dify_base_url,
+            dataset_id=config.dify_dataset_id,
         )
-        result1 = run_crawler(config, args.db, dify_client)
+        result1 = run_crawler(config, config.database_path, dify_client)
 
         # Verify first run created documents
         assert len(create_calls_run1) == 2, (
@@ -1033,12 +1051,20 @@ def test_e2e_second_run_idempotent(test_config_path, test_db_path, test_reposito
         # Run crawler again
         args = parse_args()
         config = AppConfig.from_yaml(args.config)
+        if args.dify_api_key:
+            config.dify_api_key = args.dify_api_key
+        if args.dify_base_url:
+            config.dify_base_url = args.dify_base_url
+        if args.dify_dataset_id:
+            config.dify_dataset_id = args.dify_dataset_id
+        if args.db:
+            config.database_path = args.db
         dify_client = DifyKBClient(
-            api_key=args.dify_api_key,
-            base_url=args.dify_base_url,
-            dataset_id=args.dify_dataset_id,
+            api_key=config.dify_api_key,
+            base_url=config.dify_base_url,
+            dataset_id=config.dify_dataset_id,
         )
-        result2 = run_crawler(config, args.db, dify_client)
+        result2 = run_crawler(config, config.database_path, dify_client)
 
         # Reopen test_repository to read final state after second run
         test_repository.open()
@@ -1325,21 +1351,30 @@ def test_e2e_content_change_updates(test_config_path, test_db_path):
             "DIFY_API_KEY",
             "DIFY_BASE_URL",
             "DIFY_DATASET_ID",
-            "DISCORD_TOKEN",
         ):
             old_env[key] = os.environ.get(key)
 
         os.environ["DIFY_API_KEY"] = "dataset-test-key"
-        os.environ["DISCORD_TOKEN"] = "discord-test-token"
 
         args = parse_args()
         config = AppConfig.from_yaml(args.config)
+
+        # Override config with CLI args (mirrors main() behavior)
+        if args.dify_api_key:
+            config.dify_api_key = args.dify_api_key
+        if args.dify_base_url:
+            config.dify_base_url = args.dify_base_url
+        if args.dify_dataset_id:
+            config.dify_dataset_id = args.dify_dataset_id
+        if args.db:
+            config.database_path = args.db
+
         dify_client = DifyKBClient(
-            api_key=args.dify_api_key,
-            base_url=args.dify_base_url,
-            dataset_id=args.dify_dataset_id,
+            api_key=config.dify_api_key,
+            base_url=config.dify_base_url,
+            dataset_id=config.dify_dataset_id,
         )
-        result1 = run_crawler(config, args.db, dify_client)
+        result1 = run_crawler(config, config.database_path, dify_client)
 
         # Verify first run created documents
         assert len(create_calls_run1) == 2, (
@@ -1407,12 +1442,20 @@ def test_e2e_content_change_updates(test_config_path, test_db_path):
         # Run crawler again (product-a callback will return modified HTML on second fetch)
         args = parse_args()
         config = AppConfig.from_yaml(args.config)
+        if args.dify_api_key:
+            config.dify_api_key = args.dify_api_key
+        if args.dify_base_url:
+            config.dify_base_url = args.dify_base_url
+        if args.dify_dataset_id:
+            config.dify_dataset_id = args.dify_dataset_id
+        if args.db:
+            config.database_path = args.db
         dify_client = DifyKBClient(
-            api_key=args.dify_api_key,
-            base_url=args.dify_base_url,
-            dataset_id=args.dify_dataset_id,
+            api_key=config.dify_api_key,
+            base_url=config.dify_base_url,
+            dataset_id=config.dify_dataset_id,
         )
-        result2 = run_crawler(config, args.db, dify_client)
+        result2 = run_crawler(config, config.database_path, dify_client)
 
         with ProductStateRepository(str(test_db_path)) as repo:
             states_after_second_pre_assert = repo.get_all_active()

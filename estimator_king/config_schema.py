@@ -69,19 +69,40 @@ class ProxyConfig:
 
 @dataclass
 class AppConfig:
-    """Complete application configuration."""
+    """Complete application configuration.
+
+    Central configuration object that aggregates YAML-based settings
+    (stores, crawler, proxy) and environment-based credentials (Dify, Discord).
+
+    Each entry point (crawler, bot) is responsible for validating only the
+    fields it actually requires.
+    """
 
     stores: List[Store] = field(default_factory=list)
     crawler: CrawlerPolicy = field(default_factory=CrawlerPolicy)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
 
-    # Environment variables
+    # Dify Knowledge Base (crawler)
     dify_api_key: Optional[str] = None
+    dify_base_url: Optional[str] = None
+    dify_dataset_id: Optional[str] = None
+
+    # Dify Workflow (bot)
+    dify_workflow_api_key: Optional[str] = None
+    dify_workflow_base_url: Optional[str] = None
+
+    # Discord (bot)
     discord_token: Optional[str] = None
-    database_path: str = "/data/estimator_king.db"
+
+    # Database
+    database_path: str = "./estimator_king.db"
 
     def validate(self):
-        """Validate entire configuration."""
+        """Validate structural configuration (stores, crawler, proxy).
+
+        This validates YAML-sourced settings only. Credential validation
+        is the responsibility of each entry point.
+        """
         # Validate stores
         if not self.stores:
             raise ValueError("Configuration must define at least one store")
@@ -94,12 +115,6 @@ class AppConfig:
 
         # Validate proxy config
         self.proxy.validate()
-
-        # Validate environment variables
-        if not self.dify_api_key:
-            raise ValueError("DIFY_API_KEY environment variable is required")
-        if not self.discord_token:
-            raise ValueError("DISCORD_TOKEN environment variable is required")
 
     @staticmethod
     def from_yaml(path: str) -> "AppConfig":
@@ -121,16 +136,20 @@ class AppConfig:
 def load_config(config_path: Optional[str] = None) -> AppConfig:
     """Load configuration from YAML file and environment variables.
 
+    Reads structural settings from YAML and credential/path settings from
+    environment variables. Does NOT validate credentials — each entry point
+    is responsible for validating the fields it requires.
+
     Args:
         config_path: Path to YAML config file. If None, uses CONFIG_PATH env var
                     or defaults to './stores_config.yaml'
 
     Returns:
-        AppConfig: Loaded and validated configuration
+        AppConfig: Loaded configuration (structurally validated)
 
     Raises:
         FileNotFoundError: If config file doesn't exist
-        ValueError: If configuration is invalid
+        ValueError: If structural configuration is invalid
     """
     if config_path is None:
         config_path = os.getenv("CONFIG_PATH", "./stores_config.yaml")
@@ -171,8 +190,12 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
 
     # Load environment variables
     dify_api_key = os.getenv("DIFY_API_KEY")
-    discord_token = os.getenv("DISCORD_TOKEN")
-    database_path = os.getenv("DATABASE_PATH", "/data/estimator_king.db")
+    dify_base_url = os.getenv("DIFY_BASE_URL")
+    dify_dataset_id = os.getenv("DIFY_DATASET_ID")
+    dify_workflow_api_key = os.getenv("DIFY_WORKFLOW_API_KEY")
+    dify_workflow_base_url = os.getenv("DIFY_WORKFLOW_BASE_URL")
+    discord_token = os.getenv("DISCORD_TOKEN", os.getenv("DISCORD_BOT_TOKEN"))
+    database_path = os.getenv("DATABASE_PATH", "./estimator_king.db")
 
     # Create config object
     config = AppConfig(
@@ -180,11 +203,15 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         crawler=crawler,
         proxy=proxy,
         dify_api_key=dify_api_key,
+        dify_base_url=dify_base_url,
+        dify_dataset_id=dify_dataset_id,
+        dify_workflow_api_key=dify_workflow_api_key,
+        dify_workflow_base_url=dify_workflow_base_url,
         discord_token=discord_token,
         database_path=database_path,
     )
 
-    # Validate configuration
+    # Validate structural configuration (not credentials)
     config.validate()
 
     return config
