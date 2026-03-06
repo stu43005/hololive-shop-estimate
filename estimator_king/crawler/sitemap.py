@@ -62,7 +62,7 @@ class SitemapEnumerator:
                 all_product_urls.update(urls)
 
             # Filter out /en/ paths and return sorted
-            filtered = [url for url in all_product_urls if "/en/" not in url]
+            filtered = [url for url in all_product_urls if "/products/" in url and "/en/" not in url]
             return sorted(filtered)
 
         except (ET.ParseError, HTTPClientError) as e:
