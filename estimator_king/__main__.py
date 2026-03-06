@@ -70,6 +70,13 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Dify dataset UUID (overrides DIFY_DATASET_ID env)",
     )
 
+    _ = parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set logging level (default: INFO)",
+    )
+
     return parser.parse_args(args)
 
 
@@ -180,15 +187,15 @@ def main() -> None:
     8. Output JSON results to stdout
     9. Exit with appropriate code (0=success, 1=error)
     """
-    # 1. Configure logging
+    # 1. Parse arguments
+    args = parse_args()
+
+    # 2. Configure logging
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, args.log_level),
         format="%(asctime)s - %(levelname)s - %(message)s",
         stream=sys.stderr,
     )
-
-    # 2. Parse arguments
-    args = parse_args()
 
     # 3. Load config from YAML + env
     try:

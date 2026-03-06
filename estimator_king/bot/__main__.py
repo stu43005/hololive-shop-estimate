@@ -63,6 +63,13 @@ def parse_args(args: Optional[list[str]] = None) -> argparse.Namespace:
         help="Guild ID for command sync (optional, omit for global sync)",
     )
 
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set logging level (default: INFO)",
+    )
+
     return parser.parse_args(args)
 
 
@@ -82,11 +89,11 @@ def create_bot() -> discord.Client:
     return discord.Client(intents=intents)
 
 
-async def main() -> None:
-    """Main async entrypoint: parse args, create bot, register commands, sync.
+async def main(args: argparse.Namespace) -> None:
+    """Main async entrypoint: create bot, register commands, sync.
 
     Workflow:
-    1. Parse command-line arguments and validate token
+    1. Load config and validate token
     2. Create Discord bot client with required intents
     3. Initialize and register commands via setup_commands()
     4. Register on_ready event for command synchronization
@@ -98,8 +105,6 @@ async def main() -> None:
     - With --guild-id: Fast sync to specific guild (instant, for dev)
     - Without --guild-id: Global sync (up to 1 hour propagation, for prod)
     """
-    # Parse arguments
-    args = parse_args()
 
     # Load AppConfig from YAML + env vars
     try:
@@ -166,15 +171,18 @@ async def main() -> None:
 
 def _main() -> None:
     """Entry point for python -m estimator_king.bot."""
+    # Parse args early for log-level configuration
+    args = parse_args()
+
     # Configure logging
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, args.log_level),
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
 
     # Run async main
     try:
-        asyncio.run(main())
+        asyncio.run(main(args))
     except KeyboardInterrupt:
         logging.info("Bot stopped by user")
 
