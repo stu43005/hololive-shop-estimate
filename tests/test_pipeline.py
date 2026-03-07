@@ -358,7 +358,7 @@ class TestProcessQueueSuccess:
         with _patch_imports(fetch_return=snap):
             result = process_queue(store, repo, http_client, dify_client)
 
-        assert result == {"fetched_ok": 1, "errors": 0}
+        assert result == {"fetched_ok": 1, "created": 0, "updated": 0, "skipped": 0, "errors": 0}
         repo.reset_consecutive_failures.assert_called_once_with("holo:42")
         repo.delete_queue_entry.assert_called_once_with(1)
 
@@ -379,7 +379,7 @@ class TestProcessQueueSuccess:
         with _patch_imports(fetch_side_effect=[snap_a, snap_b]):
             result = process_queue(store, repo, http_client, dify_client)
 
-        assert result == {"fetched_ok": 2, "errors": 0}
+        assert result == {"fetched_ok": 2, "created": 0, "updated": 0, "skipped": 0, "errors": 0}
         assert repo.delete_queue_entry.call_count == 2
 
     def test_empty_queue(self) -> None:
@@ -391,7 +391,7 @@ class TestProcessQueueSuccess:
 
         result = process_queue(store, repo, http_client, dify_client)
 
-        assert result == {"fetched_ok": 0, "errors": 0}
+        assert result == {"fetched_ok": 0, "created": 0, "updated": 0, "skipped": 0, "errors": 0}
 
 
 class TestProcessQueueCircuitBreaker:
@@ -415,16 +415,16 @@ class TestProcessQueueCircuitBreaker:
         with _patch_imports(fetch_side_effect=cb_err):
             result = process_queue(store, repo, http_client, dify_client)
 
-        assert result == {"fetched_ok": 0, "errors": 0}
+        assert result == {"fetched_ok": 0, "created": 0, "updated": 0, "skipped": 0, "errors": 0}
         repo.delete_queue_entry.assert_not_called()
         repo.increment_consecutive_failures.assert_not_called()
 
 
 class TestProcessQueueErrors:
-    """Non-circuit-breaker errors: delete entry, increment failures if possible."""
+    """Non-circuit-breaker errors: entry stays in queue, increment failures if possible."""
 
-    def test_fetch_error_deletes_entry_no_increment(self) -> None:
-        """Fetch fails before product_id is known → no increment_consecutive_failures."""
+    def test_fetch_error_keeps_entry_no_increment(self) -> None:
+        """Fetch fails before product_id is known → no increment, entry stays."""
         store = _make_store()
         repo = MagicMock()
         http_client = MagicMock()
@@ -438,12 +438,12 @@ class TestProcessQueueErrors:
         with _patch_imports(fetch_side_effect=RuntimeError("network fail")):
             result = process_queue(store, repo, http_client, dify_client)
 
-        assert result == {"fetched_ok": 0, "errors": 1}
-        repo.delete_queue_entry.assert_called_once_with(1)
+        assert result == {"fetched_ok": 0, "created": 0, "updated": 0, "skipped": 0, "errors": 1}
+        repo.delete_queue_entry.assert_not_called()
         repo.increment_consecutive_failures.assert_not_called()
 
-    def test_sync_error_increments_failures(self) -> None:
-        """Fetch OK but sync fails → external_key known → increment failures."""
+    def test_sync_error_keeps_entry_increments_failures(self) -> None:
+        """Fetch OK but sync fails → external_key known → increment failures, entry stays."""
         store = _make_store()
         repo = MagicMock()
         http_client = MagicMock()
@@ -461,9 +461,9 @@ class TestProcessQueueErrors:
         with _patch_imports(fetch_return=snap, sync_side_effect=sync_boom):
             result = process_queue(store, repo, http_client, dify_client)
 
-        assert result == {"fetched_ok": 0, "errors": 1}
+        assert result == {"fetched_ok": 0, "created": 0, "updated": 0, "skipped": 0, "errors": 1}
         repo.increment_consecutive_failures.assert_called_once_with("holo:42")
-        repo.delete_queue_entry.assert_called_once_with(1)
+        repo.delete_queue_entry.assert_not_called()
 
     def test_error_then_success(self) -> None:
         """First entry errors, second succeeds."""
@@ -491,8 +491,8 @@ class TestProcessQueueErrors:
         with _patch_imports(fetch_side_effect=fetch_alternating):
             result = process_queue(store, repo, http_client, dify_client)
 
-        assert result == {"fetched_ok": 1, "errors": 1}
-        assert repo.delete_queue_entry.call_args_list == [call(1), call(2)]
+        assert result == {"fetched_ok": 1, "created": 0, "updated": 0, "skipped": 0, "errors": 1}
+        repo.delete_queue_entry.assert_called_once_with(2)
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +513,8 @@ def _patch_imports(
     sync_side_effect=None,
 ):
     """Patch the lazy imports inside process_queue."""
+    from estimator_king.sync.engine import SyncResult
+
     with (
         patch(
             "estimator_king.crawler.shopify.fetch_product",
@@ -530,5 +532,7 @@ def _patch_imports(
             mock_sync.side_effect = sync_side_effect
         elif sync_return is not None:
             mock_sync.return_value = sync_return
+        else:
+            mock_sync.return_value = SyncResult()
 
         yield mock_fetch, mock_sync

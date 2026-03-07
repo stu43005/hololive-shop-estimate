@@ -1092,11 +1092,10 @@ def test_e2e_second_run_idempotent(test_config_path, test_db_path, test_reposito
             f"Content hashes changed between runs: {first_hashes} vs {second_hashes}"
         )
 
-        # e) Verify counters show 0 operations
-        # Note: process_queue() does not surface created/updated/skipped counters
+        # e) Verify counters reflect actual sync results
         assert result2["created"] == 0, f"Expected 0 creates, got {result2['created']}"
         assert result2["updated"] == 0, f"Expected 0 updates, got {result2['updated']}"
-        assert result2["skipped"] == 0, f"Expected 0 skips, got {result2['skipped']}"
+        assert result2["skipped"] == 2, f"Expected 2 skips, got {result2['skipped']}"
 
     finally:
         sys.argv = old_argv
@@ -1505,11 +1504,10 @@ def test_e2e_content_change_updates(test_config_path, test_db_path):
             "Product-b hash should remain unchanged (no content change)"
         )
 
-        # e) Verify result counters
-        # Note: process_queue() does not surface created/updated/skipped counters
+        # e) Verify result counters reflect actual sync results
         assert result2["created"] == 0, f"Expected 0 creates, got {result2['created']}"
-        assert result2["updated"] == 0, f"Expected 0 updates, got {result2['updated']}"
-        assert result2["skipped"] == 0, f"Expected 0 skips, got {result2['skipped']}"
+        assert result2["updated"] == 1, f"Expected 1 update, got {result2['updated']}"
+        assert result2["skipped"] == 1, f"Expected 1 skip, got {result2['skipped']}"
 
     finally:
         sys.argv = old_argv

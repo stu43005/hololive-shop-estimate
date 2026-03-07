@@ -112,7 +112,7 @@ def process_queue(
     remaining entries in the queue for the next run.
 
     Returns:
-        ``{"fetched_ok": N, "errors": N}``
+        ``{"fetched_ok": N, "created": N, "updated": N, "skipped": N, "errors": N}``
     """
     from estimator_king.crawler.http_client import CircuitBreakerOpenError
     from estimator_king.crawler.shopify import fetch_product
@@ -120,6 +120,9 @@ def process_queue(
 
     fetched_ok = 0
     errors = 0
+    created = 0
+    updated = 0
+    skipped = 0
 
     while (entry := repo.peek_next(store.id)) is not None:
         entry_id, _, product_url = entry
@@ -128,9 +131,12 @@ def process_queue(
             snapshot = fetch_product(product_url, http_client)
             product_id = snapshot.product_id
             external_key = f"{store.id}:{product_id}"
-            sync_products(
+            sync_result = sync_products(
                 [snapshot], store.id, store.base_url, repo, dify_client
             )
+            created += sync_result.created
+            updated += sync_result.updated
+            skipped += sync_result.skipped
             repo.reset_consecutive_failures(external_key)
             repo.delete_queue_entry(entry_id)
             fetched_ok += 1
@@ -148,7 +154,7 @@ def process_queue(
             )
             if external_key is not None:
                 repo.increment_consecutive_failures(external_key)
-            repo.delete_queue_entry(entry_id)
+            # Do NOT delete queue entry on error — leave it for resumability.
             errors += 1
 
-    return {"fetched_ok": fetched_ok, "errors": errors}
+    return {"fetched_ok": fetched_ok, "created": created, "updated": updated, "skipped": skipped, "errors": errors}

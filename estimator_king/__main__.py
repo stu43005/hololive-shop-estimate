@@ -151,9 +151,15 @@ def run_crawler(config: AppConfig, db_path: str, dify_client: DifyKBClient, forc
             # Phase 3: Fetch + Sync queue
             result = process_queue(store, repo, http_client, dify_client)
             counters["fetched_ok"] += result.get("fetched_ok", 0)
+            counters["created"] += result.get("created", 0)
+            counters["updated"] += result.get("updated", 0)
+            counters["skipped"] += result.get("skipped", 0)
             counters["errors"] += result.get("errors", 0)
 
         # Phase 4: Mark inactive — called ONCE after ALL stores
+        # TODO: mark_inactive_products() currently has no store-ID filter, so it evaluates
+        # products from ALL stores when determining inactivity. This is a known cross-store
+        # coupling issue. Fixing it requires per-store filtering in the repository — out of scope.
         try:
             inactive_result = mark_inactive_products(
                 repo,
