@@ -1,6 +1,7 @@
 dify-client
 requests
 beautifulsoup4
+markdownify
 lxml
 discord.py
 tenacity

@@ -11,6 +11,18 @@ from .html_extractor import extract_detail_sections as extract_html_details
 from .http_client import HTTPClient
 from .snapshot import ProductSnapshot, ProductVariant, compute_content_hash
 
+def _clean_body_html(html: str) -> str:
+    """Convert Shopify body_html to clean Markdown text, stripping HTML tags."""
+    if not html or not html.strip():
+        return ""
+    import markdownify as md
+    result = md.markdownify(
+        html,
+        strip=["img", "style", "script"],
+        heading_style="ATX",
+    )
+    return result.strip()
+
 
 class ShopifyProductError(Exception):
     pass
