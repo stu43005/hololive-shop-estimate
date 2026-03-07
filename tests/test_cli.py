@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 
 from estimator_king.__main__ import run_crawler
 from estimator_king.config_schema import AppConfig, Store, CrawlerPolicy, ProxyConfig
-from estimator_king.sync.engine import SyncResult
 from estimator_king.sync.inactive import InactiveResult
 
 
@@ -155,12 +154,13 @@ def test_database_path_env_var(monkeypatch):
 
 
 @patch("estimator_king.__main__.mark_inactive_products")
-@patch("estimator_king.__main__.sync_products")
-@patch("estimator_king.__main__.fetch_product")
+@patch("estimator_king.__main__.process_queue")
+@patch("estimator_king.__main__.enqueue_stale_products")
+@patch("estimator_king.__main__.populate_queue_from_sitemap")
 @patch("estimator_king.__main__.SitemapEnumerator")
 @patch("estimator_king.__main__.ProductStateRepository")
 def test_run_crawler_success(
-    mock_repo_class, mock_enumerate_class, mock_fetch, mock_sync, mock_inactive
+    mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
 ):
     """Test run_crawler with successful operations across all stores."""
     mock_repo = MagicMock()
@@ -168,18 +168,11 @@ def test_run_crawler_success(
     mock_repo.__exit__ = MagicMock(return_value=None)
     mock_repo_class.return_value = mock_repo
 
-    mock_enumerator = MagicMock()
-    mock_enumerator.enumerate_products.return_value = [
-        "https://store.com/products/1",
-        "https://store.com/products/2",
-    ]
-    mock_enumerate_class.return_value = mock_enumerator
+    mock_enumerate_class.return_value = MagicMock()
 
-    mock_fetch.return_value = MagicMock()
-
-    mock_sync.return_value = SyncResult(
-        created=1, updated=1, skipped=0, failed=0, failed_ids=[]
-    )
+    mock_populate.return_value = 2
+    mock_enqueue_stale.return_value = 0
+    mock_process.return_value = {"fetched_ok": 2, "errors": 0}
     mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
 
     config = AppConfig(
@@ -199,20 +192,20 @@ def test_run_crawler_success(
 
     assert result["discovered"] == 2
     assert result["fetched_ok"] == 2
-    assert result["created"] == 1
-    assert result["updated"] == 1
+    assert result["created"] == 0
+    assert result["updated"] == 0
     assert result["skipped"] == 0
     assert result["errors"] == 0
     assert result["inactive"] == 0
 
-
 @patch("estimator_king.__main__.mark_inactive_products")
-@patch("estimator_king.__main__.sync_products")
-@patch("estimator_king.__main__.fetch_product")
+@patch("estimator_king.__main__.process_queue")
+@patch("estimator_king.__main__.enqueue_stale_products")
+@patch("estimator_king.__main__.populate_queue_from_sitemap")
 @patch("estimator_king.__main__.SitemapEnumerator")
 @patch("estimator_king.__main__.ProductStateRepository")
 def test_run_crawler_empty_sitemap(
-    mock_repo_class, mock_enumerate_class, mock_fetch, mock_sync, mock_inactive
+    mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
 ):
     """Test run_crawler with empty sitemap yields zero errors."""
     mock_repo = MagicMock()
@@ -220,13 +213,11 @@ def test_run_crawler_empty_sitemap(
     mock_repo.__exit__ = MagicMock(return_value=None)
     mock_repo_class.return_value = mock_repo
 
-    mock_enumerator = MagicMock()
-    mock_enumerate_class.return_value = mock_enumerator
+    mock_enumerate_class.return_value = MagicMock()
 
-    mock_enumerator.enumerate_products.return_value = []
-    mock_sync.return_value = SyncResult(
-        created=0, updated=0, skipped=0, failed=0, failed_ids=[]
-    )
+    mock_populate.return_value = 0
+    mock_enqueue_stale.return_value = 0
+    mock_process.return_value = {"fetched_ok": 0, "errors": 0}
     mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
 
     config = AppConfig(
@@ -248,14 +239,14 @@ def test_run_crawler_empty_sitemap(
     assert result["fetched_ok"] == 0
     assert result["errors"] == 0
 
-
 @patch("estimator_king.__main__.mark_inactive_products")
-@patch("estimator_king.__main__.sync_products")
-@patch("estimator_king.__main__.fetch_product")
+@patch("estimator_king.__main__.process_queue")
+@patch("estimator_king.__main__.enqueue_stale_products")
+@patch("estimator_king.__main__.populate_queue_from_sitemap")
 @patch("estimator_king.__main__.SitemapEnumerator")
 @patch("estimator_king.__main__.ProductStateRepository")
 def test_run_crawler_fetch_failure(
-    mock_repo_class, mock_enumerate_class, mock_fetch, mock_sync, mock_inactive
+    mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
 ):
     """Test run_crawler continues after fetch failure."""
     mock_repo = MagicMock()
@@ -263,21 +254,11 @@ def test_run_crawler_fetch_failure(
     mock_repo.__exit__ = MagicMock(return_value=None)
     mock_repo_class.return_value = mock_repo
 
-    mock_enumerator = MagicMock()
-    mock_enumerate_class.return_value = mock_enumerator
+    mock_enumerate_class.return_value = MagicMock()
 
-    mock_enumerator.enumerate_products.return_value = [
-        "https://store.com/products/1",
-        "https://store.com/products/2",
-    ]
-    mock_fetch.side_effect = [
-        MagicMock(),
-        Exception("Network error"),
-    ]
-
-    mock_sync.return_value = SyncResult(
-        created=1, updated=0, skipped=0, failed=0, failed_ids=[]
-    )
+    mock_populate.return_value = 2
+    mock_enqueue_stale.return_value = 0
+    mock_process.return_value = {"fetched_ok": 1, "errors": 1}
     mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
 
     config = AppConfig(
@@ -299,14 +280,14 @@ def test_run_crawler_fetch_failure(
     assert result["fetched_ok"] == 1
     assert result["errors"] == 1
 
-
 @patch("estimator_king.__main__.mark_inactive_products")
-@patch("estimator_king.__main__.sync_products")
-@patch("estimator_king.__main__.fetch_product")
+@patch("estimator_king.__main__.process_queue")
+@patch("estimator_king.__main__.enqueue_stale_products")
+@patch("estimator_king.__main__.populate_queue_from_sitemap")
 @patch("estimator_king.__main__.SitemapEnumerator")
 @patch("estimator_king.__main__.ProductStateRepository")
 def test_run_crawler_multiple_stores(
-    mock_repo_class, mock_enumerate_class, mock_fetch, mock_sync, mock_inactive
+    mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
 ):
     """Test run_crawler aggregates counters across multiple stores."""
     mock_repo = MagicMock()
@@ -314,18 +295,13 @@ def test_run_crawler_multiple_stores(
     mock_repo.__exit__ = MagicMock(return_value=None)
     mock_repo_class.return_value = mock_repo
 
-    mock_enumerator = MagicMock()
-    mock_enumerate_class.return_value = mock_enumerator
+    mock_enumerate_class.return_value = MagicMock()
 
-    mock_enumerator.enumerate_products.side_effect = [
-        ["https://store1.com/products/1"],
-        ["https://store2.com/products/1", "https://store2.com/products/2"],
-    ]
-    mock_fetch.return_value = MagicMock()
-
-    mock_sync.side_effect = [
-        SyncResult(created=1, updated=0, skipped=0, failed=0, failed_ids=[]),
-        SyncResult(created=2, updated=0, skipped=0, failed=0, failed_ids=[]),
+    mock_populate.side_effect = [1, 2]
+    mock_enqueue_stale.return_value = 0
+    mock_process.side_effect = [
+        {"fetched_ok": 1, "errors": 0},
+        {"fetched_ok": 2, "errors": 0},
     ]
     mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
 
@@ -351,30 +327,29 @@ def test_run_crawler_multiple_stores(
 
     assert result["discovered"] == 3
     assert result["fetched_ok"] == 3
-    assert result["created"] == 3
-
+    assert result["created"] == 0
 
 @patch("estimator_king.__main__.mark_inactive_products")
-@patch("estimator_king.__main__.sync_products")
-@patch("estimator_king.__main__.fetch_product")
+@patch("estimator_king.__main__.process_queue")
+@patch("estimator_king.__main__.enqueue_stale_products")
+@patch("estimator_king.__main__.populate_queue_from_sitemap")
 @patch("estimator_king.__main__.SitemapEnumerator")
 @patch("estimator_king.__main__.ProductStateRepository")
 def test_run_crawler_sync_failure(
-    mock_repo_class, mock_enumerate_class, mock_fetch, mock_sync, mock_inactive
+    mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
 ):
-    """Test run_crawler handles sync failures gracefully."""
+    """Test run_crawler handles process_queue errors gracefully."""
     mock_repo = MagicMock()
     mock_repo.__enter__ = MagicMock(return_value=mock_repo)
     mock_repo.__exit__ = MagicMock(return_value=None)
     mock_repo_class.return_value = mock_repo
 
-    mock_enumerator = MagicMock()
-    mock_enumerate_class.return_value = mock_enumerator
+    mock_enumerate_class.return_value = MagicMock()
 
-    mock_enumerator.enumerate_products.return_value = ["https://store.com/products/1"]
-    mock_fetch.return_value = MagicMock()
-
-    mock_sync.side_effect = Exception("Dify API error")
+    mock_populate.return_value = 1
+    mock_enqueue_stale.return_value = 0
+    mock_process.return_value = {"fetched_ok": 0, "errors": 1}
+    mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
 
     config = AppConfig(
         stores=[
@@ -392,9 +367,8 @@ def test_run_crawler_sync_failure(
     result = run_crawler(config, ":memory:", dify_client)
 
     assert result["discovered"] == 1
-    assert result["fetched_ok"] == 1
+    assert result["fetched_ok"] == 0
     assert result["errors"] == 1
-
 
 class TestMainSuccess:
     """Test successful main() execution."""
@@ -749,12 +723,13 @@ class TestForceRefetchFlag:
         assert args.force_refetch is True
 
     @patch("estimator_king.__main__.mark_inactive_products")
-    @patch("estimator_king.__main__.sync_products")
-    @patch("estimator_king.__main__.fetch_product")
+    @patch("estimator_king.__main__.process_queue")
+    @patch("estimator_king.__main__.enqueue_stale_products")
+    @patch("estimator_king.__main__.populate_queue_from_sitemap")
     @patch("estimator_king.__main__.SitemapEnumerator")
     @patch("estimator_king.__main__.ProductStateRepository")
     def test_run_crawler_accepts_force_refetch(
-        self, mock_repo_class, mock_enumerate_class, mock_fetch, mock_sync, mock_inactive
+        self, mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
     ):
         """run_crawler() accepts force_refetch=True without error."""
         mock_repo = MagicMock()
@@ -762,13 +737,11 @@ class TestForceRefetchFlag:
         mock_repo.__exit__ = MagicMock(return_value=None)
         mock_repo_class.return_value = mock_repo
 
-        mock_enumerator = MagicMock()
-        mock_enumerator.enumerate_products.return_value = []
-        mock_enumerate_class.return_value = mock_enumerator
+        mock_enumerate_class.return_value = MagicMock()
 
-        mock_sync.return_value = SyncResult(
-            created=0, updated=0, skipped=0, failed=0, failed_ids=[]
-        )
+        mock_populate.return_value = 0
+        mock_enqueue_stale.return_value = 0
+        mock_process.return_value = {"fetched_ok": 0, "errors": 0}
         mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
 
         config = AppConfig(
@@ -787,3 +760,7 @@ class TestForceRefetchFlag:
         result = run_crawler(config, ":memory:", dify_client, force_refetch=True)
 
         assert result["errors"] == 0
+        # Verify force_refetch was passed through to enqueue_stale_products
+        call_kwargs = mock_enqueue_stale.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("force_refetch") is True

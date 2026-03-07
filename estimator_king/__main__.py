@@ -8,11 +8,14 @@ from typing import Optional, Sequence
 
 from estimator_king.config_schema import AppConfig
 from estimator_king.crawler.http_client import HTTPClient
-from estimator_king.crawler.shopify import fetch_product
+from estimator_king.crawler.pipeline import (
+    populate_queue_from_sitemap,
+    enqueue_stale_products,
+    process_queue,
+)
 from estimator_king.crawler.sitemap import SitemapEnumerator
 from estimator_king.database.repository import ProductStateRepository
 from estimator_king.sync.dify_client import DifyKBClient
-from estimator_king.sync.engine import sync_products
 from estimator_king.sync.inactive import mark_inactive_products
 
 
@@ -132,55 +135,36 @@ def run_crawler(config: AppConfig, db_path: str, dify_client: DifyKBClient, forc
         for store in config.stores:
             logging.info(f"Processing store: {store.id} ({store.base_url})")
 
+            # Phase 1: Populate queue from sitemap
             try:
-                product_urls = enumerator.enumerate_products(store.base_url)
-                counters["discovered"] += len(product_urls)
-                logging.info(f"Discovered {len(product_urls)} products from {store.id}")
+                discovered = populate_queue_from_sitemap(store, repo, enumerator)
+                counters["discovered"] += discovered
+                logging.info(f"Discovered {discovered} new URLs for {store.id}")
             except Exception as e:
-                logging.error(f"Failed to enumerate sitemap for {store.id}: {e}")
+                logging.error(f"Failed to populate queue for {store.id}: {e}")
                 counters["errors"] += 1
                 continue
 
-            snapshots = []
-            for url in product_urls:
-                try:
-                    snapshot = fetch_product(url, http_client)
-                    snapshots.append(snapshot)
-                    counters["fetched_ok"] += 1
-                except Exception as e:
-                    logging.error(f"Failed to fetch {url}: {e}")
-                    counters["errors"] += 1
+            # Phase 2: Enqueue stale products
+            enqueue_stale_products(store, repo, force_refetch=force_refetch)
 
-            try:
-                sync_result = sync_products(snapshots, store.id, store.base_url, repo, dify_client)
-                counters["created"] += sync_result.created
-                counters["updated"] += sync_result.updated
-                counters["skipped"] += sync_result.skipped
-                counters["errors"] += sync_result.failed
-                logging.info(
-                    f"Sync completed for {store.id}: "
-                    f"+{sync_result.created} created, "
-                    f"~{sync_result.updated} updated, "
-                    f"={sync_result.skipped} skipped"
-                )
-            except Exception as e:
-                logging.error(f"Failed to sync {store.id}: {e}")
-                counters["errors"] += 1
+            # Phase 3: Fetch + Sync queue
+            result = process_queue(store, repo, http_client, dify_client)
+            counters["fetched_ok"] += result.get("fetched_ok", 0)
+            counters["errors"] += result.get("errors", 0)
 
-            try:
-                inactive_result = mark_inactive_products(
-                    repo,
-                    failure_threshold=config.crawler.inactive_failure_threshold,
-                    miss_threshold=config.crawler.inactive_sitemap_miss_threshold,
-                )
-                counters["inactive"] += inactive_result.marked_inactive
-                logging.info(
-                    f"Inactive check for {store.id}: "
-                    f"{inactive_result.marked_inactive} marked inactive"
-                )
-            except Exception as e:
-                logging.error(f"Failed inactive check for {store.id}: {e}")
-                counters["errors"] += 1
+        # Phase 4: Mark inactive — called ONCE after ALL stores
+        try:
+            inactive_result = mark_inactive_products(
+                repo,
+                failure_threshold=config.crawler.inactive_failure_threshold,
+                miss_threshold=config.crawler.inactive_sitemap_miss_threshold,
+            )
+            counters["inactive"] += inactive_result.marked_inactive
+            logging.info(f"Inactive check: {inactive_result.marked_inactive} marked inactive")
+        except Exception as e:
+            logging.error(f"Failed inactive check: {e}")
+            counters["errors"] += 1
 
     return counters
 
