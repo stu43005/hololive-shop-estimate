@@ -170,19 +170,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
     with open(config_path, "r") as f:
         yaml_data = yaml.safe_load(f) or {}
 
-    # Parse stores
-    stores_data = yaml_data.get("stores", [])
-    stores = [
-        Store(
-            id=s["id"],
-            base_url=s["base_url"],
-            sitemap_url=s["sitemap_url"],
-            fetch_interval_hours=s.get("fetch_interval_hours", 24.0),
-        )
-        for s in stores_data
-    ]
-
-    # Parse crawler policy
+    # Parse crawler policy (before stores, so default_fetch_interval_hours is available)
     crawler_data = yaml_data.get("crawler", {})
     crawler = CrawlerPolicy(
         rate_limit_rps=crawler_data.get("rate_limit_rps", 1.5),
@@ -195,6 +183,18 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         inactive_failure_threshold=crawler_data.get("inactive_failure_threshold", 3),
         inactive_sitemap_miss_threshold=crawler_data.get("inactive_sitemap_miss_threshold", 4),
     )
+
+    # Parse stores
+    stores_data = yaml_data.get("stores", [])
+    stores = [
+        Store(
+            id=s["id"],
+            base_url=s["base_url"],
+            sitemap_url=s["sitemap_url"],
+            fetch_interval_hours=s.get("fetch_interval_hours", crawler.default_fetch_interval_hours),
+        )
+        for s in stores_data
+    ]
 
     # Parse proxy config
     proxy_data = yaml_data.get("proxy", {})
