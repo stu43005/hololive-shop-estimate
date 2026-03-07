@@ -57,6 +57,8 @@ def test_fetch_product_success_hololive_extracts_details_and_hash():
     assert snapshot.product_id == 1000000001
     assert snapshot.title == "Hololive Sample Product"
     assert "これは説明" in snapshot.description
+    assert "<p>" not in snapshot.description, f"HTML tag found: {snapshot.description!r}"
+    assert "<br>" not in snapshot.description, f"HTML tag found: {snapshot.description!r}"
     assert len(snapshot.variants) == 2
     assert "セット詳細" in snapshot.html_details
     assert "グッズ詳細" in snapshot.html_details

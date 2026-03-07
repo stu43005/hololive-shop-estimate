@@ -79,6 +79,7 @@ def _build_snapshot_from_product_json(
         description = ""
     if not isinstance(description, str):
         raise ShopifyJSONError("shopify product.body_html must be str")
+    description = _clean_body_html(description)
 
     variants_obj = product.get("variants")
     variants_raw: list[object]
