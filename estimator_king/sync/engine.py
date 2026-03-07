@@ -185,6 +185,7 @@ def _poll_indexing_status(
 def sync_products(
     snapshots: Iterable[ProductSnapshot],
     store_id: str,
+    base_url: str,
     repository: ProductStateRepository,
     dify_client: DifyKBClient,
 ) -> SyncResult:
@@ -193,7 +194,7 @@ def sync_products(
     for snapshot in snapshots:
         now = datetime.now(tz=timezone.utc)
         external_key = f"{store_id}:{snapshot.product_id}"
-        product_url = f"https://shop.hololivepro.com/products/{snapshot.product_id}"
+        product_url = f"{base_url}/products/{snapshot.product_id}"
         content_hash = compute_content_hash(snapshot)
 
         state = repository.get_by_external_key(external_key)

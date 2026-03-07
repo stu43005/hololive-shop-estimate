@@ -152,7 +152,7 @@ def run_crawler(config: AppConfig, db_path: str, dify_client: DifyKBClient, forc
                     counters["errors"] += 1
 
             try:
-                sync_result = sync_products(snapshots, store.id, repo, dify_client)
+                sync_result = sync_products(snapshots, store.id, store.base_url, repo, dify_client)
                 counters["created"] += sync_result.created
                 counters["updated"] += sync_result.updated
                 counters["skipped"] += sync_result.skipped

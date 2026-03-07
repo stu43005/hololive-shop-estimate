@@ -341,7 +341,7 @@ class TestSyncProducts:
         with patch(
             "estimator_king.sync.engine._poll_indexing_status", return_value=True
         ):
-            result = sync_products([s1, s2], "hololive", state_repo, client)
+            result = sync_products([s1, s2], "hololive", "https://shop.hololivepro.com", state_repo, client)
 
         assert result == SyncResult(
             created=2, updated=0, skipped=0, failed=0, failed_ids=[]
@@ -358,8 +358,8 @@ class TestSyncProducts:
         with patch(
             "estimator_king.sync.engine._poll_indexing_status", return_value=True
         ):
-            r1 = sync_products([s1], "hololive", state_repo, client)
-            r2 = sync_products([s1_updated], "hololive", state_repo, client)
+            r1 = sync_products([s1], "hololive", "https://shop.hololivepro.com", state_repo, client)
+            r2 = sync_products([s1_updated], "hololive", "https://shop.hololivepro.com", state_repo, client)
 
         assert r1.created == 1
         assert r2.updated == 1
@@ -372,9 +372,9 @@ class TestSyncProducts:
         with patch(
             "estimator_king.sync.engine._poll_indexing_status", return_value=True
         ):
-            _ = sync_products([s1], "hololive", state_repo, client)
+            _ = sync_products([s1], "hololive", "https://shop.hololivepro.com", state_repo, client)
             before = state_repo.get_by_external_key("hololive:3001")
-            r2 = sync_products([s1], "hololive", state_repo, client)
+            r2 = sync_products([s1], "hololive", "https://shop.hololivepro.com", state_repo, client)
             after = state_repo.get_by_external_key("hololive:3001")
 
         assert r2.skipped == 1
@@ -392,8 +392,8 @@ class TestSyncProducts:
         with patch(
             "estimator_king.sync.engine._poll_indexing_status", return_value=True
         ):
-            r1 = sync_products([s1, s2], "hololive", state_repo, client)
-            r2 = sync_products([s1, s2], "hololive", state_repo, client)
+            r1 = sync_products([s1, s2], "hololive", "https://shop.hololivepro.com", state_repo, client)
+            r2 = sync_products([s1, s2], "hololive", "https://shop.hololivepro.com", state_repo, client)
 
         assert r1.created == 2
         assert r2.created == 0
@@ -408,8 +408,8 @@ class TestSyncProducts:
         with patch(
             "estimator_king.sync.engine._poll_indexing_status", return_value=True
         ):
-            _ = sync_products([s1, s2], "hololive", state_repo, client)
-            _ = sync_products([s1], "hololive", state_repo, client)
+            _ = sync_products([s1, s2], "hololive", "https://shop.hololivepro.com", state_repo, client)
+            _ = sync_products([s1], "hololive", "https://shop.hololivepro.com", state_repo, client)
 
         assert (
             not hasattr(client, "delete_document")
@@ -429,7 +429,7 @@ class TestSyncProducts:
         with patch(
             "estimator_king.sync.engine._poll_indexing_status", return_value=True
         ):
-            r = sync_products([s1, s2], "hololive", state_repo, client)
+            r = sync_products([s1, s2], "hololive", "https://shop.hololivepro.com", state_repo, client)
 
         assert r.failed == 1
         assert r.created == 1
@@ -442,7 +442,7 @@ class TestSyncProducts:
         with patch(
             "estimator_king.sync.engine._poll_indexing_status", return_value=False
         ):
-            r = sync_products([s1], "hololive", state_repo, client)
+            r = sync_products([s1], "hololive", "https://shop.hololivepro.com", state_repo, client)
 
         assert r.failed == 1
         assert r.created == 0
@@ -459,7 +459,7 @@ class TestSyncProducts:
             "estimator_king.sync.engine._poll_indexing_status", return_value=True
         ):
             _ = sync_products(
-                [s_unchanged, s_updated_old], "hololive", state_repo, client
+                [s_unchanged, s_updated_old], "hololive", "https://shop.hololivepro.com", state_repo, client
             )
 
         client.create_document_by_text.side_effect = [
@@ -473,6 +473,7 @@ class TestSyncProducts:
             r = sync_products(
                 [s_new, s_unchanged, s_updated_new, s_fail],
                 "hololive",
+                "https://shop.hololivepro.com",
                 state_repo,
                 client,
             )
