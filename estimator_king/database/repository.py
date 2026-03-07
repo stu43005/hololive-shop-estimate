@@ -45,7 +45,7 @@ class ProductState:
 
 
 class ProductStateRepository:
-    _SCHEMA_VERSION: int = 1
+    _SCHEMA_VERSION: int = 2
 
     def __init__(self, db_path: str, *, timeout_seconds: float = 30.0):
         self._db_path: str = db_path
@@ -234,11 +234,36 @@ class ProductStateRepository:
         if from_version == 0 and to_version >= 1:
             _ = conn.execute("UPDATE schema_version SET version = 1 WHERE id = 1")
             from_version = 1
+        if from_version == 1 and to_version >= 2:
+            with conn:
+                # ALTER TABLE ... ADD COLUMN is not idempotent in SQLite;
+                # skip if column already exists (fresh DB from schema.sql v2).
+                cols = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(products)")
+                }
+                if "product_url" not in cols:
+                    _ = conn.execute(
+                        "ALTER TABLE products ADD COLUMN product_url TEXT"
+                    )
+                _ = conn.execute(
+                    "CREATE TABLE IF NOT EXISTS crawl_queue ("
+                    "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "  store_id    TEXT    NOT NULL,"
+                    "  product_url TEXT    NOT NULL,"
+                    "  created_at  TEXT    NOT NULL"
+                    "    DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),"
+                    "  UNIQUE(store_id, product_url)"
+                    ")"
+                )
+                _ = conn.execute(
+                    "UPDATE schema_version SET version = 2 WHERE id = 1"
+                )
+            from_version = 2
         if from_version != to_version:
             raise RuntimeError(
                 f"Unsupported migration path {from_version} -> {to_version}"
             )
-
 
 def _read_schema_sql() -> str:
     here = Path(__file__).resolve().parent

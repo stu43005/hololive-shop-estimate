@@ -222,7 +222,7 @@ def test_state_db_schema_version_initialized(repo: ProductStateRepository) -> No
     v = repo.connection.execute(
         "SELECT version FROM schema_version WHERE id = 1"
     ).fetchone()[0]
-    assert int(v) == 1
+    assert int(v) == 2
 
 
 def test_state_db_schema_newer_than_supported_is_rejected() -> None:

@@ -40,12 +40,22 @@ CREATE TABLE IF NOT EXISTS products (
     -- Soft deactivation
     inactive INTEGER NOT NULL DEFAULT 0,    -- 0/1 boolean
     inactive_reason TEXT,                  -- "fetch_failures" | "sitemap_missing" | etc.
-    inactive_since TEXT                    -- When marked inactive (UTC ISO8601)
+    inactive_since TEXT,                   -- When marked inactive (UTC ISO8601)
+    product_url TEXT                        -- Original product page URL (nullable)
 );
 
 -- Indexes.
 CREATE INDEX IF NOT EXISTS idx_products_dify_document_id ON products(dify_document_id);
 CREATE INDEX IF NOT EXISTS idx_products_inactive ON products(inactive);
 CREATE INDEX IF NOT EXISTS idx_products_last_seen_in_sitemap_at ON products(last_seen_in_sitemap_at);
+
+-- Crawl queue: URLs discovered in sitemap, pending fetch.
+CREATE TABLE IF NOT EXISTS crawl_queue (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id    TEXT    NOT NULL,
+    product_url TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    UNIQUE(store_id, product_url)
+);
 
 COMMIT;
