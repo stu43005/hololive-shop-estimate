@@ -167,3 +167,58 @@ def test_mark_inactive_idempotent(repo: ProductStateRepository) -> None:
     assert result2.marked_inactive == 0
     assert len(result2.failure_reasons) == 0
     assert result2.already_inactive == 1
+
+
+def test_mark_inactive_custom_failure_threshold(repo: ProductStateRepository) -> None:
+    """Custom failure_threshold=5 means 3 failures is NOT enough."""
+    repo.upsert(_state("store:low", consecutive_failures=3))
+    repo.upsert(_state("store:high", consecutive_failures=5))
+
+    result = mark_inactive_products(repo, failure_threshold=5)
+
+    assert result.marked_inactive == 1
+    assert "store:high" in result.failure_reasons
+    assert "store:low" not in result.failure_reasons
+
+    state_low = repo.get_by_external_key("store:low")
+    assert state_low is not None
+    assert state_low.inactive is False
+
+    state_high = repo.get_by_external_key("store:high")
+    assert state_high is not None
+    assert state_high.inactive is True
+
+
+def test_mark_inactive_custom_miss_threshold(repo: ProductStateRepository) -> None:
+    """Custom miss_threshold=2 means 2 misses triggers inactive."""
+    repo.upsert(_state("store:miss2", consecutive_sitemap_misses=2))
+    repo.upsert(_state("store:miss3", consecutive_sitemap_misses=3))
+
+    result = mark_inactive_products(repo, miss_threshold=2)
+
+    assert result.marked_inactive == 2
+    assert "store:miss2" in result.sitemap_reasons
+    assert "store:miss3" in result.sitemap_reasons
+
+
+def test_mark_inactive_custom_both_thresholds(repo: ProductStateRepository) -> None:
+    """Both thresholds customized; failure takes precedence."""
+    repo.upsert(
+        _state("store:both", consecutive_failures=2, consecutive_sitemap_misses=2)
+    )
+    repo.upsert(_state("store:fail_only", consecutive_failures=2))
+    repo.upsert(_state("store:miss_only", consecutive_sitemap_misses=2))
+    repo.upsert(_state("store:below", consecutive_failures=1, consecutive_sitemap_misses=1))
+
+    result = mark_inactive_products(repo, failure_threshold=2, miss_threshold=2)
+
+    assert result.marked_inactive == 3
+    assert "store:both" in result.failure_reasons
+    assert "store:fail_only" in result.failure_reasons
+    assert "store:miss_only" in result.sitemap_reasons
+    assert "store:below" not in result.failure_reasons
+    assert "store:below" not in result.sitemap_reasons
+
+    state_below = repo.get_by_external_key("store:below")
+    assert state_below is not None
+    assert state_below.inactive is False

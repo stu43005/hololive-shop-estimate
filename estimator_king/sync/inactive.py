@@ -4,7 +4,7 @@ This module handles marking products as inactive when they exceed defined thresh
 for fetch failures or sitemap misses. This prevents auto-deletion while allowing
 operational visibility of problematic products.
 
-Thresholds:
+Thresholds (configurable via parameters, defaults shown):
   - 3 consecutive fetch failures → inactive_reason = "fetch_failure_threshold_exceeded"
   - 4 consecutive sitemap misses → inactive_reason = "sitemap_miss_threshold_exceeded"
 """
@@ -27,7 +27,11 @@ class InactiveResult:
     sitemap_reasons: list[str] = field(default_factory=list)
 
 
-def mark_inactive_products(repository: ProductStateRepository) -> InactiveResult:
+def mark_inactive_products(
+    repository: ProductStateRepository,
+    failure_threshold: int = 3,
+    miss_threshold: int = 4,
+) -> InactiveResult:
     """Mark products as inactive when thresholds exceeded.
 
     Query all active products and check if they exceed failure or sitemap miss thresholds.
@@ -36,6 +40,8 @@ def mark_inactive_products(repository: ProductStateRepository) -> InactiveResult
 
     Args:
         repository: ProductStateRepository for querying and updating product state
+        failure_threshold: Number of consecutive fetch failures before marking inactive
+        miss_threshold: Number of consecutive sitemap misses before marking inactive
 
     Returns:
         InactiveResult with counts of marked/already-inactive products and reasons
@@ -45,10 +51,10 @@ def mark_inactive_products(repository: ProductStateRepository) -> InactiveResult
     active_products = repository.get_all_active()
 
     for product in active_products:
-        if product.consecutive_failures >= 3:
+        if product.consecutive_failures >= failure_threshold:
             reason = "fetch_failure_threshold_exceeded"
             result.failure_reasons.append(product.external_key)
-        elif product.consecutive_sitemap_misses >= 4:
+        elif product.consecutive_sitemap_misses >= miss_threshold:
             reason = "sitemap_miss_threshold_exceeded"
             result.sitemap_reasons.append(product.external_key)
         else:

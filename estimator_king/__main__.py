@@ -168,7 +168,11 @@ def run_crawler(config: AppConfig, db_path: str, dify_client: DifyKBClient, forc
                 counters["errors"] += 1
 
             try:
-                inactive_result = mark_inactive_products(repo)
+                inactive_result = mark_inactive_products(
+                    repo,
+                    failure_threshold=config.crawler.inactive_failure_threshold,
+                    miss_threshold=config.crawler.inactive_sitemap_miss_threshold,
+                )
                 counters["inactive"] += inactive_result.marked_inactive
                 logging.info(
                     f"Inactive check for {store.id}: "
