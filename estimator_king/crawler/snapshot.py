@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-NORMALIZER_VERSION = 1
+NORMALIZER_VERSION = 2
 
 
 @dataclass
