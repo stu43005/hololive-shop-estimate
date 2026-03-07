@@ -81,12 +81,11 @@ def _format_product_document(
     if snapshot.variants:
         text_parts.append("## Variants")
         text_parts.append("")
-        text_parts.append("| Variant ID | Title | Price | SKU |")
-        text_parts.append("|------------|-------|-------|-----|")
+        text_parts.append("| Title | Price |")
+        text_parts.append("|-------|-------|")
 
         for variant in snapshot.variants:
-            sku_cell = variant.sku if variant.sku else ""
-            row = f"| {variant.variant_id} | {variant.title} | {variant.price} | {sku_cell} |"
+            row = f"| {variant.title} | {variant.price} |"
             text_parts.append(row)
 
         text_parts.append("")
