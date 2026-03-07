@@ -23,6 +23,7 @@ class ProductState:
     inactive: bool = False
     inactive_reason: str | None = None
     inactive_since: datetime | None = None
+    product_url: str | None = None
 
     def with_updated_timestamps(
         self, *, created_at: datetime, updated_at: datetime
@@ -41,6 +42,7 @@ class ProductState:
             inactive=self.inactive,
             inactive_reason=self.inactive_reason,
             inactive_since=self.inactive_since,
+            product_url=self.product_url,
         )
 
 
@@ -131,8 +133,9 @@ class ProductStateRepository:
                 consecutive_sitemap_misses,
                 inactive,
                 inactive_reason,
-                inactive_since
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                inactive_since,
+                product_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(external_key) DO UPDATE SET
                 dify_document_id=COALESCE(excluded.dify_document_id, products.dify_document_id),
                 content_hash=excluded.content_hash,
@@ -144,7 +147,8 @@ class ProductStateRepository:
                 consecutive_sitemap_misses=excluded.consecutive_sitemap_misses,
                 inactive=excluded.inactive,
                 inactive_reason=excluded.inactive_reason,
-                inactive_since=excluded.inactive_since
+                inactive_since=excluded.inactive_since,
+                product_url=COALESCE(excluded.product_url, products.product_url)
             """,
             (
                 state.external_key,
@@ -160,6 +164,7 @@ class ProductStateRepository:
                 1 if state.inactive else 0,
                 state.inactive_reason,
                 _dt_to_iso(state.inactive_since),
+                state.product_url,
             ),
         )
         refreshed = self.get_by_external_key(state.external_key)
@@ -263,6 +268,86 @@ class ProductStateRepository:
         else:
             cur = self.connection.execute("DELETE FROM crawl_queue")
         return cur.rowcount
+
+    def get_by_product_url(
+        self, store_id: str, product_url: str
+    ) -> ProductState | None:
+        row = self.connection.execute(
+            "SELECT * FROM products WHERE external_key LIKE ? AND product_url = ?",
+            (f"{store_id}:%", product_url),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_state(cast(sqlite3.Row, row))
+
+    def get_products_needing_fetch(
+        self, store_id: str, interval_hours: float
+    ) -> list[ProductState]:
+        if interval_hours <= 0:
+            raise ValueError("interval_hours must be > 0")
+        interval_param = f"-{interval_hours} hours"
+        rows = self.connection.execute(
+            """
+            SELECT * FROM products
+            WHERE external_key LIKE ?
+              AND inactive = 0
+              AND (last_fetch_success_at IS NULL
+                   OR last_fetch_success_at < datetime('now', ?))
+            ORDER BY external_key
+            """,
+            (f"{store_id}:%", interval_param),
+        ).fetchall()
+        return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
+
+    def increment_consecutive_failures(self, external_key: str) -> None:
+        now = _utc_now()
+        _ = self.connection.execute(
+            """
+            UPDATE products
+            SET consecutive_failures = consecutive_failures + 1,
+                updated_at = ?
+            WHERE external_key = ?
+            """,
+            (_dt_to_iso(now), external_key),
+        )
+
+    def reset_consecutive_failures(self, external_key: str) -> None:
+        now = _utc_now()
+        _ = self.connection.execute(
+            """
+            UPDATE products
+            SET consecutive_failures = 0,
+                last_fetch_success_at = ?,
+                updated_at = ?
+            WHERE external_key = ?
+            """,
+            (_dt_to_iso(now), _dt_to_iso(now), external_key),
+        )
+
+    def record_sitemap_seen(self, external_key: str) -> None:
+        now = _utc_now()
+        _ = self.connection.execute(
+            """
+            UPDATE products
+            SET last_seen_in_sitemap_at = ?,
+                consecutive_sitemap_misses = 0,
+                updated_at = ?
+            WHERE external_key = ?
+            """,
+            (_dt_to_iso(now), _dt_to_iso(now), external_key),
+        )
+
+    def increment_sitemap_miss(self, external_key: str) -> None:
+        now = _utc_now()
+        _ = self.connection.execute(
+            """
+            UPDATE products
+            SET consecutive_sitemap_misses = consecutive_sitemap_misses + 1,
+                updated_at = ?
+            WHERE external_key = ?
+            """,
+            (_dt_to_iso(now), external_key),
+        )
     def _apply_pragmas(self, conn: sqlite3.Connection) -> None:
         _ = conn.execute("PRAGMA journal_mode=WAL")
         _ = conn.execute("PRAGMA synchronous=NORMAL")
@@ -351,6 +436,7 @@ def _iso_to_dt(value: str | None) -> datetime | None:
 
 
 def _row_to_state(row: sqlite3.Row) -> ProductState:
+    keys = row.keys()
     dify_document_id_str = cast(str | None, row["dify_document_id"])
     inactive_reason_str = cast(str | None, row["inactive_reason"])
     last_seen = cast(str | None, row["last_seen_in_sitemap_at"])
@@ -358,6 +444,7 @@ def _row_to_state(row: sqlite3.Row) -> ProductState:
     created_at = cast(str | None, row["created_at"])
     updated_at = cast(str | None, row["updated_at"])
     inactive_since = cast(str | None, row["inactive_since"])
+    product_url_str = cast(str | None, row["product_url"]) if "product_url" in keys else None
     return ProductState(
         external_key=str(row["external_key"]),
         dify_document_id=dify_document_id_str,
@@ -372,4 +459,5 @@ def _row_to_state(row: sqlite3.Row) -> ProductState:
         inactive=bool(int(cast(int, row["inactive"]))),
         inactive_reason=inactive_reason_str,
         inactive_since=_iso_to_dt(inactive_since),
+        product_url=product_url_str,
     )

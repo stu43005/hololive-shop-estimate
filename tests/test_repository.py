@@ -33,6 +33,7 @@ def _state(
     inactive: bool = False,
     inactive_reason: str | None = None,
     inactive_since: datetime | None = None,
+    product_url: str | None = None,
 ) -> ProductState:
     return ProductState(
         external_key=external_key,
@@ -46,6 +47,7 @@ def _state(
         inactive=inactive,
         inactive_reason=inactive_reason,
         inactive_since=inactive_since,
+        product_url=product_url,
     )
 
 
@@ -246,3 +248,121 @@ def test_state_db_get_all_active_orders_by_external_key(
     repo.upsert(_state("c:3"))
     keys = [s.external_key for s in repo.get_all_active()]
     assert keys == ["a:1", "b:2", "c:3"]
+
+
+def test_state_db_product_url_roundtrip(repo: ProductStateRepository) -> None:
+    s = _state("hololive:url1", product_url="https://example.com/products/url1")
+    saved = repo.upsert(s)
+    assert saved.product_url == "https://example.com/products/url1"
+    loaded = repo.get_by_external_key("hololive:url1")
+    assert loaded is not None
+    assert loaded.product_url == "https://example.com/products/url1"
+
+
+def test_state_db_product_url_none_by_default(repo: ProductStateRepository) -> None:
+    saved = repo.upsert(_state("hololive:nurl"))
+    assert saved.product_url is None
+
+
+def test_state_db_upsert_preserves_product_url_when_none(
+    repo: ProductStateRepository,
+) -> None:
+    repo.upsert(_state("hololive:keep", product_url="https://example.com/keep"))
+    updated = repo.upsert(_state("hololive:keep", product_url=None))
+    assert updated.product_url == "https://example.com/keep"
+
+
+def test_state_db_get_by_product_url(repo: ProductStateRepository) -> None:
+    repo.upsert(_state("store1:p1", product_url="https://store1.com/p1"))
+    repo.upsert(_state("store1:p2", product_url="https://store1.com/p2"))
+    repo.upsert(_state("store2:p3", product_url="https://store1.com/p1"))
+
+    result = repo.get_by_product_url("store1", "https://store1.com/p1")
+    assert result is not None
+    assert result.external_key == "store1:p1"
+
+    # Different store_id, same URL
+    result2 = repo.get_by_product_url("store2", "https://store1.com/p1")
+    assert result2 is not None
+    assert result2.external_key == "store2:p3"
+
+    # Missing
+    assert repo.get_by_product_url("store1", "https://nope.com") is None
+
+
+def test_state_db_get_products_needing_fetch(repo: ProductStateRepository) -> None:
+    # Never fetched => needs fetch
+    repo.upsert(_state("s1:never", last_fetch_success_at=None))
+    # Recently fetched => skip
+    repo.upsert(_state("s1:recent", last_fetch_success_at=_dt(0)))
+    # Stale fetch => needs fetch
+    repo.upsert(_state("s1:stale", last_fetch_success_at=_dt(3)))
+    # Inactive => skip
+    repo.upsert(
+        _state("s1:inactive", last_fetch_success_at=None, inactive=True)
+    )
+    # Different store => skip
+    repo.upsert(_state("s2:other", last_fetch_success_at=None))
+
+    results = repo.get_products_needing_fetch("s1", interval_hours=24.0)
+    keys = [r.external_key for r in results]
+    assert "s1:never" in keys
+    assert "s1:stale" in keys
+    assert "s1:recent" not in keys
+    assert "s1:inactive" not in keys
+    assert "s2:other" not in keys
+
+
+def test_state_db_get_products_needing_fetch_invalid_hours(
+    repo: ProductStateRepository,
+) -> None:
+    with pytest.raises(ValueError):
+        repo.get_products_needing_fetch("s1", interval_hours=0)
+
+
+def test_state_db_increment_consecutive_failures(
+    repo: ProductStateRepository,
+) -> None:
+    repo.upsert(_state("hololive:fail", consecutive_failures=0))
+    repo.increment_consecutive_failures("hololive:fail")
+    loaded = repo.get_by_external_key("hololive:fail")
+    assert loaded is not None
+    assert loaded.consecutive_failures == 1
+
+    repo.increment_consecutive_failures("hololive:fail")
+    loaded2 = repo.get_by_external_key("hololive:fail")
+    assert loaded2 is not None
+    assert loaded2.consecutive_failures == 2
+
+
+def test_state_db_reset_consecutive_failures(
+    repo: ProductStateRepository,
+) -> None:
+    repo.upsert(_state("hololive:res", consecutive_failures=5))
+    repo.reset_consecutive_failures("hololive:res")
+    loaded = repo.get_by_external_key("hololive:res")
+    assert loaded is not None
+    assert loaded.consecutive_failures == 0
+    assert loaded.last_fetch_success_at is not None
+
+
+def test_state_db_record_sitemap_seen(repo: ProductStateRepository) -> None:
+    repo.upsert(_state("hololive:seen", consecutive_sitemap_misses=3))
+    repo.record_sitemap_seen("hololive:seen")
+    loaded = repo.get_by_external_key("hololive:seen")
+    assert loaded is not None
+    assert loaded.consecutive_sitemap_misses == 0
+    assert loaded.last_seen_in_sitemap_at is not None
+
+
+def test_state_db_increment_sitemap_miss(repo: ProductStateRepository) -> None:
+    repo.upsert(_state("hololive:miss", consecutive_sitemap_misses=0))
+    repo.increment_sitemap_miss("hololive:miss")
+    loaded = repo.get_by_external_key("hololive:miss")
+    assert loaded is not None
+    assert loaded.consecutive_sitemap_misses == 1
+
+    repo.increment_sitemap_miss("hololive:miss")
+    loaded2 = repo.get_by_external_key("hololive:miss")
+    assert loaded2 is not None
+    assert loaded2.consecutive_sitemap_misses == 2
