@@ -192,6 +192,15 @@ class ProductStateRepository:
         ).fetchall()
         return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
 
+
+    def list_active(self, store_id: str) -> list[ProductState]:
+        """Return all active products for a given store."""
+        rows = self.connection.execute(
+            "SELECT * FROM products WHERE external_key LIKE ? AND inactive = 0 ORDER BY external_key",
+            (f"{store_id}:%",),
+        ).fetchall()
+        return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
+
     def get_stale_products(self, days: int) -> list[ProductState]:
         if days <= 0:
             raise ValueError("days must be > 0")
