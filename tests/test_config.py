@@ -52,6 +52,46 @@ class TestStore:
         with pytest.raises(ValueError, match="must have a valid 'sitemap_url'"):
             store.validate()
 
+    def test_store_fetch_interval_hours_default(self):
+        """Test store fetch_interval_hours defaults to 24.0."""
+        store = Store(
+            id="test",
+            base_url="https://example.com",
+            sitemap_url="https://example.com/sitemap.xml",
+        )
+        assert store.fetch_interval_hours == 24.0
+
+    def test_store_fetch_interval_hours_custom(self):
+        """Test store with custom fetch_interval_hours."""
+        store = Store(
+            id="test",
+            base_url="https://example.com",
+            sitemap_url="https://example.com/sitemap.xml",
+            fetch_interval_hours=12.0,
+        )
+        assert store.fetch_interval_hours == 12.0
+
+    def test_store_validation_invalid_fetch_interval_hours(self):
+        """Test store validation with invalid fetch_interval_hours (<= 0)."""
+        store = Store(
+            id="test",
+            base_url="https://example.com",
+            sitemap_url="https://example.com/sitemap.xml",
+            fetch_interval_hours=0,
+        )
+        with pytest.raises(ValueError, match="'fetch_interval_hours' greater than 0"):
+            store.validate()
+
+    def test_store_validation_negative_fetch_interval_hours(self):
+        """Test store validation with negative fetch_interval_hours."""
+        store = Store(
+            id="test",
+            base_url="https://example.com",
+            sitemap_url="https://example.com/sitemap.xml",
+            fetch_interval_hours=-1.0,
+        )
+        with pytest.raises(ValueError, match="'fetch_interval_hours' greater than 0"):
+            store.validate()
 
 class TestCrawlerPolicy:
     """Test CrawlerPolicy configuration."""
@@ -65,6 +105,9 @@ class TestCrawlerPolicy:
         assert policy.timeout_connect == 10
         assert policy.timeout_read == 30
         assert policy.max_retries == 3
+        assert policy.default_fetch_interval_hours == 24.0
+        assert policy.inactive_failure_threshold == 3
+        assert policy.inactive_sitemap_miss_threshold == 4
 
     def test_crawler_policy_custom_values(self):
         """Test crawler policy with custom values."""
@@ -75,6 +118,9 @@ class TestCrawlerPolicy:
             timeout_connect=15,
             timeout_read=60,
             max_retries=5,
+            default_fetch_interval_hours=48.0,
+            inactive_failure_threshold=5,
+            inactive_sitemap_miss_threshold=6,
         )
         assert policy.rate_limit_rps == 2.0
         assert policy.jitter_max == 0.2
@@ -82,6 +128,9 @@ class TestCrawlerPolicy:
         assert policy.timeout_connect == 15
         assert policy.timeout_read == 60
         assert policy.max_retries == 5
+        assert policy.default_fetch_interval_hours == 48.0
+        assert policy.inactive_failure_threshold == 5
+        assert policy.inactive_sitemap_miss_threshold == 6
 
     def test_crawler_policy_validation_invalid_rate_limit(self):
         """Test crawler policy validation with invalid rate_limit_rps."""
@@ -103,6 +152,29 @@ class TestCrawlerPolicy:
         with pytest.raises(ValueError, match="'jitter_max' must be non-negative"):
             policy.validate()
 
+    def test_crawler_policy_validation_invalid_default_fetch_interval(self):
+        """Test crawler policy validation with invalid default_fetch_interval_hours."""
+        policy = CrawlerPolicy(default_fetch_interval_hours=0)
+        with pytest.raises(ValueError, match="'default_fetch_interval_hours' must be greater than 0"):
+            policy.validate()
+
+    def test_crawler_policy_validation_negative_default_fetch_interval(self):
+        """Test crawler policy validation with negative default_fetch_interval_hours."""
+        policy = CrawlerPolicy(default_fetch_interval_hours=-1.0)
+        with pytest.raises(ValueError, match="'default_fetch_interval_hours' must be greater than 0"):
+            policy.validate()
+
+    def test_crawler_policy_validation_invalid_inactive_failure_threshold(self):
+        """Test crawler policy validation with invalid inactive_failure_threshold."""
+        policy = CrawlerPolicy(inactive_failure_threshold=0)
+        with pytest.raises(ValueError, match="'inactive_failure_threshold' must be greater than 0"):
+            policy.validate()
+
+    def test_crawler_policy_validation_invalid_inactive_sitemap_miss_threshold(self):
+        """Test crawler policy validation with invalid inactive_sitemap_miss_threshold."""
+        policy = CrawlerPolicy(inactive_sitemap_miss_threshold=0)
+        with pytest.raises(ValueError, match="'inactive_sitemap_miss_threshold' must be greater than 0"):
+            policy.validate()
 
 class TestProxyConfig:
     """Test ProxyConfig configuration."""
@@ -232,6 +304,13 @@ proxy:
             assert config.crawler.timeout_read == 30
             assert config.crawler.max_retries == 3
 
+            # Verify new fields default when absent from YAML
+            assert config.crawler.default_fetch_interval_hours == 24.0
+            assert config.crawler.inactive_failure_threshold == 3
+            assert config.crawler.inactive_sitemap_miss_threshold == 4
+            assert config.stores[0].fetch_interval_hours == 24.0
+            assert config.stores[1].fetch_interval_hours == 24.0
+
             # Verify proxy
             assert config.proxy.enabled is False
 
@@ -333,6 +412,79 @@ stores:
         finally:
             os.unlink(config_path)
 
+    def test_config_load_with_new_fields(self, monkeypatch):
+        """Test loading config with new fetch_interval_hours and inactive threshold fields."""
+        yaml_content = """
+stores:
+  - id: hololive
+    base_url: https://shop.hololivepro.com
+    sitemap_url: https://shop.hololivepro.com/sitemap.xml
+    fetch_interval_hours: 12.0
+  - id: vspo
+    base_url: https://store.vspo.jp
+    sitemap_url: https://store.vspo.jp/sitemap.xml
+    fetch_interval_hours: 48.0
+
+crawler:
+  rate_limit_rps: 1.5
+  default_fetch_interval_hours: 36.0
+  inactive_failure_threshold: 5
+  inactive_sitemap_miss_threshold: 6
+
+proxy:
+  enabled: false
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            config_path = f.name
+
+        try:
+            monkeypatch.delenv("CONFIG_PATH", raising=False)
+            monkeypatch.delenv("HTTP_PROXY", raising=False)
+            monkeypatch.delenv("HTTPS_PROXY", raising=False)
+
+            config = load_config(config_path)
+
+            # Verify per-store fetch_interval_hours
+            assert config.stores[0].fetch_interval_hours == 12.0
+            assert config.stores[1].fetch_interval_hours == 48.0
+
+            # Verify crawler policy new fields
+            assert config.crawler.default_fetch_interval_hours == 36.0
+            assert config.crawler.inactive_failure_threshold == 5
+            assert config.crawler.inactive_sitemap_miss_threshold == 6
+        finally:
+            os.unlink(config_path)
+
+    def test_config_load_defaults_when_new_fields_absent(self, monkeypatch):
+        """Test that new fields default correctly when absent from YAML."""
+        yaml_content = """
+stores:
+  - id: test
+    base_url: https://example.com
+    sitemap_url: https://example.com/sitemap.xml
+
+crawler:
+  rate_limit_rps: 1.5
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            config_path = f.name
+
+        try:
+            monkeypatch.delenv("CONFIG_PATH", raising=False)
+            monkeypatch.delenv("HTTP_PROXY", raising=False)
+            monkeypatch.delenv("HTTPS_PROXY", raising=False)
+
+            config = load_config(config_path)
+
+            # Defaults apply when absent
+            assert config.stores[0].fetch_interval_hours == 24.0
+            assert config.crawler.default_fetch_interval_hours == 24.0
+            assert config.crawler.inactive_failure_threshold == 3
+            assert config.crawler.inactive_sitemap_miss_threshold == 4
+        finally:
+            os.unlink(config_path)
 
 class TestConfigIntegration:
     """Integration tests for config loading."""
@@ -365,6 +517,11 @@ class TestConfigIntegration:
         # Verify crawler policy exists
         assert config.crawler is not None
         assert config.crawler.rate_limit_rps > 0
+
+        # Verify new fields from actual config
+        assert config.crawler.default_fetch_interval_hours == 24.0
+        assert config.crawler.inactive_failure_threshold == 3
+        assert config.crawler.inactive_sitemap_miss_threshold == 4
 
         # Verify proxy config exists
         assert config.proxy is not None

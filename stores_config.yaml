@@ -29,6 +29,15 @@ crawler:
   # Maximum retry attempts for failed requests
   max_retries: 3
 
+  # Default fetch interval for stores (hours)
+  default_fetch_interval_hours: 24.0
+
+  # Number of consecutive failures before marking store inactive
+  inactive_failure_threshold: 3
+
+  # Number of consecutive sitemap misses before marking store inactive
+  inactive_sitemap_miss_threshold: 4
+
 proxy:
   # Enable/disable proxy support
   enabled: false

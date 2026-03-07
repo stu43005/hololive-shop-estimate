@@ -14,6 +14,7 @@ class Store:
     base_url: str
     sitemap_url: str
 
+    fetch_interval_hours: float = 24.0
     def validate(self):
         """Validate store configuration."""
         if not self.id or not isinstance(self.id, str):
@@ -22,6 +23,8 @@ class Store:
             raise ValueError(f"Store '{self.id}' must have a valid 'base_url'")
         if not self.sitemap_url or not isinstance(self.sitemap_url, str):
             raise ValueError(f"Store '{self.id}' must have a valid 'sitemap_url'")
+        if self.fetch_interval_hours <= 0:
+            raise ValueError(f"Store '{self.id}' must have 'fetch_interval_hours' greater than 0")
 
 
 @dataclass
@@ -34,6 +37,9 @@ class CrawlerPolicy:
     timeout_connect: int = 10
     timeout_read: int = 30
     max_retries: int = 3
+    default_fetch_interval_hours: float = 24.0
+    inactive_failure_threshold: int = 3
+    inactive_sitemap_miss_threshold: int = 4
 
     def validate(self):
         """Validate crawler policy."""
@@ -49,6 +55,12 @@ class CrawlerPolicy:
             raise ValueError("'timeout_read' must be greater than 0")
         if self.max_retries < 0:
             raise ValueError("'max_retries' must be non-negative")
+        if self.default_fetch_interval_hours <= 0:
+            raise ValueError("'default_fetch_interval_hours' must be greater than 0")
+        if self.inactive_failure_threshold <= 0:
+            raise ValueError("'inactive_failure_threshold' must be greater than 0")
+        if self.inactive_sitemap_miss_threshold <= 0:
+            raise ValueError("'inactive_sitemap_miss_threshold' must be greater than 0")
 
 
 @dataclass
@@ -165,6 +177,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             id=s["id"],
             base_url=s["base_url"],
             sitemap_url=s["sitemap_url"],
+            fetch_interval_hours=s.get("fetch_interval_hours", 24.0),
         )
         for s in stores_data
     ]
@@ -178,6 +191,9 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         timeout_connect=crawler_data.get("timeout_connect", 10),
         timeout_read=crawler_data.get("timeout_read", 30),
         max_retries=crawler_data.get("max_retries", 3),
+        default_fetch_interval_hours=crawler_data.get("default_fetch_interval_hours", 24.0),
+        inactive_failure_threshold=crawler_data.get("inactive_failure_threshold", 3),
+        inactive_sitemap_miss_threshold=crawler_data.get("inactive_sitemap_miss_threshold", 4),
     )
 
     # Parse proxy config
