@@ -729,3 +729,61 @@ class TestCLIIntegration:
         )
         # CLI args should override env + be accepted
         assert result.returncode in [0, 1]
+
+
+class TestForceRefetchFlag:
+    """Tests for the --force-refetch CLI flag."""
+
+    def test_parse_args_no_force_refetch(self):
+        """parse_args() with no --force-refetch defaults to False."""
+        from estimator_king.__main__ import parse_args
+
+        args = parse_args([])
+        assert args.force_refetch is False
+
+    def test_parse_args_with_force_refetch(self):
+        """parse_args() with --force-refetch sets flag to True."""
+        from estimator_king.__main__ import parse_args
+
+        args = parse_args(["--force-refetch"])
+        assert args.force_refetch is True
+
+    @patch("estimator_king.__main__.mark_inactive_products")
+    @patch("estimator_king.__main__.sync_products")
+    @patch("estimator_king.__main__.fetch_product")
+    @patch("estimator_king.__main__.SitemapEnumerator")
+    @patch("estimator_king.__main__.ProductStateRepository")
+    def test_run_crawler_accepts_force_refetch(
+        self, mock_repo_class, mock_enumerate_class, mock_fetch, mock_sync, mock_inactive
+    ):
+        """run_crawler() accepts force_refetch=True without error."""
+        mock_repo = MagicMock()
+        mock_repo.__enter__ = MagicMock(return_value=mock_repo)
+        mock_repo.__exit__ = MagicMock(return_value=None)
+        mock_repo_class.return_value = mock_repo
+
+        mock_enumerator = MagicMock()
+        mock_enumerator.enumerate_products.return_value = []
+        mock_enumerate_class.return_value = mock_enumerator
+
+        mock_sync.return_value = SyncResult(
+            created=0, updated=0, skipped=0, failed=0, failed_ids=[]
+        )
+        mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
+
+        config = AppConfig(
+            stores=[
+                Store(
+                    id="test",
+                    base_url="https://test.com",
+                    sitemap_url="https://test.com/sitemap.xml",
+                )
+            ],
+            crawler=CrawlerPolicy(),
+            proxy=ProxyConfig(),
+        )
+        dify_client = MagicMock()
+
+        result = run_crawler(config, ":memory:", dify_client, force_refetch=True)
+
+        assert result["errors"] == 0

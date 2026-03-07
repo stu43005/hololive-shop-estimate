@@ -77,10 +77,17 @@ def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Set logging level (default: INFO)",
     )
 
+    _ = parser.add_argument(
+        "--force-refetch",
+        action="store_true",
+        default=False,
+        help="Re-fetch all products regardless of last fetch time",
+    )
+
     return parser.parse_args(args)
 
 
-def run_crawler(config: AppConfig, db_path: str, dify_client: DifyKBClient) -> dict:
+def run_crawler(config: AppConfig, db_path: str, dify_client: DifyKBClient, force_refetch: bool = False) -> dict:
     """Orchestrate full crawler pipeline: sitemap → fetch → sync → inactive.
 
     Processes all stores in sequence:
@@ -93,6 +100,7 @@ def run_crawler(config: AppConfig, db_path: str, dify_client: DifyKBClient) -> d
         config: Parsed stores configuration with store list and crawler policy
         db_path: SQLite database file path
         dify_client: Initialized Dify Knowledge Base client
+        force_refetch: If True, re-fetch all products regardless of last fetch time
 
     Returns:
         dict with aggregated counters:
@@ -235,7 +243,7 @@ def main() -> None:
 
     # 7. Run crawler
     try:
-        counters = run_crawler(config, config.database_path, dify_client)
+        counters = run_crawler(config, config.database_path, dify_client, force_refetch=args.force_refetch)
         logging.info(f"Crawler completed: {counters}")
     except Exception as e:
         logging.error(f"Crawler failed: {e}")
