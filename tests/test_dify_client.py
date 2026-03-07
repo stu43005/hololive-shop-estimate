@@ -103,6 +103,8 @@ class TestCreateDocumentByText:
             assert "document/create_by_text" in call_args[0][0]
             assert call_args[1]["json"]["name"] == "Test Doc"
             assert call_args[1]["json"]["text"] == "This is test content"
+            assert call_args[1]["json"]["indexing_technique"] == "high_quality"
+            assert call_args[1]["json"]["process_rule"] == {"mode": "automatic"}
 
     def test_create_document_with_metadata(self, dify_client):
         with patch.object(dify_client.session, "post") as mock_post:

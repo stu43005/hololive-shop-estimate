@@ -89,7 +89,12 @@ class DifyKBClient:
         self.session.headers["Content-Type"] = "application/json"  # type: ignore[assignment]
 
     def create_document_by_text(
-        self, name: str, text: str, metadata: Optional[Dict[str, Any]] = None
+        self,
+        name: str,
+        text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        indexing_technique: str = "high_quality",
+        process_rule: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create a document in the knowledge base from text.
 
@@ -102,6 +107,8 @@ class DifyKBClient:
             name: Document name/title
             text: Full document content
             metadata: Optional metadata dict (e.g., {"source": "shopify", "store_id": "123"})
+            indexing_technique: Indexing mode - "high_quality" (embedding, default) or "economy" (keyword)
+            process_rule: Chunking/processing rules. Defaults to {"mode": "automatic"} if not provided.
 
         Returns:
             Response dict containing:
@@ -115,9 +122,14 @@ class DifyKBClient:
         """
         url = f"{self.base_url}/datasets/{self.dataset_id}/document/create_by_text"
 
+        if process_rule is None:
+            process_rule = {"mode": "automatic"}
+
         payload: Dict[str, Any] = {
             "name": name,
             "text": text,
+            "indexing_technique": indexing_technique,
+            "process_rule": process_rule,
         }
         if metadata:
             payload["metadata"] = metadata
