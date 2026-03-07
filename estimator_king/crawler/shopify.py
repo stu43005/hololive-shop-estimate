@@ -15,12 +15,12 @@ def _clean_body_html(html: str) -> str:
     """Convert Shopify body_html to clean Markdown text, stripping HTML tags."""
     if not html or not html.strip():
         return ""
+    from bs4 import BeautifulSoup
     import markdownify as md
-    result = md.markdownify(
-        html,
-        strip=["img", "style", "script"],
-        heading_style="ATX",
-    )
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(["img", "style", "script"]):
+        tag.decompose()
+    result = md.markdownify(str(soup), heading_style="ATX")
     return result.strip()
 
 
