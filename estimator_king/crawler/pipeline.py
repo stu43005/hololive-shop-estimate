@@ -1,4 +1,4 @@
-"""Sitemap enumeration → crawl-queue population pipeline."""
+"""Sitemap enumeration → crawl-queue population → fetch-sync pipeline."""
 
 from __future__ import annotations
 
@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from estimator_king.config_schema import Store
+    from estimator_king.crawler.http_client import HTTPClient
     from estimator_king.crawler.sitemap import SitemapEnumerator
     from estimator_king.database.repository import ProductStateRepository
+    from estimator_king.sync.dify_client import DifyKBClient
 
 logger = logging.getLogger(__name__)
 
@@ -63,3 +65,90 @@ def populate_queue_from_sitemap(
             repo.increment_sitemap_miss(product.external_key)
 
     return enqueued
+
+
+def enqueue_stale_products(
+    store: Store,
+    repo: ProductStateRepository,
+    *,
+    force_refetch: bool = False,
+) -> int:
+    """Enqueue products that need re-fetching into the crawl queue.
+
+    If *force_refetch* is True, enqueue ALL active products for the store.
+    Otherwise, enqueue only products whose last fetch is older than the
+    store's configured ``fetch_interval_hours``.
+
+    Returns:
+        Number of URLs newly enqueued (where ``enqueue_url()`` returned True).
+    """
+    if force_refetch:
+        products = repo.list_active(store.id)
+    else:
+        products = repo.get_products_needing_fetch(
+            store.id, store.fetch_interval_hours
+        )
+
+    enqueued = 0
+    for state in products:
+        if state.product_url is None:
+            continue
+        if repo.enqueue_url(store.id, state.product_url):
+            enqueued += 1
+
+    return enqueued
+
+
+def process_queue(
+    store: Store,
+    repo: ProductStateRepository,
+    http_client: HTTPClient,
+    dify_client: DifyKBClient,
+) -> dict[str, int]:
+    """Drain the crawl queue: fetch each product and sync to Dify.
+
+    Uses ``peek_next()`` / ``delete_queue_entry()`` for crash-safe processing.
+    On :class:`CircuitBreakerOpenError` the loop breaks immediately, leaving
+    remaining entries in the queue for the next run.
+
+    Returns:
+        ``{"fetched_ok": N, "errors": N}``
+    """
+    from estimator_king.crawler.http_client import CircuitBreakerOpenError
+    from estimator_king.crawler.shopify import fetch_product
+    from estimator_king.sync.engine import sync_products
+
+    fetched_ok = 0
+    errors = 0
+
+    while (entry := repo.peek_next(store.id)) is not None:
+        entry_id, _, product_url = entry
+        external_key: str | None = None
+        try:
+            snapshot = fetch_product(product_url, http_client)
+            product_id = snapshot.product_id
+            external_key = f"{store.id}:{product_id}"
+            sync_products(
+                [snapshot], store.id, store.base_url, repo, dify_client
+            )
+            repo.reset_consecutive_failures(external_key)
+            repo.delete_queue_entry(entry_id)
+            fetched_ok += 1
+        except CircuitBreakerOpenError:
+            logger.info(
+                "Circuit breaker open for %s — pausing queue processing",
+                store.id,
+            )
+            break
+        except Exception:
+            logger.exception(
+                "Error processing queue entry %s (url=%s)",
+                entry_id,
+                product_url,
+            )
+            if external_key is not None:
+                repo.increment_consecutive_failures(external_key)
+            repo.delete_queue_entry(entry_id)
+            errors += 1
+
+    return {"fetched_ok": fetched_ok, "errors": errors}

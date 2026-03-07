@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from estimator_king.crawler.pipeline import populate_queue_from_sitemap
+from estimator_king.crawler.pipeline import (
+    enqueue_stale_products,
+    populate_queue_from_sitemap,
+    process_queue,
+)
 from estimator_king.database.repository import ProductState
 
 
@@ -232,3 +236,299 @@ class TestDuplicateEnqueue:
         result = populate_queue_from_sitemap(store, repo, enumerator)
 
         assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests for enqueue_stale_products
+# ---------------------------------------------------------------------------
+
+
+class TestEnqueueStaleProductsForceRefetch:
+    """force_refetch=True enqueues ALL active products."""
+
+    def test_enqueues_all_active(self) -> None:
+        store = _make_store()
+        store.fetch_interval_hours = 24.0
+        repo = MagicMock()
+        products = [
+            _make_product("holo:1", product_url="https://shop.example.com/products/1"),
+            _make_product("holo:2", product_url="https://shop.example.com/products/2"),
+        ]
+        repo.list_active.return_value = products
+        repo.enqueue_url.return_value = True
+
+        result = enqueue_stale_products(store, repo, force_refetch=True)
+
+        assert result == 2
+        repo.list_active.assert_called_once_with("holo")
+        repo.get_products_needing_fetch.assert_not_called()
+
+    def test_skips_products_without_url(self) -> None:
+        store = _make_store()
+        store.fetch_interval_hours = 24.0
+        repo = MagicMock()
+        products = [
+            _make_product("holo:1", product_url=None),
+            _make_product("holo:2", product_url="https://shop.example.com/products/2"),
+        ]
+        repo.list_active.return_value = products
+        repo.enqueue_url.return_value = True
+
+        result = enqueue_stale_products(store, repo, force_refetch=True)
+
+        assert result == 1
+        repo.enqueue_url.assert_called_once_with(
+            "holo", "https://shop.example.com/products/2"
+        )
+
+    def test_duplicate_not_counted(self) -> None:
+        store = _make_store()
+        store.fetch_interval_hours = 24.0
+        repo = MagicMock()
+        products = [
+            _make_product("holo:1", product_url="https://shop.example.com/products/1"),
+        ]
+        repo.list_active.return_value = products
+        repo.enqueue_url.return_value = False  # already in queue
+
+        result = enqueue_stale_products(store, repo, force_refetch=True)
+
+        assert result == 0
+
+
+class TestEnqueueStaleProductsNormal:
+    """force_refetch=False uses get_products_needing_fetch."""
+
+    def test_uses_get_products_needing_fetch(self) -> None:
+        store = _make_store()
+        store.fetch_interval_hours = 12.0
+        repo = MagicMock()
+        products = [
+            _make_product("holo:1", product_url="https://shop.example.com/products/1"),
+        ]
+        repo.get_products_needing_fetch.return_value = products
+        repo.enqueue_url.return_value = True
+
+        result = enqueue_stale_products(store, repo, force_refetch=False)
+
+        assert result == 1
+        repo.get_products_needing_fetch.assert_called_once_with("holo", 12.0)
+        repo.list_active.assert_not_called()
+
+    def test_empty_returns_zero(self) -> None:
+        store = _make_store()
+        store.fetch_interval_hours = 24.0
+        repo = MagicMock()
+        repo.get_products_needing_fetch.return_value = []
+
+        result = enqueue_stale_products(store, repo)
+
+        assert result == 0
+        repo.enqueue_url.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests for process_queue
+# ---------------------------------------------------------------------------
+
+
+def _make_snapshot(product_id: int = 42) -> MagicMock:
+    """Create a mock ProductSnapshot returned by fetch_product."""
+    snap = MagicMock()
+    snap.product_id = product_id
+    return snap
+
+
+class TestProcessQueueSuccess:
+    """Successful fetch-sync cycle."""
+
+    def test_single_entry_ok(self) -> None:
+        store = _make_store()
+        repo = MagicMock()
+        http_client = MagicMock()
+        dify_client = MagicMock()
+        snap = _make_snapshot(42)
+
+        # peek_next returns entry once, then None
+        repo.peek_next.side_effect = [
+            (1, "holo", "https://shop.example.com/products/42"),
+            None,
+        ]
+
+        with _patch_imports(fetch_return=snap):
+            result = process_queue(store, repo, http_client, dify_client)
+
+        assert result == {"fetched_ok": 1, "errors": 0}
+        repo.reset_consecutive_failures.assert_called_once_with("holo:42")
+        repo.delete_queue_entry.assert_called_once_with(1)
+
+    def test_multiple_entries(self) -> None:
+        store = _make_store()
+        repo = MagicMock()
+        http_client = MagicMock()
+        dify_client = MagicMock()
+        snap_a = _make_snapshot(10)
+        snap_b = _make_snapshot(20)
+
+        repo.peek_next.side_effect = [
+            (1, "holo", "https://shop.example.com/products/10"),
+            (2, "holo", "https://shop.example.com/products/20"),
+            None,
+        ]
+
+        with _patch_imports(fetch_side_effect=[snap_a, snap_b]):
+            result = process_queue(store, repo, http_client, dify_client)
+
+        assert result == {"fetched_ok": 2, "errors": 0}
+        assert repo.delete_queue_entry.call_count == 2
+
+    def test_empty_queue(self) -> None:
+        store = _make_store()
+        repo = MagicMock()
+        http_client = MagicMock()
+        dify_client = MagicMock()
+        repo.peek_next.return_value = None
+
+        result = process_queue(store, repo, http_client, dify_client)
+
+        assert result == {"fetched_ok": 0, "errors": 0}
+
+
+class TestProcessQueueCircuitBreaker:
+    """CircuitBreakerOpenError breaks loop, entry stays in queue."""
+
+    def test_circuit_breaker_breaks_loop(self) -> None:
+        from estimator_king.crawler.http_client import CircuitBreakerOpenError
+
+        store = _make_store()
+        repo = MagicMock()
+        http_client = MagicMock()
+        dify_client = MagicMock()
+
+        repo.peek_next.side_effect = [
+            (1, "holo", "https://shop.example.com/products/42"),
+            (2, "holo", "https://shop.example.com/products/43"),
+            None,
+        ]
+
+        cb_err = CircuitBreakerOpenError("shop.example.com", retry_in_seconds=60.0)
+        with _patch_imports(fetch_side_effect=cb_err):
+            result = process_queue(store, repo, http_client, dify_client)
+
+        assert result == {"fetched_ok": 0, "errors": 0}
+        repo.delete_queue_entry.assert_not_called()
+        repo.increment_consecutive_failures.assert_not_called()
+
+
+class TestProcessQueueErrors:
+    """Non-circuit-breaker errors: delete entry, increment failures if possible."""
+
+    def test_fetch_error_deletes_entry_no_increment(self) -> None:
+        """Fetch fails before product_id is known → no increment_consecutive_failures."""
+        store = _make_store()
+        repo = MagicMock()
+        http_client = MagicMock()
+        dify_client = MagicMock()
+
+        repo.peek_next.side_effect = [
+            (1, "holo", "https://shop.example.com/products/42"),
+            None,
+        ]
+
+        with _patch_imports(fetch_side_effect=RuntimeError("network fail")):
+            result = process_queue(store, repo, http_client, dify_client)
+
+        assert result == {"fetched_ok": 0, "errors": 1}
+        repo.delete_queue_entry.assert_called_once_with(1)
+        repo.increment_consecutive_failures.assert_not_called()
+
+    def test_sync_error_increments_failures(self) -> None:
+        """Fetch OK but sync fails → external_key known → increment failures."""
+        store = _make_store()
+        repo = MagicMock()
+        http_client = MagicMock()
+        dify_client = MagicMock()
+        snap = _make_snapshot(42)
+
+        repo.peek_next.side_effect = [
+            (1, "holo", "https://shop.example.com/products/42"),
+            None,
+        ]
+
+        def sync_boom(*args, **kwargs):
+            raise RuntimeError("dify down")
+
+        with _patch_imports(fetch_return=snap, sync_side_effect=sync_boom):
+            result = process_queue(store, repo, http_client, dify_client)
+
+        assert result == {"fetched_ok": 0, "errors": 1}
+        repo.increment_consecutive_failures.assert_called_once_with("holo:42")
+        repo.delete_queue_entry.assert_called_once_with(1)
+
+    def test_error_then_success(self) -> None:
+        """First entry errors, second succeeds."""
+        store = _make_store()
+        repo = MagicMock()
+        http_client = MagicMock()
+        dify_client = MagicMock()
+        snap = _make_snapshot(20)
+
+        repo.peek_next.side_effect = [
+            (1, "holo", "https://shop.example.com/products/10"),
+            (2, "holo", "https://shop.example.com/products/20"),
+            None,
+        ]
+
+        call_count = 0
+
+        def fetch_alternating(url, client):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("first fails")
+            return snap
+
+        with _patch_imports(fetch_side_effect=fetch_alternating):
+            result = process_queue(store, repo, http_client, dify_client)
+
+        assert result == {"fetched_ok": 1, "errors": 1}
+        assert repo.delete_queue_entry.call_args_list == [call(1), call(2)]
+
+
+# ---------------------------------------------------------------------------
+# Patch helper for process_queue imports
+# ---------------------------------------------------------------------------
+
+
+import contextlib
+from unittest.mock import patch
+
+
+@contextlib.contextmanager
+def _patch_imports(
+    *,
+    fetch_return=None,
+    fetch_side_effect=None,
+    sync_return=None,
+    sync_side_effect=None,
+):
+    """Patch the lazy imports inside process_queue."""
+    with (
+        patch(
+            "estimator_king.crawler.shopify.fetch_product",
+        ) as mock_fetch,
+        patch(
+            "estimator_king.sync.engine.sync_products",
+        ) as mock_sync,
+    ):
+        if fetch_side_effect is not None:
+            mock_fetch.side_effect = fetch_side_effect
+        elif fetch_return is not None:
+            mock_fetch.return_value = fetch_return
+
+        if sync_side_effect is not None:
+            mock_sync.side_effect = sync_side_effect
+        elif sync_return is not None:
+            mock_sync.return_value = sync_return
+
+        yield mock_fetch, mock_sync
