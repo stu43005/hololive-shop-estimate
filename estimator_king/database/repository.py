@@ -204,6 +204,65 @@ class ProductStateRepository:
         ).fetchall()
         return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
 
+    # ── crawl_queue helpers ──────────────────────────────────────────
+
+    def enqueue_url(self, store_id: str, product_url: str) -> bool:
+        """Insert a URL into the crawl queue. Returns True if new, False if duplicate."""
+        cur = self.connection.execute(
+            "INSERT OR IGNORE INTO crawl_queue (store_id, product_url) VALUES (?, ?)",
+            (store_id, product_url),
+        )
+        return cur.rowcount == 1
+
+    def peek_next(
+        self, store_id: str | None = None
+    ) -> tuple[int, str, str] | None:
+        """Return (id, store_id, product_url) for the oldest queue entry, or None."""
+        if store_id is not None:
+            row = self.connection.execute(
+                "SELECT id, store_id, product_url FROM crawl_queue"
+                " WHERE store_id = ? ORDER BY id ASC LIMIT 1",
+                (store_id,),
+            ).fetchone()
+        else:
+            row = self.connection.execute(
+                "SELECT id, store_id, product_url FROM crawl_queue"
+                " ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return (int(row["id"]), str(row["store_id"]), str(row["product_url"]))
+
+    def delete_queue_entry(self, entry_id: int) -> None:
+        """Delete a single queue entry by id."""
+        _ = self.connection.execute(
+            "DELETE FROM crawl_queue WHERE id = ?",
+            (entry_id,),
+        )
+
+    def queue_size(self, store_id: str | None = None) -> int:
+        """Return the number of entries in the crawl queue."""
+        if store_id is not None:
+            row = self.connection.execute(
+                "SELECT COUNT(*) FROM crawl_queue WHERE store_id = ?",
+                (store_id,),
+            ).fetchone()
+        else:
+            row = self.connection.execute(
+                "SELECT COUNT(*) FROM crawl_queue"
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def clear_queue(self, store_id: str | None = None) -> int:
+        """Delete all entries from the crawl queue. Returns rows deleted."""
+        if store_id is not None:
+            cur = self.connection.execute(
+                "DELETE FROM crawl_queue WHERE store_id = ?",
+                (store_id,),
+            )
+        else:
+            cur = self.connection.execute("DELETE FROM crawl_queue")
+        return cur.rowcount
     def _apply_pragmas(self, conn: sqlite3.Connection) -> None:
         _ = conn.execute("PRAGMA journal_mode=WAL")
         _ = conn.execute("PRAGMA synchronous=NORMAL")
