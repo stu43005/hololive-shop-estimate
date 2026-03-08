@@ -1,10 +1,11 @@
 """CLI argument parser and orchestration for Estimator King."""
 
 import argparse
+import asyncio
 import json
 import logging
 import sys
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from estimator_king.config_schema import AppConfig
 from estimator_king.crawler.http_client import HTTPClient
@@ -14,9 +15,54 @@ from estimator_king.crawler.pipeline import (
     process_queue,
 )
 from estimator_king.crawler.sitemap import SitemapEnumerator
-from estimator_king.database.repository import ProductStateRepository
+from estimator_king.database.repository import ProductState, ProductStateRepository
 from estimator_king.sync.dify_client import DifyKBClient
 from estimator_king.sync.inactive import mark_inactive_products
+
+# Try to import async pipeline; fall back to sync if aiohttp is unavailable
+try:
+    import aiohttp  # noqa: F401
+    from estimator_king.crawler.async_pipeline import async_process_queue
+    USE_ASYNC = True
+except ImportError:
+    USE_ASYNC = False
+    async_process_queue = None  # type: ignore
+
+
+def _product_state_normalizer(
+    snapshot: Any,
+    store_id: str,
+    product_url: str,
+    existing_state: ProductState | None,
+) -> ProductState | None:
+    """Create or return ProductState from a product snapshot.
+    
+    This normalizer is used by async_process_queue to transform fetched
+    snapshots into database-storable ProductState objects.
+    
+    Args:
+        snapshot: ProductSnapshot from fetch_product()
+        store_id: Store identifier
+        product_url: Product URL
+        existing_state: Existing ProductState if product already in DB
+        
+    Returns:
+        ProductState object to be upserted, or None to skip.
+    """
+    from estimator_king.crawler.snapshot import compute_content_hash, NORMALIZER_VERSION
+    
+    if snapshot is None:
+        return None
+    
+    external_key = f"{store_id}:{snapshot.product_id}"
+    content_hash = compute_content_hash(snapshot)
+    
+    return ProductState(
+        external_key=external_key,
+        content_hash=content_hash,
+        normalizer_version=NORMALIZER_VERSION,
+        product_url=product_url,
+    )
 
 
 def parse_args(args: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -149,7 +195,21 @@ def run_crawler(config: AppConfig, db_path: str, dify_client: DifyKBClient, forc
             enqueue_stale_products(store, repo, force_refetch=force_refetch)
 
             # Phase 3: Fetch + Sync queue
-            result = process_queue(store, repo, http_client, dify_client)
+            if USE_ASYNC:
+                # Use async pipeline (converted to dict format)
+                async_result = asyncio.run(
+                    async_process_queue(store.id, config.crawler, repo, _product_state_normalizer)
+                )
+                result = {
+                    "fetched_ok": async_result.processed,
+                    "created": 0,
+                    "updated": 0,
+                    "skipped": async_result.skipped,
+                    "errors": async_result.failed,
+                }
+            else:
+                # Fall back to sync pipeline
+                result = process_queue(store, repo, http_client, dify_client)
             counters["fetched_ok"] += result.get("fetched_ok", 0)
             counters["created"] += result.get("created", 0)
             counters["updated"] += result.get("updated", 0)
