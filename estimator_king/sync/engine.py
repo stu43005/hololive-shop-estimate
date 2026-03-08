@@ -216,25 +216,10 @@ def sync_products(
                 batch_id = str(response.get("batch") or "")
                 captured_doc_id = response.get("document", {}).get("id")
                 doc_id = captured_doc_id
-                if not doc_id or not batch_id:
+                if not doc_id:
                     raise ValueError(
-                        "Dify create response missing document id or batch"
+                        "Dify create response missing document id"
                     )
-
-                ok = _poll_indexing_status(dify_client, batch_id, max_wait=60)
-                if not ok:
-                    repository.upsert(
-                        ProductState(
-                            external_key=external_key,
-                            dify_document_id=str(doc_id),
-                            content_hash="",
-                            normalizer_version=NORMALIZER_VERSION,
-                            last_seen_in_sitemap_at=now,
-                        )
-                    )
-                    result.failed += 1
-                    result.failed_ids.append(external_key)
-                    continue
 
                 repository.upsert(
                     ProductState(
@@ -279,28 +264,12 @@ def sync_products(
                 )
                 batch_id = str(response.get("batch") or "")
                 captured_doc_id_update = response.get("document", {}).get("id")
-                if not batch_id:
-                    raise ValueError("Dify update response missing batch")
-
-                ok = _poll_indexing_status(dify_client, batch_id, max_wait=60)
-                if not ok:
-                    repository.upsert(
-                        ProductState(
-                            external_key=external_key,
-                            dify_document_id=state.dify_document_id,
-                            content_hash=state.content_hash,
-                            normalizer_version=state.normalizer_version,
-                            last_seen_in_sitemap_at=now,
-                        )
-                    )
-                    result.failed += 1
-                    result.failed_ids.append(external_key)
-                    continue
+                new_doc_id = captured_doc_id_update or state.dify_document_id
 
                 repository.upsert(
                     ProductState(
                         external_key=external_key,
-                        dify_document_id=state.dify_document_id,
+                        dify_document_id=new_doc_id,
                         content_hash=content_hash,
                         normalizer_version=NORMALIZER_VERSION,
                         last_seen_in_sitemap_at=now,
