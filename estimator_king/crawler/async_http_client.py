@@ -291,6 +291,9 @@ class AsyncHTTPClient:
                 if 500 <= status <= 599:
                     raise ServerError(url, status_code=status)
 
+                if 400 <= status <= 499:
+                    raise HTTPClientError(url, status_code=status)
+
                 await self._circuit_breaker.record_success(domain)
                 return await resp.text()
 

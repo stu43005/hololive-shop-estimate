@@ -24,6 +24,7 @@ def test_async_process_queue_called_when_use_async_true():
         patch("estimator_king.__main__.asyncio.run") as mock_asyncio_run,
         patch("estimator_king.__main__.async_process_queue") as mock_async_process,
         patch("estimator_king.__main__.process_queue") as mock_sync_process,
+        patch("estimator_king.__main__.sync_products") as mock_sync_products,
     ):
         # Setup repository mock
         mock_repo = MagicMock()
@@ -39,6 +40,10 @@ def test_async_process_queue_called_when_use_async_true():
         # Setup async_process_queue to return PipelineResult
         async_result = PipelineResult(processed=2, failed=0, skipped=0)
         mock_asyncio_run.return_value = async_result
+
+        # Setup sync_products mock (returns empty SyncResult since async path focuses on fetching)
+        from estimator_king.sync.engine import SyncResult
+        mock_sync_products.return_value = SyncResult(created=0, updated=0, skipped=0, failed=0)
 
         # Setup inactive
         mock_inactive.return_value = InactiveResult(
@@ -168,6 +173,7 @@ def test_async_result_conversion():
         patch("estimator_king.__main__.SitemapEnumerator") as mock_enum,
         patch("estimator_king.__main__.ProductStateRepository") as mock_repo_class,
         patch("estimator_king.__main__.asyncio.run") as mock_asyncio_run,
+        patch("estimator_king.__main__.sync_products") as mock_sync_products,
     ):
         # Setup repository mock
         mock_repo = MagicMock()
@@ -183,6 +189,10 @@ def test_async_result_conversion():
         # Return PipelineResult with specific values
         async_result = PipelineResult(processed=5, failed=2, skipped=1)
         mock_asyncio_run.return_value = async_result
+
+        # Setup sync_products mock
+        from estimator_king.sync.engine import SyncResult
+        mock_sync_products.return_value = SyncResult(created=3, updated=1, skipped=1, failed=0)
 
         # Setup inactive
         mock_inactive.return_value = InactiveResult(
@@ -212,8 +222,8 @@ def test_async_result_conversion():
         assert result["fetched_ok"] == 5, "processed should map to fetched_ok"
         assert result["errors"] == 2, "failed should map to errors"
         assert result["skipped"] == 1, "skipped should map to skipped"
-        assert result["created"] == 0, "created should be 0 (not set by async)"
-        assert result["updated"] == 0, "updated should be 0 (not set by async)"
+        assert result["created"] == 3, "created should come from sync_products result"
+        assert result["updated"] == 1, "updated should come from sync_products result"
 
 
 def test_use_async_flag_reflects_aiohttp_availability():

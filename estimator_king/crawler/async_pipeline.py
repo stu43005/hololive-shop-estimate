@@ -90,6 +90,10 @@ async def async_process_queue(
                 async with lock:
                     result.failed += 1
 
-        await asyncio.gather(*[_handle(entry) for entry in entries])
+        pipeline_sem = asyncio.Semaphore(policy.concurrency_per_domain)
+        async def _bounded_handle(entry: tuple) -> None:
+            async with pipeline_sem:
+                await _handle(entry)
+        await asyncio.gather(*[_bounded_handle(entry) for entry in entries])
 
     return result
