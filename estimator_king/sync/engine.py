@@ -120,12 +120,17 @@ def _poll_indexing_status(
     The Dify Knowledge Base API create_document_by_text() and update_document_by_text()
     operations are asynchronous - they return immediately with a batch_id for polling.
     This function polls the indexing status until the document reaches a terminal state
-    ("completed" or "failed").
+    ("completed" or "error").
+
+    API Response Structure:
+    - The response contains a "data" key with a LIST of status objects
+    - Access indexing_status from the first item: response["data"][0]["indexing_status"]
+    - Valid terminal statuses: "completed" (success) and "error" (failure)
 
     Polling Behavior:
     - Polling interval: 2 seconds between checks
     - Max attempts: max_wait / 2 (default 30 attempts for 60s timeout)
-    - Returns True if status=="completed", False if status=="failed" or timeout
+    - Returns True if status=="completed", False if status=="error" or timeout
     - Timeout behavior: Returns False if total elapsed time exceeds max_wait
 
     Rate Limit Handling:
@@ -159,11 +164,11 @@ def _poll_indexing_status(
     for attempt in range(max_attempts):
         try:
             response = dify_client.get_indexing_status(batch_id)
-            status = response.get("data", {}).get("indexing_status")
+            status = (response.get("data") or [{}])[0].get("indexing_status")
 
             if status == "completed":
                 return True
-            if status == "failed":
+            if status == "error":
                 return False
 
             time.sleep(polling_interval)
@@ -201,6 +206,7 @@ def sync_products(
         needs_create = state is None or state.dify_document_id is None
 
         if needs_create:
+            captured_doc_id: str | None = None
             try:
                 name, text, metadata = _format_product_document(
                     snapshot, store_id, product_url
@@ -208,7 +214,8 @@ def sync_products(
                 response = dify_client.create_document_by_text(name, text, metadata)
 
                 batch_id = str(response.get("batch") or "")
-                doc_id = response.get("document", {}).get("id")
+                captured_doc_id = response.get("document", {}).get("id")
+                doc_id = captured_doc_id
                 if not doc_id or not batch_id:
                     raise ValueError(
                         "Dify create response missing document id or batch"
@@ -245,7 +252,7 @@ def sync_products(
                 repository.upsert(
                     ProductState(
                         external_key=external_key,
-                        dify_document_id=state.dify_document_id if state else None,
+                        dify_document_id=captured_doc_id,
                         content_hash=content_hash,
                         normalizer_version=NORMALIZER_VERSION,
                         last_seen_in_sitemap_at=now,
@@ -262,6 +269,7 @@ def sync_products(
                 f"Content change detected for {external_key}: "
                 f"old_hash={state.content_hash[:8]}... new_hash={content_hash[:8]}..."
             )
+            captured_doc_id_update: str | None = None
             try:
                 name, text, _metadata = _format_product_document(
                     snapshot, store_id, product_url
@@ -270,6 +278,7 @@ def sync_products(
                     state.dify_document_id, name, text
                 )
                 batch_id = str(response.get("batch") or "")
+                captured_doc_id_update = response.get("document", {}).get("id")
                 if not batch_id:
                     raise ValueError("Dify update response missing batch")
 
@@ -303,7 +312,7 @@ def sync_products(
                 repository.upsert(
                     ProductState(
                         external_key=external_key,
-                        dify_document_id=state.dify_document_id,
+                        dify_document_id=captured_doc_id_update or state.dify_document_id,
                         content_hash=state.content_hash,
                         normalizer_version=state.normalizer_version,
                         last_seen_in_sitemap_at=now,
