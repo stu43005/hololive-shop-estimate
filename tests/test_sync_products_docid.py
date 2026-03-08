@@ -32,14 +32,11 @@ def dify_client():
 class TestSyncProductsDocIdPreservation:
     """Tests for dify_document_id preservation in exception handlers."""
 
-    def test_create_path_api_succeeds_polling_fails_preserves_docid(
-        self, state_repo, dify_client
-    ):
+    def test_create_path_api_succeeds_docid_saved(self, state_repo, dify_client):
         """
-        CREATE path: create_document returns doc_id, polling raises exception.
+        CREATE path: create_document succeeds and returns doc_id.
         
-        Expected: doc_id MUST be saved to DB (not None), so next run will update
-        instead of create again.
+        Expected: doc_id MUST be saved to DB immediately (fire-and-forget model).
         """
         snapshot = ProductSnapshot(
             product_id=123,
@@ -56,10 +53,6 @@ class TestSyncProductsDocIdPreservation:
             "batch": "batch-001",
         }
 
-        dify_client.get_indexing_status.side_effect = DifyAPIError(
-            "API error (500): Polling service error"
-        )
-
         result = sync_products(
             snapshots=[snapshot],
             store_id="test_store",
@@ -68,15 +61,16 @@ class TestSyncProductsDocIdPreservation:
             dify_client=dify_client,
         )
 
-        assert result.failed == 1
-        assert external_key in result.failed_ids
+        # In fire-and-forget, successful create means doc is immediately saved
+        assert result.created == 1
+        assert result.failed == 0
 
         saved_state = state_repo.get_by_external_key(external_key)
         assert saved_state is not None
         assert saved_state.dify_document_id == doc_id, (
             f"Expected dify_document_id to be '{doc_id}', but got "
-            f"'{saved_state.dify_document_id}'. The doc_id from create_document "
-            f"must be preserved even when polling fails."
+            f"'{saved_state.dify_document_id}'. Fire-and-forget model saves "
+            f"doc_id immediately on successful create."
         )
 
     def test_create_path_api_fails_docid_none(self, state_repo, dify_client):
@@ -121,8 +115,8 @@ class TestSyncProductsDocIdPreservation:
         self, state_repo, dify_client
     ):
         """
-        UPDATE path: update_document succeeds returning batch, but polling fails.
-
+        UPDATE path: update_document raises exception (fire-and-forget).
+        
         Expected: existing dify_document_id is preserved in the exception handler.
         """
         # Setup: existing product with known doc_id
@@ -147,18 +141,12 @@ class TestSyncProductsDocIdPreservation:
             )
         )
 
-        # Mock: update_document returns batch
-        dify_client.update_document_by_text.return_value = {
-            "document": {"id": existing_doc_id},
-            "batch": "batch-002",
-        }
+        # Mock: update_document fails with exception
+        dify_client.update_document_by_text.side_effect = DifyAPIError(
+            "API error (500): Update failed"
+        )
 
-        # Mock: polling fails
-        dify_client.get_indexing_status.return_value = {
-            "data": {"indexing_status": "failed", "error": "Index error"}
-        }
-
-        # Execute
+        # Execute: content has changed, so update path is taken
         result = sync_products(
             snapshots=[snapshot],
             store_id="test_store",
@@ -170,10 +158,11 @@ class TestSyncProductsDocIdPreservation:
         # Assert: operation marked as failed
         assert result.failed == 1
 
-        # Assert: existing doc_id is preserved
+        # Assert: existing doc_id is preserved (not lost on exception)
         saved_state = state_repo.get_by_external_key(external_key)
         assert saved_state is not None
         assert saved_state.dify_document_id == existing_doc_id, (
             f"Expected dify_document_id to remain '{existing_doc_id}', but got "
-            f"'{saved_state.dify_document_id}'"
+            f"'{saved_state.dify_document_id}'. On update failure, existing doc_id "
+            f"must be preserved."
         )

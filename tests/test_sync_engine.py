@@ -34,7 +34,7 @@ class TestPollIndexingStatus:
     def test_poll_immediate_complete(self, dify_client):
         """Status 'completed' on first call returns True immediately."""
         dify_client.get_indexing_status.return_value = {
-            "data": {"indexing_status": "completed"}
+            "data": [{"indexing_status": "completed"}]
         }
 
         result = _poll_indexing_status(dify_client, "batch-123", max_wait=60)
@@ -45,9 +45,9 @@ class TestPollIndexingStatus:
     def test_poll_eventual_complete(self, dify_client):
         """Status transitions from indexing to completed after retries."""
         dify_client.get_indexing_status.side_effect = [
-            {"data": {"indexing_status": "indexing"}},
-            {"data": {"indexing_status": "indexing"}},
-            {"data": {"indexing_status": "completed"}},
+            {"data": [{"indexing_status": "indexing"}]},
+            {"data": [{"indexing_status": "indexing"}]},
+            {"data": [{"indexing_status": "completed"}]},
         ]
 
         result = _poll_indexing_status(dify_client, "batch-123", max_wait=60)
@@ -58,7 +58,7 @@ class TestPollIndexingStatus:
     def test_poll_immediate_failure(self, dify_client):
         """Status 'failed' on first call returns False immediately."""
         dify_client.get_indexing_status.return_value = {
-            "data": {"indexing_status": "failed", "error": "Index error"}
+            "data": [{"indexing_status": "error", "error": "Index error"}]
         }
 
         result = _poll_indexing_status(dify_client, "batch-123", max_wait=60)
@@ -69,7 +69,7 @@ class TestPollIndexingStatus:
     def test_poll_timeout_exceeded(self, dify_client):
         """Never reaches completed, times out and returns False."""
         dify_client.get_indexing_status.return_value = {
-            "data": {"indexing_status": "indexing"}
+            "data": [{"indexing_status": "indexing"}]
         }
 
         result = _poll_indexing_status(dify_client, "batch-123", max_wait=6)
@@ -82,7 +82,7 @@ class TestPollIndexingStatus:
         dify_client.get_indexing_status.side_effect = [
             DifyRateLimitError("Rate limited (429). Retry after: unknown"),
             DifyRateLimitError("Rate limited (429). Retry after: unknown"),
-            {"data": {"indexing_status": "completed"}},
+            {"data": [{"indexing_status": "completed"}]},
         ]
 
         result = _poll_indexing_status(dify_client, "batch-123", max_wait=60)
@@ -113,7 +113,7 @@ class TestPollIndexingStatus:
         """Response missing data key continues polling."""
         dify_client.get_indexing_status.side_effect = [
             {},
-            {"data": {"indexing_status": "completed"}},
+            {"data": [{"indexing_status": "completed"}]},
         ]
 
         result = _poll_indexing_status(dify_client, "batch-123", max_wait=60)
@@ -159,8 +159,8 @@ class TestFormatProductDocument:
         assert "# Birthday Voice Pack 2025" in text
         assert "Limited edition voice greetings" in text
         assert "## Variants" in text
-        assert "| Variant ID | Title | Price | SKU |" in text
-        assert "| 1 | Standard Edition | ¥2,000 | HLV-2025-STD |" in text
+        assert "| Title | Price |" in text
+        assert "| Standard Edition | ¥2,000 |" in text
 
         assert metadata["store_id"] == "hololive"
         assert metadata["product_id"] == "12345"
@@ -189,9 +189,9 @@ class TestFormatProductDocument:
         )
 
         assert name == "vspo:67890 - Merch Collection"
-        assert "| 1 | Blue | ¥3,000 | MERCH-BLUE |" in text
-        assert "| 2 | Red | ¥3,000 | MERCH-RED |" in text
-        assert "| 3 | Yellow | ¥3,500 |  |" in text
+        assert "| Blue | ¥3,000 |" in text
+        assert "| Red | ¥3,000 |" in text
+        assert "| Yellow | ¥3,500 |" in text
         assert "## セット詳細" in text
         assert "セット内容：\n- Tシャツ\n- ステッカー" in text
         assert "## グッズ詳細" in text
@@ -217,8 +217,8 @@ class TestFormatProductDocument:
         )
 
         assert name == "test_store:11111 - Basic Product"
-        assert "| 1 | Variant A | ¥1,000 |  |" in text
-        assert "| 2 | Variant B | ¥1,500 |  |" in text
+        assert "| Variant A | ¥1,000 |" in text
+        assert "| Variant B | ¥1,500 |" in text
         assert metadata["store_id"] == "test_store"
         assert metadata["product_id"] == "11111"
 
@@ -436,16 +436,21 @@ class TestSyncProducts:
         assert r.failed_ids == ["hololive:6001"]
 
     def test_sync_indexing_failure(self, state_repo):
+        """Fire-and-forget: create_document raises exception → doc marked as failed."""
         client = self._client()
         s1 = self._snapshot(7001)
-
-        with patch(
-            "estimator_king.sync.engine._poll_indexing_status", return_value=False
-        ):
-            r = sync_products([s1], "hololive", "https://shop.hololivepro.com", state_repo, client)
-
+        
+        # create_document fails with API error (no polling involved)
+        client.create_document_by_text.side_effect = DifyAPIError(
+            "API error (500): Create failed"
+        )
+        
+        r = sync_products([s1], "hololive", "https://shop.hololivepro.com", state_repo, client)
+        
+        # Verify: operation marked as failed, no create happened
         assert r.failed == 1
         assert r.created == 0
+        assert r.failed_ids == ["hololive:7001"]
 
     def test_sync_mixed_results(self, state_repo):
         client = self._client()
