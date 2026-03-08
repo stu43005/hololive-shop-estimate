@@ -273,35 +273,3 @@ def test_normalizer_function_converts_snapshot_to_state():
     assert result.product_url == "https://test.com/products/test", "product_url should be set"
     assert result.content_hash is not None, "content_hash should be computed"
     assert result.normalizer_version > 0, "normalizer_version should be set"
-    """Test that _product_state_normalizer converts ProductSnapshot to ProductState.
-    
-    MUST: Verify that the normalizer function properly creates ProductState
-    objects from ProductSnapshot data for async pipeline use.
-    """
-    from estimator_king.__main__ import _product_state_normalizer
-    from estimator_king.database.repository import ProductState
-    
-    # Mock snapshot with required attributes for compute_content_hash
-    mock_snapshot = MagicMock()
-    mock_snapshot.product_id = "test-product-id"
-    mock_snapshot.name = "Test Product"
-    mock_snapshot.vendor = "Test Vendor"
-    
-    # Call normalizer
-    result = _product_state_normalizer(
-        mock_snapshot,
-        store_id="store123",
-        product_url="https://test.com/products/test",
-        existing_state=None,
-    )
-    
-    # Verify result is a ProductState
-    assert isinstance(result, ProductState), (
-        "Normalizer should return a ProductState instance"
-    )
-    
-    # Verify key fields are set correctly
-    assert result.external_key == "store123:test-product-id", "external_key should be store_id:product_id"
-    assert result.product_url == "https://test.com/products/test", "product_url should be set"
-    assert result.content_hash is not None, "content_hash should be computed"
-    assert result.normalizer_version > 0, "normalizer_version should be set"
