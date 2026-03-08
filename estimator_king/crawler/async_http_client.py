@@ -53,6 +53,16 @@ class ServerError(AsyncHTTPClientError):
         self.status_code = status_code
 
 
+class ClientError(AsyncHTTPClientError):
+    url: str
+    status_code: int
+
+    def __init__(self, url: str, status_code: int):
+        super().__init__(f"client error: {status_code} {url}")
+        self.url = url
+        self.status_code = status_code
+
+
 class WAFBlockedError(AsyncHTTPClientError):
     url: str
     status_code: int
@@ -292,7 +302,7 @@ class AsyncHTTPClient:
                     raise ServerError(url, status_code=status)
 
                 if 400 <= status <= 499:
-                    raise HTTPClientError(url, status_code=status)
+                    raise ClientError(url, status_code=status)
 
                 await self._circuit_breaker.record_success(domain)
                 return await resp.text()
