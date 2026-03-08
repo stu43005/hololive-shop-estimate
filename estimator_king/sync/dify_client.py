@@ -246,6 +246,31 @@ class DifyKBClient:
 
         return self._handle_response(response)
 
+    def delete_document(self, document_id: str) -> None:
+        """Delete a document from the knowledge base.
+
+        API Endpoint: DELETE /v1/datasets/{dataset_id}/documents/{document_id}
+
+        Args:
+            document_id: UUID of the document to delete
+
+        Returns:
+            None
+
+        Raises:
+            DifyAuthError: On 401/403 authentication failure
+            DifyRateLimitError: On 429 rate limit
+            DifyAPIError: On other 4xx/5xx errors
+        """
+        url = f"{self.base_url}/datasets/{self.dataset_id}/documents/{document_id}"
+
+        response = self.session.delete(
+            url,
+            timeout=self.timeout,
+        )
+
+        self._handle_response(response)
+
     def _handle_response(self, response: requests.Response) -> Dict:
         """Handle HTTP response and raise appropriate exceptions.
 
