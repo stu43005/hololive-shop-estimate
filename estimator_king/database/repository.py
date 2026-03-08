@@ -192,7 +192,6 @@ class ProductStateRepository:
         ).fetchall()
         return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
 
-
     def list_active(self, store_id: str) -> list[ProductState]:
         """Return all active products for a given store."""
         rows = self.connection.execute(
@@ -228,9 +227,7 @@ class ProductStateRepository:
         )
         return cur.rowcount == 1
 
-    def peek_next(
-        self, store_id: str | None = None
-    ) -> tuple[int, str, str] | None:
+    def peek_next(self, store_id: str | None = None) -> tuple[int, str, str] | None:
         """Return (id, store_id, product_url) for the oldest queue entry, or None."""
         if store_id is not None:
             row = self.connection.execute(
@@ -247,6 +244,20 @@ class ProductStateRepository:
             return None
         return (int(row["id"]), str(row["store_id"]), str(row["product_url"]))
 
+    def peek_all(self, store_id: str) -> list[dict[str, int | str]]:
+        rows = self.connection.execute(
+            "SELECT id, store_id, product_url FROM crawl_queue WHERE store_id = ? ORDER BY id ASC",
+            (store_id,),
+        ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "store_id": str(row["store_id"]),
+                "product_url": str(row["product_url"]),
+            }
+            for row in rows
+        ]
+
     def delete_queue_entry(self, entry_id: int) -> None:
         """Delete a single queue entry by id."""
         _ = self.connection.execute(
@@ -262,9 +273,7 @@ class ProductStateRepository:
                 (store_id,),
             ).fetchone()
         else:
-            row = self.connection.execute(
-                "SELECT COUNT(*) FROM crawl_queue"
-            ).fetchone()
+            row = self.connection.execute("SELECT COUNT(*) FROM crawl_queue").fetchone()
         return int(row[0]) if row else 0
 
     def clear_queue(self, store_id: str | None = None) -> int:
@@ -357,6 +366,7 @@ class ProductStateRepository:
             """,
             (_dt_to_iso(now), external_key),
         )
+
     def _apply_pragmas(self, conn: sqlite3.Connection) -> None:
         _ = conn.execute("PRAGMA journal_mode=WAL")
         _ = conn.execute("PRAGMA synchronous=NORMAL")
@@ -391,14 +401,9 @@ class ProductStateRepository:
             with conn:
                 # ALTER TABLE ... ADD COLUMN is not idempotent in SQLite;
                 # skip if column already exists (fresh DB from schema.sql v2).
-                cols = {
-                    row[1]
-                    for row in conn.execute("PRAGMA table_info(products)")
-                }
+                cols = {row[1] for row in conn.execute("PRAGMA table_info(products)")}
                 if "product_url" not in cols:
-                    _ = conn.execute(
-                        "ALTER TABLE products ADD COLUMN product_url TEXT"
-                    )
+                    _ = conn.execute("ALTER TABLE products ADD COLUMN product_url TEXT")
                 _ = conn.execute(
                     "CREATE TABLE IF NOT EXISTS crawl_queue ("
                     "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -409,14 +414,13 @@ class ProductStateRepository:
                     "  UNIQUE(store_id, product_url)"
                     ")"
                 )
-                _ = conn.execute(
-                    "UPDATE schema_version SET version = 2 WHERE id = 1"
-                )
+                _ = conn.execute("UPDATE schema_version SET version = 2 WHERE id = 1")
             from_version = 2
         if from_version != to_version:
             raise RuntimeError(
                 f"Unsupported migration path {from_version} -> {to_version}"
             )
+
 
 def _read_schema_sql() -> str:
     here = Path(__file__).resolve().parent
@@ -453,7 +457,9 @@ def _row_to_state(row: sqlite3.Row) -> ProductState:
     created_at = cast(str | None, row["created_at"])
     updated_at = cast(str | None, row["updated_at"])
     inactive_since = cast(str | None, row["inactive_since"])
-    product_url_str = cast(str | None, row["product_url"]) if "product_url" in keys else None
+    product_url_str = (
+        cast(str | None, row["product_url"]) if "product_url" in keys else None
+    )
     return ProductState(
         external_key=str(row["external_key"]),
         dify_document_id=dify_document_id_str,
