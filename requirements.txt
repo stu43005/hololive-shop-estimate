@@ -1,5 +1,6 @@
 dify-client
 requests
+aiohttp
 beautifulsoup4
 markdownify
 lxml
