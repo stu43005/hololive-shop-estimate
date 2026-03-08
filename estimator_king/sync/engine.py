@@ -186,6 +186,210 @@ def _poll_indexing_status(
     return False
 
 
+def _handle_sync_failure(
+    external_key: str,
+    dify_document_id: str | None,
+    content_hash: str,
+    normalizer_version: int,
+    now: datetime,
+    repository: ProductStateRepository,
+    result: SyncResult,
+    exception: Exception,
+    operation: str,
+) -> None:
+    """Handle sync operation failure (create or update).
+
+    Saves ProductState to database with error details and increments failure counters.
+    
+    Args:
+        external_key: Product external key
+        dify_document_id: Dify document ID if available (may be None)
+        content_hash: Content hash to preserve or revert
+        normalizer_version: Normalizer version
+        now: Current timestamp
+        repository: Database repository
+        result: SyncResult to update with failure
+        exception: The exception that occurred
+        operation: 'create' or 'update' for logging
+    """
+    logging.error(
+        f"Sync {operation} failed for {external_key}: {type(exception).__name__}: {str(exception)}"
+    )
+    repository.upsert(
+        ProductState(
+            external_key=external_key,
+            dify_document_id=dify_document_id,
+            content_hash=content_hash,
+            normalizer_version=normalizer_version,
+            last_seen_in_sitemap_at=now,
+        )
+    )
+    result.failed += 1
+    result.failed_ids.append(external_key)
+
+
+def _try_create_document(
+    snapshot: ProductSnapshot,
+    store_id: str,
+    product_url: str,
+    external_key: str,
+    dify_client: DifyKBClient,
+    repository: ProductStateRepository,
+    result: SyncResult,
+    now: datetime,
+) -> bool:
+    """Attempt to create a product document in Dify.
+
+    Handles the full create flow: format, API call, save doc_id on success.
+    Failures are logged and counted but not raised (fire-and-forget).
+    
+    Args:
+        snapshot: Product snapshot to create
+        store_id: Store identifier
+        product_url: Product URL
+        external_key: External key for DB
+        dify_client: Dify client
+        repository: Product state repository
+        result: SyncResult to update
+        now: Current timestamp
+    
+    Returns:
+        True if create succeeded, False if it failed
+    """
+    captured_doc_id: str | None = None
+    try:
+        name, text, metadata = _format_product_document(
+            snapshot, store_id, product_url
+        )
+        response = dify_client.create_document_by_text(name, text, metadata)
+        captured_doc_id = response.get("document", {}).get("id")
+        if not captured_doc_id:
+            raise ValueError("Dify create response missing document id")
+        
+        repository.upsert(
+            ProductState(
+                external_key=external_key,
+                dify_document_id=str(captured_doc_id),
+                content_hash=compute_content_hash(snapshot),
+                normalizer_version=NORMALIZER_VERSION,
+                last_seen_in_sitemap_at=now,
+            )
+        )
+        result.created += 1
+        return True
+    
+    except (DifyRateLimitError, DifyAPIError, ValueError) as e:
+        _handle_sync_failure(
+            external_key,
+            captured_doc_id,
+            compute_content_hash(snapshot),
+            NORMALIZER_VERSION,
+            now,
+            repository,
+            result,
+            e,
+            "create",
+        )
+        return False
+    except Exception as e:
+        logging.exception(f"Unexpected error in create for {external_key}")
+        _handle_sync_failure(
+            external_key,
+            captured_doc_id,
+            compute_content_hash(snapshot),
+            NORMALIZER_VERSION,
+            now,
+            repository,
+            result,
+            e,
+            "create",
+        )
+        return False
+
+
+def _try_update_document(
+    snapshot: ProductSnapshot,
+    store_id: str,
+    product_url: str,
+    external_key: str,
+    state: ProductState,
+    dify_client: DifyKBClient,
+    repository: ProductStateRepository,
+    result: SyncResult,
+    now: datetime,
+) -> bool:
+    """Attempt to update a product document in Dify.
+
+    Handles the full update flow: format, API call, save doc_id on success.
+    Failures are logged and counted but not raised (fire-and-forget).
+    
+    Args:
+        snapshot: Updated product snapshot
+        store_id: Store identifier
+        product_url: Product URL
+        external_key: External key for DB
+        state: Existing product state
+        dify_client: Dify client
+        repository: Product state repository
+        result: SyncResult to update
+        now: Current timestamp
+    
+    Returns:
+        True if update succeeded, False if it failed
+    """
+    new_content_hash = compute_content_hash(snapshot)
+    captured_doc_id_update: str | None = None
+    try:
+        name, text, _metadata = _format_product_document(
+            snapshot, store_id, product_url
+        )
+        response = dify_client.update_document_by_text(
+            state.dify_document_id, name, text
+        )
+        captured_doc_id_update = response.get("document", {}).get("id")
+        new_doc_id = captured_doc_id_update or state.dify_document_id
+        
+        repository.upsert(
+            ProductState(
+                external_key=external_key,
+                dify_document_id=new_doc_id,
+                content_hash=new_content_hash,
+                normalizer_version=NORMALIZER_VERSION,
+                last_seen_in_sitemap_at=now,
+            )
+        )
+        result.updated += 1
+        return True
+    
+    except (DifyRateLimitError, DifyAPIError) as e:
+        _handle_sync_failure(
+            external_key,
+            captured_doc_id_update or state.dify_document_id,
+            state.content_hash,
+            state.normalizer_version,
+            now,
+            repository,
+            result,
+            e,
+            "update",
+        )
+        return False
+    except Exception as e:
+        logging.exception(f"Unexpected error in update for {external_key}")
+        _handle_sync_failure(
+            external_key,
+            captured_doc_id_update or state.dify_document_id,
+            state.content_hash,
+            state.normalizer_version,
+            now,
+            repository,
+            result,
+            e,
+            "update",
+        )
+        return False
+
+
 def sync_products(
     snapshots: Iterable[ProductSnapshot],
     store_id: str,
@@ -194,103 +398,48 @@ def sync_products(
     dify_client: DifyKBClient,
 ) -> SyncResult:
     result = SyncResult()
-
+    
     for snapshot in snapshots:
         now = datetime.now(tz=timezone.utc)
         external_key = f"{store_id}:{snapshot.product_id}"
         product_url = f"{base_url}/products/{snapshot.product_id}"
         content_hash = compute_content_hash(snapshot)
-
+        
         state = repository.get_by_external_key(external_key)
-
+        
         needs_create = state is None or state.dify_document_id is None
-
+        
         if needs_create:
-            captured_doc_id: str | None = None
-            try:
-                name, text, metadata = _format_product_document(
-                    snapshot, store_id, product_url
-                )
-                response = dify_client.create_document_by_text(name, text, metadata)
-
-                batch_id = str(response.get("batch") or "")
-                captured_doc_id = response.get("document", {}).get("id")
-                doc_id = captured_doc_id
-                if not doc_id:
-                    raise ValueError(
-                        "Dify create response missing document id"
-                    )
-
-                repository.upsert(
-                    ProductState(
-                        external_key=external_key,
-                        dify_document_id=str(doc_id),
-                        content_hash=content_hash,
-                        normalizer_version=NORMALIZER_VERSION,
-                        last_seen_in_sitemap_at=now,
-                    )
-                )
-                result.created += 1
-                continue
-
-            except (DifyRateLimitError, DifyAPIError, Exception):
-                repository.upsert(
-                    ProductState(
-                        external_key=external_key,
-                        dify_document_id=captured_doc_id,
-                        content_hash=content_hash,
-                        normalizer_version=NORMALIZER_VERSION,
-                        last_seen_in_sitemap_at=now,
-                    )
-                )
-                result.failed += 1
-                result.failed_ids.append(external_key)
-                continue
-
+            _try_create_document(
+                snapshot,
+                store_id,
+                product_url,
+                external_key,
+                dify_client,
+                repository,
+                result,
+                now,
+            )
+            continue
+        
         assert state is not None and state.dify_document_id is not None
-
+        
         if state.content_hash != content_hash:
             logging.debug(
                 f"Content change detected for {external_key}: "
                 f"old_hash={state.content_hash[:8]}... new_hash={content_hash[:8]}..."
             )
-            captured_doc_id_update: str | None = None
-            try:
-                name, text, _metadata = _format_product_document(
-                    snapshot, store_id, product_url
-                )
-                response = dify_client.update_document_by_text(
-                    state.dify_document_id, name, text
-                )
-                batch_id = str(response.get("batch") or "")
-                captured_doc_id_update = response.get("document", {}).get("id")
-                new_doc_id = captured_doc_id_update or state.dify_document_id
-
-                repository.upsert(
-                    ProductState(
-                        external_key=external_key,
-                        dify_document_id=new_doc_id,
-                        content_hash=content_hash,
-                        normalizer_version=NORMALIZER_VERSION,
-                        last_seen_in_sitemap_at=now,
-                    )
-                )
-                result.updated += 1
-
-            except (DifyRateLimitError, DifyAPIError, Exception):
-                repository.upsert(
-                    ProductState(
-                        external_key=external_key,
-                        dify_document_id=captured_doc_id_update or state.dify_document_id,
-                        content_hash=state.content_hash,
-                        normalizer_version=state.normalizer_version,
-                        last_seen_in_sitemap_at=now,
-                    )
-                )
-                result.failed += 1
-                result.failed_ids.append(external_key)
-                continue
-
+            _try_update_document(
+                snapshot,
+                store_id,
+                product_url,
+                external_key,
+                state,
+                dify_client,
+                repository,
+                result,
+                now,
+            )
         else:
             logging.debug(
                 f"No content change for {external_key}: hash={content_hash[:8]}... (skipped)"
@@ -305,5 +454,5 @@ def sync_products(
                 )
             )
             result.skipped += 1
-
+    
     return result
