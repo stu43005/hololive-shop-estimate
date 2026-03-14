@@ -73,7 +73,7 @@ async def test_async_process_queue_processes_items_in_parallel(
         fake_fetch_product,
     )
 
-    result = await async_process_queue("store-a", policy, repo, _normalizer)
+    result = await async_process_queue("store-a", "https://shop.example.com", policy, repo, _normalizer)
 
     assert result.processed == 3
     assert result.failed == 0
@@ -112,7 +112,7 @@ async def test_async_process_queue_partial_failure_keeps_others_processing(
         fake_fetch_product,
     )
 
-    result = await async_process_queue("store-a", policy, repo, _normalizer)
+    result = await async_process_queue("store-a", "https://shop.example.com", policy, repo, _normalizer)
 
     assert result.processed == 2
     assert result.failed == 1
@@ -138,7 +138,7 @@ async def test_async_process_queue_empty_queue_returns_zero_counts(
         max_retries=1,
     )
 
-    result = await async_process_queue("store-a", policy, repo, _normalizer)
+    result = await async_process_queue("store-a", "https://shop.example.com", policy, repo, _normalizer)
 
     assert result.processed == 0
     assert result.failed == 0

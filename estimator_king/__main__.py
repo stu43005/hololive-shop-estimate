@@ -18,7 +18,6 @@ from estimator_king.crawler.sitemap import SitemapEnumerator
 from estimator_king.database.repository import ProductState, ProductStateRepository
 from estimator_king.sync.dify_client import DifyKBClient
 from estimator_king.sync.inactive import mark_inactive_products
-from estimator_king.sync.engine import sync_products
 
 # Try to import async pipeline; fall back to sync if aiohttp is unavailable
 try:
@@ -197,17 +196,19 @@ def run_crawler(config: AppConfig, db_path: str, dify_client: DifyKBClient, forc
 
             # Phase 3: Fetch + Sync queue
             if USE_ASYNC:
-                # Use async pipeline (converted to dict format)
+                # Use async pipeline (fetch + sync per-product)
                 async_result = asyncio.run(
-                    async_process_queue(store.id, config.crawler, repo, _product_state_normalizer)
+                    async_process_queue(
+                        store.id, store.base_url, config.crawler, repo,
+                        _product_state_normalizer, dify_client,
+                    )
                 )
-                sync_result = sync_products(repo.peek_all(store.id), store.id, store.base_url, repo, dify_client)
                 result = {
                     "fetched_ok": async_result.processed,
-                    "created": sync_result.created,
-                    "updated": sync_result.updated,
-                    "skipped": sync_result.skipped,
-                    "errors": async_result.failed + sync_result.failed,
+                    "created": async_result.created,
+                    "updated": async_result.updated,
+                    "skipped": async_result.skipped + async_result.sync_skipped,
+                    "errors": async_result.failed,
                 }
             else:
                 # Fall back to sync pipeline

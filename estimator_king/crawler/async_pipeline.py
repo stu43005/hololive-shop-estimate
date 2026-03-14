@@ -7,11 +7,12 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 
 from estimator_king.crawler.async_http_client import AsyncHTTPClient
 from estimator_king.crawler.shopify import fetch_product
+from estimator_king.sync.engine import sync_products
 
 if TYPE_CHECKING:
     from estimator_king.config_schema import CrawlerPolicy
     from estimator_king.database.repository import ProductState, ProductStateRepository
-
+    from estimator_king.sync.dify_client import DifyKBClient
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,9 @@ class PipelineResult:
     processed: int = 0
     failed: int = 0
     skipped: int = 0
+    created: int = 0
+    updated: int = 0
+    sync_skipped: int = 0
 
 
 class _AsyncToSyncHTTPAdapter:
@@ -37,9 +41,11 @@ class _AsyncToSyncHTTPAdapter:
 
 async def async_process_queue(
     store_id: str,
+    store_base_url: str,
     policy: CrawlerPolicy,
     state_repo: ProductStateRepository,
     normalizer: Callable[[Any, str, str, ProductState | None], ProductState | None],
+    dify_client: DifyKBClient | None = None,
 ) -> PipelineResult:
     entries = state_repo.peek_all(store_id)
     if not entries:
@@ -78,6 +84,22 @@ async def async_process_queue(
                     return
 
                 state_repo.upsert(normalized)
+
+                # Dify sync per-product (fire-and-forget, same as sync path)
+                if dify_client is not None:
+                    sync_result = await asyncio.to_thread(
+                        sync_products,
+                        [snapshot],
+                        store_id,
+                        store_base_url,
+                        state_repo,
+                        dify_client,
+                    )
+                    async with lock:
+                        result.created += sync_result.created
+                        result.updated += sync_result.updated
+                        result.sync_skipped += sync_result.skipped
+
                 state_repo.delete_queue_entry(entry_id)
                 async with lock:
                     result.processed += 1
