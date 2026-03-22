@@ -169,7 +169,7 @@ spec:
               mountPath: /app/storage
           resources:
             requests:
-              memory: "1Gi"
+              memory: "1536Mi"
               cpu: "50m"
             limits:
               memory: "2Gi"

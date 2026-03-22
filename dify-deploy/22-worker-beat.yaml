@@ -63,7 +63,7 @@ spec:
                   key: PLUGIN_DAEMON_KEY
           resources:
             requests:
-              memory: "320Mi"
+              memory: "384Mi"
               cpu: "20m"
             limits:
               memory: "512Mi"

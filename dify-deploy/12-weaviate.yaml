@@ -102,7 +102,7 @@ spec:
               mountPath: /var/lib/weaviate
           resources:
             requests:
-              memory: "64Mi"
+              memory: "256Mi"
               cpu: "10m"
             limits:
               memory: "512Mi"
