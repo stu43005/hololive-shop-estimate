@@ -915,9 +915,14 @@ Add `from dataclasses import dataclass, replace` at the top.
         conn.executescript(_read_schema_sql())
 ```
 
-(c) Rewrite `upsert` to the new columns. The INSERT column list and `ON CONFLICT` set become (note `last_seen_in_sitemap_at`, `last_fetch_success_at`, `last_indexed_at`, and `product_url` are `COALESCE`d so a `None` never wipes a stored value; counters are written directly):
+(c) Replace the **entire** `upsert` method body — keep the original `now`/`created_at`/`with_updated_timestamps` stamping preamble and the `refreshed` return postamble (do NOT delete them; they set the `NOT NULL` `created_at`/`updated_at` and return the persisted row), swapping in the new columns. `last_seen_in_sitemap_at`, `last_fetch_success_at`, `last_indexed_at`, and `product_url` are `COALESCE`d so a `None` never wipes a stored value; counters are written directly. The full method:
 
 ```python
+    def upsert(self, state: ProductState) -> ProductState:
+        now = _utc_now()
+        existing = self.get_by_external_key(state.external_key)
+        created_at = existing.created_at if existing and existing.created_at else now
+        state = state.with_updated_timestamps(created_at=created_at, updated_at=now)
         _ = self.connection.execute(
             """
             INSERT INTO products (
@@ -956,6 +961,10 @@ Add `from dataclasses import dataclass, replace` at the top.
                 _dt_to_iso(state.inactive_since),
             ),
         )
+        refreshed = self.get_by_external_key(state.external_key)
+        if refreshed is None:
+            raise RuntimeError("upsert failed to persist record")
+        return refreshed
 ```
 
 > Note on COALESCE semantics: `last_seen_in_sitemap_at` is COALESCE-preserved so a fetch write that
@@ -1685,10 +1694,45 @@ git commit -m "refactor(crawler): async pipeline uses VectorStore + embedder, re
 
 - [ ] **Step 1: Adapt the failing tests** in `tests/test_inactive.py`
 
-Add a fake vector store and pass it to every `mark_inactive_products(...)` call. Add the helper at
-the top and one new assertion test:
+The existing `tests/test_inactive.py` `_state(...)` helper builds a `ProductState` with the old
+fields (`dify_document_id`, no `store_id`/`product_id`/`product_url`), which Task 6 removed/made
+required. **Migrate the helper**, add a `FakeVectorStore`, pass it to every
+`mark_inactive_products(...)` call, and add a concrete deletion test. Replace the helper and add the
+test as:
 
 ```python
+from datetime import datetime
+
+from estimator_king.database.repository import ProductState
+
+
+def _state(
+    external_key,
+    *,
+    content_hash="a" * 64,
+    normalizer_version=2,
+    consecutive_failures=0,
+    consecutive_sitemap_misses=0,
+    inactive=False,
+    inactive_reason=None,
+    inactive_since=None,
+):
+    store_id, _, product_id = external_key.partition(":")
+    return ProductState(
+        external_key=external_key,
+        store_id=store_id,
+        product_id=product_id,
+        product_url=f"https://x/products/{product_id}",
+        content_hash=content_hash,
+        normalizer_version=normalizer_version,
+        consecutive_failures=consecutive_failures,
+        consecutive_sitemap_misses=consecutive_sitemap_misses,
+        inactive=inactive,
+        inactive_reason=inactive_reason,
+        inactive_since=inactive_since,
+    )
+
+
 class FakeVectorStore:
     def __init__(self):
         self.deleted = []
@@ -1698,17 +1742,19 @@ class FakeVectorStore:
 
 
 def test_marks_inactive_and_deletes_vectors(repo):  # `repo` = existing fixture
-    # arrange a product over the failure threshold (reuse existing helpers in this file)
-    # ... insert a product with consecutive_failures >= threshold ...
+    repo.upsert(_state("hololive:1", consecutive_failures=3))
     vs = FakeVectorStore()
+
     result = mark_inactive_products(repo, vs, failure_threshold=3, miss_threshold=4)
-    assert result.marked_inactive >= 1
-    # all newly-deactivated keys were deleted from the vector store in one call
-    assert vs.deleted and isinstance(vs.deleted[0], list)
+
+    assert result.marked_inactive == 1
+    assert vs.deleted == [["hololive:1"]]
 ```
 
 Update every existing `mark_inactive_products(repo, ...)` call in the file to
-`mark_inactive_products(repo, FakeVectorStore(), ...)`.
+`mark_inactive_products(repo, FakeVectorStore(), ...)`, and update any other call sites in the file
+that build a `ProductState` directly to use the migrated `_state(...)` helper (no
+`dify_document_id`; `store_id`/`product_id`/`product_url` populated).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -2040,9 +2086,9 @@ Add the imports `from estimator_king.llm.embeddings import EmbeddingProvider`,
 `dify_workflow_api_key` config checks and the `requests.Timeout`/`requests.HTTPError` branches and
 the `import requests`.
 
-> The shared singletons built in `bot/__main__.py` (Task 16) will later be injected; for now the
-> modal constructs them from config. (Task 16 refines this to pass shared instances via the modal
-> constructor — see that task.)
+> The shared singletons built in `bot/__main__.py` (Task 17) will later be injected; for now the
+> modal constructs them from config. (Task 17 refines this to pass a shared `Estimator` via the
+> modal constructor and removes this per-request construction — see that task.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -2088,21 +2134,33 @@ def test_store_has_no_fetch_interval():
     assert not hasattr(s, "fetch_interval_hours")
 
 
+def _write_yaml(tmp_path):
+    """Minimal valid stores config (config.validate() requires >=1 store)."""
+    path = tmp_path / "stores.yaml"
+    path.write_text(
+        "stores:\n"
+        "  - id: hololive\n"
+        "    base_url: https://x\n"
+        "    sitemap_url: https://x/sitemap.xml\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
 @patch.dict(os.environ, {
     "OPENAI_API_KEY": "sk-x", "EMBEDDING_MODEL": "bge-m3",
     "EMBEDDING_DIMENSIONS": "", "CHAT_MODEL": "gpt-4o", "CHROMA_PATH": "/data/chroma",
 }, clear=False)
 def test_build_provider_config_from_env(tmp_path):
-    cfg = AppConfig(
-        openai_api_key="sk-x", embedding_model="bge-m3", embedding_dimensions=None,
-        chat_model="gpt-4o", chroma_path="/data/chroma",
-    )
+    cfg = load_config(_write_yaml(tmp_path))  # exercises the env → AppConfig path
+
     pc = cfg.build_provider_config()
     assert pc.embedding_api_key == "sk-x"
-    assert pc.chat_api_key == "sk-x"
+    assert pc.chat_api_key == "sk-x"          # falls back to OPENAI_API_KEY
     assert pc.embedding_model == "bge-m3"
-    assert pc.embedding_dimensions is None
-    assert pc.chroma_path if False else pc.chat_model == "gpt-4o"
+    assert pc.embedding_dimensions is None    # EMBEDDING_DIMENSIONS="" → None via _opt_int
+    assert pc.chat_model == "gpt-4o"
+    assert cfg.chroma_path == "/data/chroma"  # chroma_path lives on AppConfig, not ProviderConfig
 ```
 
 Remove tests referencing `dify_api_key`, `dify_base_url`, `dify_dataset_id`,
@@ -2672,12 +2730,43 @@ git commit -m "refactor(cli): run one crawl cycle with VectorStore + providers, 
 - Modify: `estimator_king/bot/commands.py` (inject shared instances)
 - Test: `tests/test_bot_commands.py` (adjust modal construction)
 
-- [ ] **Step 1: Inject shared instances into `setup_commands`**
+- [ ] **Step 1: Inject the shared `Estimator` into `commands.py` (explicit edits)**
 
-Edit `estimator_king/bot/commands.py`: change `setup_commands(bot, config)` to
-`setup_commands(bot, config, estimator)` and have `ProductInputModal.__init__(self, estimator)`
-store the passed-in `Estimator`; `on_submit` calls `self._estimator.estimate_products(...)` instead
-of building providers per request. Update the modal/test construction accordingly. Add a test:
+Make these exact changes to `estimator_king/bot/commands.py` (replacing the per-request provider
+construction added in Task 12):
+
+(a) `ProductInputModal.__init__`: change the signature from `def __init__(self, config: AppConfig)`
+to `def __init__(self, estimator: Estimator)` and store `self._estimator = estimator` (drop
+`self._config`).
+
+(b) `ProductInputModal.on_submit`: replace the provider-building `try` block (from Task 12) with the
+injected estimator and remove the now-dead imports:
+
+```python
+        try:
+            user_id = f"discord-{interaction.user.id}"
+            batch = self._estimator.estimate_products(product_list, user_id)
+            for embed in format_estimates(batch):
+                await interaction.followup.send(embed=embed)
+        except EstimationError as e:
+            await interaction.followup.send(f"❌ Estimation failed: {e}")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Unexpected error: {e}")
+```
+
+Remove the now-unused imports `from estimator_king.llm.embeddings import EmbeddingProvider`,
+`from estimator_king.llm.chat import ChatProvider`, and
+`from estimator_king.vectorstore.store import VectorStore` (added in Task 12). Keep
+`from estimator_king.bot.estimator import Estimator` and
+`from estimator_king.llm.chat import EstimateBatch, EstimationError`.
+
+(c) `setup_commands`: change the signature from `setup_commands(bot, config)` to
+`setup_commands(bot: discord.Client, config: AppConfig, estimator: Estimator)`, and change the
+`estimate` command callback body from `await interaction.response.send_modal(ProductInputModal(config))`
+to `await interaction.response.send_modal(ProductInputModal(estimator))` (the closure now captures
+`estimator`). `config` is retained in the signature for parity but no longer used to build providers.
+
+Add a test:
 
 ```python
 def test_modal_uses_injected_estimator():
@@ -2727,8 +2816,8 @@ scheduler as a background task before `bot.start`:
 ```
 
 Remove the old `tree = setup_commands(bot, config)` line and the `DIFY_WORKFLOW_API_KEY` handling.
-(Edit `commands.py` `on_submit` to drop the per-request provider construction from Task 12, now that
-the estimator is injected.)
+(The `commands.py` `on_submit`/modal/`setup_commands` edits — dropping the per-request provider
+construction in favor of the injected `Estimator` — are done in Step 1 above.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -2787,12 +2876,12 @@ Expected: PASS — no collection errors, no references to deleted modules.
 ```bash
 basedpyright estimator_king/
 ruff check estimator_king/ tests/
-git add -u
+git add estimator_king/sync/__init__.py
 git commit -m "chore: delete Dify client/workflow modules and obsolete tests"
 ```
 
-(`git add -u` here stages the deletions and the `sync/__init__.py` edit only — all are part of this
-removal unit.)
+(The module/test deletions are already staged by the `git rm` calls in Step 2; only the
+`sync/__init__.py` docstring edit remains to stage. Do **not** use `git add -u`/`-A`.)
 
 ---
 
@@ -2935,9 +3024,12 @@ Expected: renders without error; output contains the bot Deployment (with the PV
 - [ ] **Step 7: Commit**
 
 ```bash
-git add deploy/ && git rm -r --cached dify-deploy 2>/dev/null; git add -A deploy dify-deploy 2>/dev/null
+git add deploy/
 git commit -m "chore(deploy): remove CronJob + dify-deploy, bot mounts PVC with OpenAI/Chroma env"
 ```
+
+(The `dify-deploy/` and `deploy/crawler-cronjob.yaml` deletions are already staged by the `git rm`
+calls in Step 1; only the `deploy/` edits remain. Do **not** use `git add -A`.)
 
 ---
 
@@ -2952,7 +3044,8 @@ git commit -m "chore(deploy): remove CronJob + dify-deploy, bot mounts PVC with 
 
 ```bash
 git rm docs/dify-dataset-setup.md docs/dify-workflow-contract.md dify_python_sdk_research_report.md estimator-dify-plan.md
-[ -d dify ] && git rm -r dify || true
+# `dify/` at repo root is an untracked nested dir (not tracked by this repo) — use rm, not git rm:
+[ -d dify ] && rm -rf dify || true
 ```
 
 - [ ] **Step 2: Rewrite `.env.example`**
@@ -3010,9 +3103,12 @@ Expected: no matches (all Dify references removed).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add -A
+git add README.md .env.example docs/local-runbook.md docs/ops-runbook.md
 git commit -m "docs: remove Dify docs, document provider/Chroma setup and re-index procedure"
 ```
+
+(The Dify doc deletions are already staged by the `git rm` in Step 1; the untracked `dify/` removal
+needs no staging. Do **not** use `git add -A`.)
 
 ---
 
