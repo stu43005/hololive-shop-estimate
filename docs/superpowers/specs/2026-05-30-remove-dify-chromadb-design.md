@@ -82,10 +82,11 @@ A single process (the bot) owns all state and logic:
 │                 Discord embeds (existing format_workflow_result rendering)         │
 │                                                                                    │
 │  Scheduler (in-process asyncio loop, daily)                                        │
-│    for each store, per run:                                                        │
+│    for each store:                                                                 │
 │      populate_queue_from_sitemap()  → new products always enqueued (new_count)     │
 │      enqueue_oldest_products(limit = max_products_per_run − new_count)             │
 │      async_process_queue()  → fetch → EmbeddingProvider.embed → VectorStore.upsert │
+│    after all stores (once per cycle):                                              │
 │      mark_inactive_products() → VectorStore.delete(inactive ids)                   │
 │                                                                                    │
 │  State on one RWO PVC:                                                             │
@@ -295,20 +296,59 @@ Keep the document formatting; replace the Dify calls with embed + upsert.
   and stored as the Chroma `document`. Extend the returned `metadata` to include `title` and a
   representative `price_jpy` (e.g. the minimum variant price, integer) for retrieval display.
 - **Replace** `_try_create_document` / `_try_update_document` / `_poll_indexing_status` /
-  `DifyKBClient` usage with a single path:
-  1. compute `content_hash`;
-  2. if `state` exists and `state.content_hash == content_hash` and product is already indexed
-     (`last_indexed_at` not null) → **skip** (increment `skipped`);
-  3. otherwise embed `text_content` via `EmbeddingProvider.embed_documents([text])[0]`,
-     `VectorStore.upsert(external_key, text, embedding, metadata)`, then persist
-     `ProductState` with updated `content_hash` and `last_indexed_at = now`
-     (increment `created` if new, else `updated`).
-- `sync_products(snapshots, store_id, base_url, repository, embedder, vector_store)` signature
-  replaces the `dify_client` parameter with `embedder` + `vector_store`.
-- **Error handling**: keep the fire-and-forget pattern. On embedding/vector errors, log, record
-  the product state without advancing `last_indexed_at`, and count `failed` — the product is
-  retried on a later run. A new `SyncError` (or reuse of provider exceptions) is caught here;
-  unexpected exceptions are logged via `logging.exception` and counted as failed.
+  `DifyKBClient` usage. `sync_products(snapshots, store_id, base_url, repository, embedder,
+  vector_store)` replaces the `dify_client` parameter with `embedder` + `vector_store`. For each
+  snapshot (which has already been fetched successfully by the caller):
+  1. compute `external_key = "{store_id}:{product_id}"`, `product_url`, `content_hash`; load
+     `state = repository.get_by_external_key(external_key)`;
+  2. **skip** if `state` exists, `state.content_hash == content_hash`, and `state.last_indexed_at`
+     is not null → increment `skipped`. The product was still fetched, so the persisted
+     `ProductState` (step 4) is written with the existing `content_hash`/`last_indexed_at`
+     carried forward;
+  3. otherwise (new or changed) embed `text_content` via
+     `EmbeddingProvider.embed_documents([text])[0]`, then
+     `VectorStore.upsert(external_key, text, embedding, metadata)`; set `last_indexed_at = now`;
+     increment `created` if `state` is None else `updated`;
+  4. **persist `ProductState`** (the single write — see "Single writer" below) with `store_id`,
+     `product_id`, `product_url`, `content_hash`, `normalizer_version`,
+     `last_fetch_success_at = now`, `last_indexed_at` (now if (re)indexed in step 3, else the
+     carried-forward value), `consecutive_failures = 0`.
+
+- **Single writer (reconciles the async double-upsert).** Today `async_process_queue` writes each
+  product twice — once via `normalizer(...) → state_repo.upsert(normalized)` and again via
+  `sync_products(...)`. In the new design `sync_products` is the **sole** writer of product rows
+  on the success path: the separate `state_repo.upsert(normalized)` call in `async_pipeline.py`
+  is **removed**. The normalizer is reduced to a pure decision function
+  `should_index(snapshot, store_id, product_url, existing_state) -> bool` (returns False when the
+  product is gone/invalid — see below); it no longer constructs or upserts a `ProductState`.
+  `sync_products` derives `store_id`/`product_id` from the snapshot + `store_id` argument, so the
+  new schema columns are populated by this single write.
+
+- **Fetch success/failure bookkeeping (makes the budget + inactive logic work).** Because
+  `last_fetch_success_at` drives the oldest-first budget query (§7) and `consecutive_failures`
+  drives inactivation (§10), the async path must maintain them — today only the sync pipeline did:
+  - On a **successful fetch + sync** of a product, `sync_products` sets
+    `last_fetch_success_at = now` and `consecutive_failures = 0` in the persisted `ProductState`
+    (covers create/update/skip — all imply a successful fetch).
+  - On a **fetch failure** in `async_process_queue` (the `except` branch), call
+    `repository.increment_consecutive_failures(external_key)` for products already in `products`
+    (a brand-new URL with no row yet is simply left in the queue for retry). The queue entry is
+    **not** deleted on failure (existing resumability behavior).
+  - `repository.upsert` must **`COALESCE`** the timestamp/counter columns it already coalesces
+    today (and add `last_fetch_success_at`, `last_indexed_at`, `consecutive_failures` to that set)
+    so a write that legitimately omits a field never wipes a previously-stored value.
+
+- **Vector deletion on disappearance.** When the normalizer's `should_index` returns False for a
+  fetched product that already has a row (product removed/invalid), `async_process_queue` deletes
+  its vector via `vector_store.delete([external_key])` (in addition to deleting the queue entry),
+  consistent with §10.
+
+- **Error handling**: keep the fire-and-forget pattern. On embedding/vector errors inside
+  `sync_products`, log, persist the `ProductState` **without** advancing `last_indexed_at` (but
+  still advancing `last_fetch_success_at`, since the fetch itself succeeded), and count `failed` —
+  the product is re-indexed on a later run because `content_hash != last indexed`. Provider
+  exceptions are caught here; unexpected exceptions are logged via `logging.exception` and counted
+  as failed.
 - `SyncResult` (created/updated/skipped/failed/failed_ids) is unchanged.
 
 ---
@@ -335,15 +375,22 @@ def enqueue_oldest_products(store, repo, *, limit: int) -> int:
     return enqueued
 ```
 
-- `--force-refetch` still enqueues **all** active products (bypasses the budget), for backfills.
+- Under `--force-refetch`, `enqueue_oldest_products` is **not** called; instead the orchestrator
+  (§7.2) enqueues **all** active products via `repo.list_active(store.id)` (bypasses the budget),
+  for backfills. `enqueue_oldest_products` itself does not take a `force_refetch` argument — the
+  branch lives in the orchestrator.
 
 ### 7.2 Per-run orchestration (per store)
 
 ```
-new_count   = populate_queue_from_sitemap(store, repo, enumerator)
-remaining   = max(0, policy.max_products_per_run - new_count)
-enqueue_oldest_products(store, repo, limit=remaining)        # skipped when force_refetch
-async_process_queue(...)                                     # fetch → embed → upsert
+new_count = populate_queue_from_sitemap(store, repo, enumerator)   # new products always enqueued
+if force_refetch:
+    for state in repo.list_active(store.id):                       # backfill: all active
+        repo.enqueue_url(store.id, state.product_url)
+else:
+    remaining = max(0, policy.max_products_per_run - new_count)
+    enqueue_oldest_products(store, repo, limit=remaining)          # oldest existing, budgeted
+async_process_queue(...)                                           # fetch → embed → upsert
 ```
 
 - New products are **always** fetched (even if `new_count > max_products_per_run`).
@@ -361,12 +408,18 @@ In-process asyncio loop, no new dependency:
   repeats.
 - A re-entrancy guard (`asyncio.Lock` or a "running" flag) prevents a new cycle from starting
   while one is still in progress.
-- The cycle reuses `async_process_queue` and `mark_inactive_products`. It opens its own
-  `ProductStateRepository` (the SQLite connection allows cross-thread access; ChromaDB client
-  is shared) for the duration of a cycle.
+- **Cycle structure** (mirrors today's `run_crawler` in `__main__.py`): iterate the stores,
+  running the §7.2 per-store orchestration for each; then, **once after all stores**, call
+  `mark_inactive_products(repo, vector_store, failure_threshold=..., miss_threshold=...)`. The
+  inactive check is intentionally cross-store and runs a single time per cycle (matching current
+  behavior and the §10 note) — it is **not** inside the per-store loop.
+- The cycle opens its own `ProductStateRepository` (the SQLite connection allows cross-thread
+  access; the ChromaDB client / `VectorStore` is the single shared instance) for the duration of
+  a cycle.
 - Errors in one store's processing are logged and do not abort the other stores or the loop.
-- A manual entry point is retained: `python -m estimator_king` runs exactly one crawl cycle and
-  exits (used for local runs and backfills via `--force-refetch`).
+- A manual entry point is retained: `python -m estimator_king` runs exactly one crawl cycle
+  (same structure: all stores, then one cross-store inactive check) and exits — used for local
+  runs and backfills via `--force-refetch`.
 
 ---
 
@@ -661,10 +714,15 @@ Research against the JMTEB (Japanese Massive Text Embedding Benchmark) and OpenA
   not abort the cycle (with mocked pipeline).
 - **Bot commands**: keep/adapt rendering tests for `format_workflow_result` against
   `EstimateBatch`; adapt error-path tests to provider exceptions.
-- **Remove**: `test_dify_client.py`, `test_async_dify_wrapper.py`, `test_poll_indexing_status.py`,
-  `test_bot_workflow_client.py`, and Dify-specific assertions in `test_sync_*`,
-  `test_config.py`, `test_main_async.py`, `test_migration.py`, `test_cli.py`,
-  `test_integration_async_pipeline.py`, `test_e2e_mocked.py` — replaced by the equivalents above.
+- **Remove** (Dify-specific, will not survive the rewrite): `test_dify_client.py`,
+  `test_async_dify_wrapper.py`, `test_poll_indexing_status.py`, `test_bot_workflow_client.py`,
+  `test_sync_products_docid.py` (asserts on the removed `dify_document_id`),
+  `test_sync_fire_and_forget.py` (Dify async-indexing fire-and-forget), and
+  `test_migration.py` (the migration system is deleted).
+- **Adapt** (rework, not delete): Dify-specific assertions in the remaining `test_sync_*`,
+  `test_config.py`, `test_main_async.py`, `test_cli.py`, `test_integration_async_pipeline.py`,
+  and `test_e2e_mocked.py` → rewritten against the embed/upsert + provider/VectorStore equivalents
+  above (and the new `store_id` column, budget, and scheduler behavior).
 - All work validated with `pyright`/`basedpyright`, `ruff`, and `pytest` per project rules.
 
 ---
@@ -676,4 +734,3 @@ Research against the JMTEB (Japanese Massive Text Embedding Benchmark) and OpenA
 3. **`EMBEDDING_DIMENSIONS` default 1024** for `text-embedding-3-large` — *default: 1024*.
 4. **Cross-store retrieval** in `/estimate` (no `where` store filter) — *default: search all
    stores*, since users query product names without specifying a store.
-```
