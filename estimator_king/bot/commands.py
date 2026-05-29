@@ -3,10 +3,12 @@
 import discord
 from discord import app_commands
 from discord.ui import Modal, TextInput
-import requests
 
 from estimator_king.config_schema import AppConfig
-from estimator_king.bot.workflow_client import WorkflowClient, WorkflowResult
+from estimator_king.bot.estimator import Estimator
+from estimator_king.llm.chat import EstimateBatch, EstimationError, ChatProvider
+from estimator_king.llm.embeddings import EmbeddingProvider
+from estimator_king.vectorstore.store import VectorStore
 
 # Constants for input validation
 MAX_PRODUCTS = 10
@@ -29,35 +31,31 @@ def parse_product_lines(text: str) -> list[str]:
     return [line.strip() for line in lines if line.strip()]
 
 
-def format_workflow_result(
-    result: WorkflowResult, max_length: int = 2000
+def format_estimates(
+    batch: EstimateBatch, max_length: int = 2000
 ) -> list[discord.Embed]:
-    """Format WorkflowResult into Discord embeds with length limits.
+    """Format EstimateBatch into Discord embeds with length limits.
 
-    Converts a WorkflowResult from the API into Discord embed objects,
-    handling length limits by splitting into multiple embeds if needed.
+    Converts an EstimateBatch into Discord embed objects, handling length
+    limits by splitting into multiple embeds if needed.
 
     Args:
-        result: WorkflowResult from WorkflowClient
+        batch: EstimateBatch from Estimator
         max_length: Maximum characters per embed description (default: 2000)
 
     Returns:
         List of discord.Embed objects (may be multiple if content exceeds limit)
     """
-    if not result.estimates:
+    if not batch.estimates:
         embed = discord.Embed(
             title="Price Estimates (0 products)",
             description="No estimates returned from the workflow.",
             color=discord.Color.blue(),
         )
-        if result.workflow_run_id and result.elapsed_time is not None:
-            embed.set_footer(
-                text=f"Run ID: {result.workflow_run_id} | {result.elapsed_time:.2f}s"
-            )
         return [embed]
 
     formatted_products = []
-    for estimate in result.estimates:
+    for estimate in batch.estimates:
         rationale = estimate.rationale
         if len(rationale) > 300:
             rationale = rationale[:297] + "..."
@@ -87,7 +85,6 @@ def format_workflow_result(
     full_content = "".join(formatted_products)
 
     embeds = []
-    total_products = len(result.estimates)
     current_content = ""
     page_num = 1
 
@@ -99,14 +96,6 @@ def format_workflow_result(
                 description=current_content.rstrip("\n---\n\n"),
                 color=discord.Color.blue(),
             )
-            if (
-                page_num == 1
-                and result.workflow_run_id
-                and result.elapsed_time is not None
-            ):
-                embed.set_footer(
-                    text=f"Run ID: {result.workflow_run_id} | {result.elapsed_time:.2f}s"
-                )
             embeds.append(embed)
             current_content = product_block
             page_num += 1
@@ -119,10 +108,6 @@ def format_workflow_result(
             description=current_content.rstrip("\n---\n\n"),
             color=discord.Color.blue(),
         )
-        if page_num == 1 and result.workflow_run_id and result.elapsed_time is not None:
-            embed.set_footer(
-                text=f"Run ID: {result.workflow_run_id} | {result.elapsed_time:.2f}s"
-            )
         embeds.append(embed)
 
     return embeds
@@ -151,8 +136,7 @@ class ProductInputModal(Modal, title="Enter Product Names"):
         """Handle modal submission with validation and processing.
 
         Parses the input, validates product count, defers the response for
-        processing, and sends a placeholder message indicating that workflow
-        integration is coming.
+        processing, and sends price estimate embeds.
 
         Args:
             interaction: Discord interaction object from modal submission
@@ -176,37 +160,17 @@ class ProductInputModal(Modal, title="Enter Product Names"):
 
         await interaction.response.defer(thinking=True)
 
-        api_key = self._config.dify_workflow_api_key
-        if not api_key:
-            await interaction.followup.send(
-                "❌ Bot configuration error: Missing DIFY_WORKFLOW_API_KEY"
-            )
-            return
-
         try:
-            base_url = self._config.dify_workflow_base_url
-            if base_url:
-                client = WorkflowClient(api_key=api_key, base_url=base_url)
-            else:
-                client = WorkflowClient(api_key=api_key)
+            embedder = EmbeddingProvider(self._config.build_provider_config())
+            chat = ChatProvider(self._config.build_provider_config())
+            store = VectorStore(self._config.chroma_path)
+            estimator = Estimator(embedder, chat, store)
             user_id = f"discord-{interaction.user.id}"
-
-            result = client.estimate_products(product_list, user_id)
-
-            embeds = format_workflow_result(result)
-            for embed in embeds:
+            batch = estimator.estimate_products(product_list, user_id)
+            for embed in format_estimates(batch):
                 await interaction.followup.send(embed=embed)
-
-        except requests.Timeout:
-            await interaction.followup.send(
-                "❌ Request timed out. Please try again with fewer products."
-            )
-        except requests.HTTPError as e:
-            await interaction.followup.send(
-                f"❌ API error: {e}. Please try again later."
-            )
-        except ValueError as e:
-            await interaction.followup.send(f"❌ Invalid response from API: {e}")
+        except EstimationError as e:
+            await interaction.followup.send(f"❌ Estimation failed: {e}")
         except Exception as e:
             await interaction.followup.send(f"❌ Unexpected error: {e}")
 
@@ -219,7 +183,7 @@ def setup_commands(bot: discord.Client, config: AppConfig) -> app_commands.Comma
 
     Args:
         bot: Discord bot client instance
-        config: Application configuration (provides workflow API credentials)
+        config: Application configuration (provides provider credentials)
 
     Returns:
         CommandTree with registered commands
