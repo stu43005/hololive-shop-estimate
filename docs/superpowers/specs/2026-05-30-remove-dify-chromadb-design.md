@@ -317,12 +317,13 @@ Keep the document formatting; replace the Dify calls with embed + upsert.
 - **Single writer (reconciles the async double-upsert).** Today `async_process_queue` writes each
   product twice — once via `normalizer(...) → state_repo.upsert(normalized)` and again via
   `sync_products(...)`. In the new design `sync_products` is the **sole** writer of product rows
-  on the success path: the separate `state_repo.upsert(normalized)` call in `async_pipeline.py`
-  is **removed**. The normalizer is reduced to a pure decision function
-  `should_index(snapshot, store_id, product_url, existing_state) -> bool` (returns False when the
-  product is gone/invalid — see below); it no longer constructs or upserts a `ProductState`.
-  `sync_products` derives `store_id`/`product_id` from the snapshot + `store_id` argument, so the
-  new schema columns are populated by this single write.
+  on the success path: the separate `state_repo.upsert(normalized)` call **and** the `normalizer`
+  parameter are **removed** from `async_process_queue`. The normalizer is deleted outright (not
+  reduced to a predicate): `fetch_product` raises on every HTTP/JSON error
+  (`ShopifyHTTPError` / `ShopifyJSONError`), so any snapshot it returns is already valid and
+  indexable — there is no in-band "skip this fetched product" decision to make, and disappearance
+  is handled separately (see below). `sync_products` derives `store_id`/`product_id` from the
+  snapshot + `store_id` argument, so the new schema columns are populated by this single write.
 
 - **Fetch success/failure bookkeeping (makes the budget + inactive logic work).** Because
   `last_fetch_success_at` drives the oldest-first budget query (§7) and `consecutive_failures`
@@ -330,18 +331,23 @@ Keep the document formatting; replace the Dify calls with embed + upsert.
   - On a **successful fetch + sync** of a product, `sync_products` sets
     `last_fetch_success_at = now` and `consecutive_failures = 0` in the persisted `ProductState`
     (covers create/update/skip — all imply a successful fetch).
-  - On a **fetch failure** in `async_process_queue` (the `except` branch), call
-    `repository.increment_consecutive_failures(external_key)` for products already in `products`
-    (a brand-new URL with no row yet is simply left in the queue for retry). The queue entry is
-    **not** deleted on failure (existing resumability behavior).
-  - `repository.upsert` must **`COALESCE`** the timestamp/counter columns it already coalesces
-    today (and add `last_fetch_success_at`, `last_indexed_at`, `consecutive_failures` to that set)
-    so a write that legitimately omits a field never wipes a previously-stored value.
+  - On a **fetch failure** in `async_process_queue` (the `except` branch), look up the existing
+    row via `repository.get_by_product_url(store_id, product_url)`; if found, call
+    `repository.increment_consecutive_failures(state.external_key)` (a brand-new URL with no row
+    yet is simply left in the queue for retry — there is no `external_key` to record against). The
+    queue entry is **not** deleted on failure (existing resumability behavior).
+  - `repository.upsert` must **`COALESCE`** only the **nullable** timestamp columns
+    `last_fetch_success_at` and `last_indexed_at` (in addition to those it already coalesces:
+    `dify_document_id` is gone; `product_url` stays coalesced), so a write that legitimately omits
+    one of these never wipes a previously-stored value. `consecutive_failures` is a non-nullable
+    `int` and is **not** coalesced — it is always written with the concrete value the caller
+    supplies (`0` on success, the incremented value via `increment_consecutive_failures`).
 
-- **Vector deletion on disappearance.** When the normalizer's `should_index` returns False for a
-  fetched product that already has a row (product removed/invalid), `async_process_queue` deletes
-  its vector via `vector_store.delete([external_key])` (in addition to deleting the queue entry),
-  consistent with §10.
+- **Vector deletion on disappearance** is **not** done per-fetch. A removed product simply stops
+  appearing in the sitemap (→ `consecutive_sitemap_misses` accrues) and/or starts failing to
+  fetch (→ `consecutive_failures` accrues); once either threshold is exceeded,
+  `mark_inactive_products` flags it inactive and deletes its vector in one place (§10). There is
+  no separate `should_index`-driven deletion path.
 
 - **Error handling**: keep the fire-and-forget pattern. On embedding/vector errors inside
   `sync_products`, log, persist the `ProductState` **without** advancing `last_indexed_at` (but
@@ -476,8 +482,9 @@ Flow (preserving existing chunking — `CHUNK_SIZE = 10` per LLM call):
 
 - `mark_inactive_products` still flags products exceeding failure / sitemap-miss thresholds.
 - **New behavior**: when a product is marked inactive, its vector is **deleted** from ChromaDB
-  (`VectorStore.delete([external_key])`) so estimates never cite dead products. Likewise, when
-  the normalizer returns `None` for a product (gone), its vector is deleted.
+  (`VectorStore.delete([external_key])`) so estimates never cite dead products. This is the
+  **single** disappearance-handling path — products that leave the sitemap (sitemap-miss
+  threshold) or repeatedly fail to fetch incl. 404 (failure threshold) flow through here (§6).
 - `mark_inactive_products` gains a `vector_store` parameter; it collects the external_keys it
   deactivates this run and deletes them in one `VectorStore.delete(ids)` call.
 - The existing cross-store coupling note (inactive check runs across all stores) is unchanged
@@ -542,7 +549,9 @@ query. `product_url` is now `NOT NULL`.
   row handling in `_ensure_schema`. `_ensure_schema` becomes `conn.executescript(schema_sql)`.
 - **Replace** all `WHERE external_key LIKE '{store_id}:%'` filters with `WHERE store_id = ?`
   (affects `list_active`, `get_by_product_url`, and any per-store query).
-- **Remove** `get_products_needing_fetch` (interval-based, superseded).
+- **Remove** `get_products_needing_fetch` (interval-based, superseded) and `get_stale_products`
+  (days-based staleness, now unused — only referenced by tests today; its supporting
+  `idx_products_last_seen_in_sitemap_at` index is also dropped, §11.1).
 - **Add** `get_oldest_active_products(store_id, limit)`:
   ```sql
   SELECT * FROM products
@@ -551,8 +560,8 @@ query. `product_url` is now `NOT NULL`.
   LIMIT ?
   ```
 - `upsert` writes the new columns; `external_key` remains the conflict key. `store_id` /
-  `product_id` are derived from `external_key` (split on first `:`) at the call site or in the
-  normalizer.
+  `product_id` are derived from the snapshot + `store_id` argument by `sync_products` (the single
+  writer, §6), which constructs the `ProductState` it persists.
 - Keep `check_same_thread=False` (the scheduler thread-pool and async pipeline need it).
 
 ---
@@ -721,8 +730,9 @@ Research against the JMTEB (Japanese Massive Text Embedding Benchmark) and OpenA
   `test_migration.py` (the migration system is deleted).
 - **Adapt** (rework, not delete): Dify-specific assertions in the remaining `test_sync_*`,
   `test_config.py`, `test_main_async.py`, `test_cli.py`, `test_integration_async_pipeline.py`,
-  and `test_e2e_mocked.py` → rewritten against the embed/upsert + provider/VectorStore equivalents
-  above (and the new `store_id` column, budget, and scheduler behavior).
+  `test_e2e_mocked.py`, and `test_async_pipeline.py` (drops the removed `normalizer` parameter /
+  double-upsert assertions) → rewritten against the embed/upsert + provider/VectorStore
+  equivalents above (and the new `store_id` column, budget, and scheduler behavior).
 - All work validated with `pyright`/`basedpyright`, `ruff`, and `pytest` per project rules.
 
 ---
