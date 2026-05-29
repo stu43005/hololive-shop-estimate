@@ -44,6 +44,9 @@ class ChatProvider:
     (for endpoints without strict schema support, e.g. ollama).
     """
 
+    _config: ProviderConfig
+    _client: OpenAI
+
     def __init__(self, config: ProviderConfig) -> None:
         self._config = config
         self._client = OpenAI(api_key=config.chat_api_key, base_url=config.chat_base_url)
@@ -78,7 +81,7 @@ class ChatProvider:
         )
         content = response.choices[0].message.content or ""
         try:
-            data = json.loads(content)
+            data: object = json.loads(content)
             return EstimateBatch.model_validate(data)
         except (json.JSONDecodeError, ValidationError) as exc:
             raise EstimationError(f"could not parse estimates: {exc}") from exc
