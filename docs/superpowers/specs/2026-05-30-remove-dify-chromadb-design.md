@@ -742,11 +742,18 @@ Research against the JMTEB (Japanese Massive Text Embedding Benchmark) and OpenA
   `test_sync_products_docid.py` (asserts on the removed `dify_document_id`),
   `test_sync_fire_and_forget.py` (Dify async-indexing fire-and-forget), and
   `test_migration.py` (the migration system is deleted).
-- **Adapt** (rework, not delete): Dify-specific assertions in the remaining `test_sync_*`,
-  `test_config.py`, `test_main_async.py`, `test_cli.py`, `test_integration_async_pipeline.py`,
-  `test_e2e_mocked.py`, and `test_async_pipeline.py` (drops the removed `normalizer` parameter /
-  double-upsert assertions) → rewritten against the embed/upsert + provider/VectorStore
-  equivalents above (and the new `store_id` column, budget, and scheduler behavior).
+- **Adapt** (rework, not delete) — rewritten against the embed/upsert + provider/VectorStore
+  equivalents above (and the new `store_id` column, budget, and scheduler behavior):
+  - `test_sync_*` (remaining), `test_config.py`, `test_main_async.py`, `test_cli.py`,
+    `test_integration_async_pipeline.py`, `test_e2e_mocked.py` — Dify-specific assertions → new equivalents.
+  - `test_async_pipeline.py` — drop the removed `normalizer` parameter / double-upsert assertions.
+  - `test_pipeline.py` — drop the `enqueue_stale_products`, `process_queue` (sync `DifyKBClient`
+    path), and `get_products_needing_fetch` suites; rewrite around `enqueue_oldest_products`, the
+    §7.2 budget arithmetic, and the embed/upsert async path.
+  - `test_inactive.py` — pass the new required `vector_store` argument to every
+    `mark_inactive_products(...)` call and assert inactive-vector deletion (§10).
+  - `test_repository.py` — remove the `get_stale_products` / `get_products_needing_fetch` cases;
+    add `get_oldest_active_products` ordering (NULLs first) and `store_id`-column query tests.
 - All work validated with `pyright`/`basedpyright`, `ruff`, and `pytest` per project rules.
 
 ---
