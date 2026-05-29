@@ -11,8 +11,9 @@ from estimator_king.sync.engine import sync_products
 
 if TYPE_CHECKING:
     from estimator_king.config_schema import CrawlerPolicy
-    from estimator_king.database.repository import ProductState, ProductStateRepository
-    from estimator_king.sync.dify_client import DifyKBClient
+    from estimator_king.database.repository import ProductStateRepository
+    from estimator_king.llm.embeddings import EmbeddingProvider
+    from estimator_king.vectorstore.store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +30,11 @@ class PipelineResult:
 
 class _AsyncToSyncHTTPAdapter:
     def __init__(self, client: AsyncHTTPClient, loop: asyncio.AbstractEventLoop):
-        self._client: AsyncHTTPClient = client
-        self._loop: asyncio.AbstractEventLoop = loop
+        self._client = client
+        self._loop = loop
 
     def get(self, url: str):
-        text = asyncio.run_coroutine_threadsafe(
-            self._client.get(url), self._loop
-        ).result()
+        text = asyncio.run_coroutine_threadsafe(self._client.get(url), self._loop).result()
         return type("_Resp", (), {"status_code": 200, "text": text})()
 
 
@@ -44,8 +43,8 @@ async def async_process_queue(
     store_base_url: str,
     policy: CrawlerPolicy,
     state_repo: ProductStateRepository,
-    normalizer: Callable[[Any, str, str, ProductState | None], ProductState | None],
-    dify_client: DifyKBClient | None = None,
+    embedder: EmbeddingProvider,
+    vector_store: VectorStore,
 ) -> PipelineResult:
     entries = state_repo.peek_all(store_id)
     if not entries:
@@ -63,59 +62,32 @@ async def async_process_queue(
             entry_id = int(entry["id"])
             product_url = str(entry["product_url"])
             try:
-                snapshot = await asyncio.to_thread(
-                    fetch_with_adapter,
-                    product_url,
-                    adapter,
+                snapshot = await asyncio.to_thread(fetch_with_adapter, product_url, adapter)
+                sync_result = await asyncio.to_thread(
+                    sync_products, [snapshot], store_id, store_base_url,
+                    state_repo, embedder, vector_store,
                 )
-                external_key = f"{store_id}:{snapshot.product_id}"
-                existing_state = state_repo.get_by_external_key(external_key)
-                normalized = normalizer(
-                    snapshot,
-                    store_id,
-                    product_url,
-                    existing_state,
-                )
-
-                if normalized is None:
-                    state_repo.delete_queue_entry(entry_id)
-                    async with lock:
-                        result.skipped += 1
-                    return
-
-                state_repo.upsert(normalized)
-
-                # Dify sync per-product (fire-and-forget, same as sync path)
-                if dify_client is not None:
-                    sync_result = await asyncio.to_thread(
-                        sync_products,
-                        [snapshot],
-                        store_id,
-                        store_base_url,
-                        state_repo,
-                        dify_client,
-                    )
-                    async with lock:
-                        result.created += sync_result.created
-                        result.updated += sync_result.updated
-                        result.sync_skipped += sync_result.skipped
-
                 state_repo.delete_queue_entry(entry_id)
                 async with lock:
+                    result.created += sync_result.created
+                    result.updated += sync_result.updated
+                    result.sync_skipped += sync_result.skipped
                     result.processed += 1
             except Exception:
-                logger.exception(
-                    "Error processing async queue entry %s (url=%s)",
-                    entry_id,
-                    product_url,
-                )
+                logger.exception("Error processing %s (url=%s)", entry_id, product_url)
+                existing = state_repo.get_by_product_url(store_id, product_url)
+                if existing is not None:
+                    state_repo.increment_consecutive_failures(existing.external_key)
                 async with lock:
                     result.failed += 1
+                # queue entry intentionally kept for retry
 
-        pipeline_sem = asyncio.Semaphore(policy.concurrency_per_domain)
-        async def _bounded_handle(entry: tuple) -> None:
-            async with pipeline_sem:
+        sem = asyncio.Semaphore(policy.concurrency_per_domain)
+
+        async def _bounded(entry: dict[str, int | str]) -> None:
+            async with sem:
                 await _handle(entry)
-        await asyncio.gather(*[_bounded_handle(entry) for entry in entries])
+
+        await asyncio.gather(*[_bounded(entry) for entry in entries])
 
     return result
