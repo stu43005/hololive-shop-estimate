@@ -18,20 +18,22 @@ from estimator_king.sync.inactive import mark_inactive_products  # pyright: igno
 
 
 def _state(
-    external_key: str,
+    external_key,
     *,
-    content_hash: str = "a" * 64,
-    normalizer_version: int = 1,
-    dify_document_id: str | None = None,
-    consecutive_failures: int = 0,
-    consecutive_sitemap_misses: int = 0,
-    inactive: bool = False,
-    inactive_reason: str | None = None,
-    inactive_since: datetime | None = None,
-) -> ProductState:
+    content_hash="a" * 64,
+    normalizer_version=2,
+    consecutive_failures=0,
+    consecutive_sitemap_misses=0,
+    inactive=False,
+    inactive_reason=None,
+    inactive_since=None,
+):
+    store_id, _, product_id = external_key.partition(":")
     return ProductState(
         external_key=external_key,
-        dify_document_id=dify_document_id,
+        store_id=store_id,
+        product_id=product_id,
+        product_url=f"https://x/products/{product_id}",
         content_hash=content_hash,
         normalizer_version=normalizer_version,
         consecutive_failures=consecutive_failures,
@@ -42,17 +44,35 @@ def _state(
     )
 
 
+class FakeVectorStore:
+    def __init__(self):
+        self.deleted = []
+
+    def delete(self, ids):
+        self.deleted.append(list(ids))
+
+
 @pytest.fixture()
 def repo() -> ProductStateRepository:
     with ProductStateRepository(":memory:") as r:
         yield r
 
 
+def test_marks_inactive_and_deletes_vectors(repo):
+    repo.upsert(_state("hololive:1", consecutive_failures=3))
+    vs = FakeVectorStore()
+
+    result = mark_inactive_products(repo, vs, failure_threshold=3, miss_threshold=4)
+
+    assert result.marked_inactive == 1
+    assert vs.deleted == [["hololive:1"]]
+
+
 def test_mark_inactive_fetch_failures(repo: ProductStateRepository) -> None:
     repo.upsert(_state("store:123", consecutive_failures=3))
     repo.upsert(_state("store:456", consecutive_failures=5))
 
-    result = mark_inactive_products(repo)
+    result = mark_inactive_products(repo, FakeVectorStore())
 
     assert result.marked_inactive == 2
     assert result.already_inactive == 0
@@ -72,7 +92,7 @@ def test_mark_inactive_sitemap_misses(repo: ProductStateRepository) -> None:
     repo.upsert(_state("store:789", consecutive_sitemap_misses=4))
     repo.upsert(_state("store:999", consecutive_sitemap_misses=10))
 
-    result = mark_inactive_products(repo)
+    result = mark_inactive_products(repo, FakeVectorStore())
 
     assert result.marked_inactive == 2
     assert result.already_inactive == 0
@@ -93,7 +113,7 @@ def test_mark_inactive_both_thresholds(repo: ProductStateRepository) -> None:
         _state("store:dual", consecutive_failures=3, consecutive_sitemap_misses=4)
     )
 
-    result = mark_inactive_products(repo)
+    result = mark_inactive_products(repo, FakeVectorStore())
 
     assert result.marked_inactive == 1
     assert result.already_inactive == 0
@@ -113,7 +133,7 @@ def test_mark_inactive_below_threshold(repo: ProductStateRepository) -> None:
         _state("store:active", consecutive_failures=0, consecutive_sitemap_misses=0)
     )
 
-    result = mark_inactive_products(repo)
+    result = mark_inactive_products(repo, FakeVectorStore())
 
     assert result.marked_inactive == 0
     assert result.already_inactive == 0
@@ -140,7 +160,7 @@ def test_mark_inactive_already_inactive(repo: ProductStateRepository) -> None:
     )
     repo.upsert(_state("store:active", consecutive_failures=3))
 
-    result = mark_inactive_products(repo)
+    result = mark_inactive_products(repo, FakeVectorStore())
 
     assert result.marked_inactive == 1
     assert "store:active" in result.failure_reasons
@@ -148,7 +168,7 @@ def test_mark_inactive_already_inactive(repo: ProductStateRepository) -> None:
 
 
 def test_mark_inactive_empty_db(repo: ProductStateRepository) -> None:
-    result = mark_inactive_products(repo)
+    result = mark_inactive_products(repo, FakeVectorStore())
 
     assert result.marked_inactive == 0
     assert result.already_inactive == 0
@@ -159,11 +179,11 @@ def test_mark_inactive_empty_db(repo: ProductStateRepository) -> None:
 def test_mark_inactive_idempotent(repo: ProductStateRepository) -> None:
     repo.upsert(_state("store:idempotent", consecutive_failures=3))
 
-    result1 = mark_inactive_products(repo)
+    result1 = mark_inactive_products(repo, FakeVectorStore())
     assert result1.marked_inactive == 1
     assert "store:idempotent" in result1.failure_reasons
 
-    result2 = mark_inactive_products(repo)
+    result2 = mark_inactive_products(repo, FakeVectorStore())
     assert result2.marked_inactive == 0
     assert len(result2.failure_reasons) == 0
     assert result2.already_inactive == 1
@@ -174,7 +194,7 @@ def test_mark_inactive_custom_failure_threshold(repo: ProductStateRepository) ->
     repo.upsert(_state("store:low", consecutive_failures=3))
     repo.upsert(_state("store:high", consecutive_failures=5))
 
-    result = mark_inactive_products(repo, failure_threshold=5)
+    result = mark_inactive_products(repo, FakeVectorStore(), failure_threshold=5)
 
     assert result.marked_inactive == 1
     assert "store:high" in result.failure_reasons
@@ -194,7 +214,7 @@ def test_mark_inactive_custom_miss_threshold(repo: ProductStateRepository) -> No
     repo.upsert(_state("store:miss2", consecutive_sitemap_misses=2))
     repo.upsert(_state("store:miss3", consecutive_sitemap_misses=3))
 
-    result = mark_inactive_products(repo, miss_threshold=2)
+    result = mark_inactive_products(repo, FakeVectorStore(), miss_threshold=2)
 
     assert result.marked_inactive == 2
     assert "store:miss2" in result.sitemap_reasons
@@ -210,7 +230,7 @@ def test_mark_inactive_custom_both_thresholds(repo: ProductStateRepository) -> N
     repo.upsert(_state("store:miss_only", consecutive_sitemap_misses=2))
     repo.upsert(_state("store:below", consecutive_failures=1, consecutive_sitemap_misses=1))
 
-    result = mark_inactive_products(repo, failure_threshold=2, miss_threshold=2)
+    result = mark_inactive_products(repo, FakeVectorStore(), failure_threshold=2, miss_threshold=2)
 
     assert result.marked_inactive == 3
     assert "store:both" in result.failure_reasons

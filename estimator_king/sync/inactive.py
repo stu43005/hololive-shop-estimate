@@ -13,8 +13,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Protocol
 
 from estimator_king.database.repository import ProductState, ProductStateRepository
+
+
+class _VectorStore(Protocol):
+    def delete(self, ids: list[str]) -> None: ...
 
 
 @dataclass
@@ -29,6 +34,7 @@ class InactiveResult:
 
 def mark_inactive_products(
     repository: ProductStateRepository,
+    vector_store: _VectorStore,
     failure_threshold: int = 3,
     miss_threshold: int = 4,
 ) -> InactiveResult:
@@ -40,6 +46,7 @@ def mark_inactive_products(
 
     Args:
         repository: ProductStateRepository for querying and updating product state
+        vector_store: Vector store to delete vectors for deactivated products
         failure_threshold: Number of consecutive fetch failures before marking inactive
         miss_threshold: Number of consecutive sitemap misses before marking inactive
 
@@ -49,6 +56,7 @@ def mark_inactive_products(
     result = InactiveResult()
     now = datetime.now(tz=timezone.utc)
     active_products = repository.get_all_active()
+    deactivated: list[str] = []
 
     for product in active_products:
         if product.consecutive_failures >= failure_threshold:
@@ -62,11 +70,14 @@ def mark_inactive_products(
 
         updated_state = ProductState(
             external_key=product.external_key,
-            dify_document_id=product.dify_document_id,
+            store_id=product.store_id,
+            product_id=product.product_id,
+            product_url=product.product_url,
             content_hash=product.content_hash,
             normalizer_version=product.normalizer_version,
             last_seen_in_sitemap_at=product.last_seen_in_sitemap_at,
             last_fetch_success_at=product.last_fetch_success_at,
+            last_indexed_at=product.last_indexed_at,
             consecutive_failures=product.consecutive_failures,
             consecutive_sitemap_misses=product.consecutive_sitemap_misses,
             inactive=True,
@@ -74,7 +85,11 @@ def mark_inactive_products(
             inactive_since=now,
         )
         repository.upsert(updated_state)
+        deactivated.append(product.external_key)
         result.marked_inactive += 1
+
+    if deactivated:
+        vector_store.delete(deactivated)
 
     try:
         rows = repository.connection.execute(
