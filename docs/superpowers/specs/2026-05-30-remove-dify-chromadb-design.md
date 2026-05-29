@@ -752,8 +752,13 @@ Research against the JMTEB (Japanese Massive Text Embedding Benchmark) and OpenA
     §7.2 budget arithmetic, and the embed/upsert async path.
   - `test_inactive.py` — pass the new required `vector_store` argument to every
     `mark_inactive_products(...)` call and assert inactive-vector deletion (§10).
-  - `test_repository.py` — remove the `get_stale_products` / `get_products_needing_fetch` cases;
-    add `get_oldest_active_products` ordering (NULLs first) and `store_id`-column query tests.
+  - `test_repository.py` — remove the `get_stale_products` / `get_products_needing_fetch` cases,
+    the `schema_version`/migration cases (`test_state_db_schema_version_initialized`,
+    `test_state_db_schema_newer_than_supported_is_rejected` — the migration system is deleted),
+    and the `dify_document_id` cases (`test_state_db_upsert_updates_dify_document_id_when_provided`
+    plus the `dify_document_id` set/assert in the `_state` helper and roundtrip/COALESCE cases —
+    the column is removed); add `get_oldest_active_products` ordering (NULLs first),
+    `store_id`-column query tests, and a `last_indexed_at` roundtrip/COALESCE test (new §11 column).
 - All work validated with `pyright`/`basedpyright`, `ruff`, and `pytest` per project rules.
 
 ---
