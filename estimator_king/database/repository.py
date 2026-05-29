@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
 from typing import cast
@@ -11,11 +11,14 @@ from typing import cast
 @dataclass(frozen=True)
 class ProductState:
     external_key: str
+    store_id: str
+    product_id: str
+    product_url: str
     content_hash: str
     normalizer_version: int
-    dify_document_id: str | None = None
     last_seen_in_sitemap_at: datetime | None = None
     last_fetch_success_at: datetime | None = None
+    last_indexed_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     consecutive_failures: int = 0
@@ -23,32 +26,14 @@ class ProductState:
     inactive: bool = False
     inactive_reason: str | None = None
     inactive_since: datetime | None = None
-    product_url: str | None = None
 
     def with_updated_timestamps(
         self, *, created_at: datetime, updated_at: datetime
     ) -> "ProductState":
-        return ProductState(
-            external_key=self.external_key,
-            dify_document_id=self.dify_document_id,
-            content_hash=self.content_hash,
-            normalizer_version=self.normalizer_version,
-            last_seen_in_sitemap_at=self.last_seen_in_sitemap_at,
-            last_fetch_success_at=self.last_fetch_success_at,
-            created_at=created_at,
-            updated_at=updated_at,
-            consecutive_failures=self.consecutive_failures,
-            consecutive_sitemap_misses=self.consecutive_sitemap_misses,
-            inactive=self.inactive,
-            inactive_reason=self.inactive_reason,
-            inactive_since=self.inactive_since,
-            product_url=self.product_url,
-        )
+        return replace(self, created_at=created_at, updated_at=updated_at)
 
 
 class ProductStateRepository:
-    _SCHEMA_VERSION: int = 2
-
     def __init__(self, db_path: str, *, timeout_seconds: float = 30.0):
         self._db_path: str = db_path
         self._timeout_seconds: float = timeout_seconds
@@ -115,57 +100,45 @@ class ProductStateRepository:
 
     def upsert(self, state: ProductState) -> ProductState:
         now = _utc_now()
-
         existing = self.get_by_external_key(state.external_key)
         created_at = existing.created_at if existing and existing.created_at else now
         state = state.with_updated_timestamps(created_at=created_at, updated_at=now)
         _ = self.connection.execute(
             """
             INSERT INTO products (
-                external_key,
-                dify_document_id,
-                content_hash,
-                normalizer_version,
-                last_seen_in_sitemap_at,
-                last_fetch_success_at,
-                created_at,
-                updated_at,
-                consecutive_failures,
-                consecutive_sitemap_misses,
-                inactive,
-                inactive_reason,
-                inactive_since,
-                product_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                external_key, store_id, product_id, product_url,
+                content_hash, normalizer_version,
+                last_seen_in_sitemap_at, last_fetch_success_at, last_indexed_at,
+                created_at, updated_at,
+                consecutive_failures, consecutive_sitemap_misses,
+                inactive, inactive_reason, inactive_since
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(external_key) DO UPDATE SET
-                dify_document_id=COALESCE(excluded.dify_document_id, products.dify_document_id),
+                store_id=excluded.store_id,
+                product_id=excluded.product_id,
+                product_url=COALESCE(excluded.product_url, products.product_url),
                 content_hash=excluded.content_hash,
                 normalizer_version=excluded.normalizer_version,
-                last_seen_in_sitemap_at=excluded.last_seen_in_sitemap_at,
-                last_fetch_success_at=excluded.last_fetch_success_at,
+                last_seen_in_sitemap_at=COALESCE(excluded.last_seen_in_sitemap_at, products.last_seen_in_sitemap_at),
+                last_fetch_success_at=COALESCE(excluded.last_fetch_success_at, products.last_fetch_success_at),
+                last_indexed_at=COALESCE(excluded.last_indexed_at, products.last_indexed_at),
                 updated_at=excluded.updated_at,
                 consecutive_failures=excluded.consecutive_failures,
                 consecutive_sitemap_misses=excluded.consecutive_sitemap_misses,
                 inactive=excluded.inactive,
                 inactive_reason=excluded.inactive_reason,
-                inactive_since=excluded.inactive_since,
-                product_url=COALESCE(excluded.product_url, products.product_url)
+                inactive_since=excluded.inactive_since
             """,
             (
-                state.external_key,
-                state.dify_document_id,
-                state.content_hash,
-                state.normalizer_version,
+                state.external_key, state.store_id, state.product_id, state.product_url,
+                state.content_hash, state.normalizer_version,
                 _dt_to_iso(state.last_seen_in_sitemap_at),
                 _dt_to_iso(state.last_fetch_success_at),
-                _dt_to_iso(state.created_at),
-                _dt_to_iso(state.updated_at),
-                int(state.consecutive_failures),
-                int(state.consecutive_sitemap_misses),
-                1 if state.inactive else 0,
-                state.inactive_reason,
+                _dt_to_iso(state.last_indexed_at),
+                _dt_to_iso(state.created_at), _dt_to_iso(state.updated_at),
+                int(state.consecutive_failures), int(state.consecutive_sitemap_misses),
+                1 if state.inactive else 0, state.inactive_reason,
                 _dt_to_iso(state.inactive_since),
-                state.product_url,
             ),
         )
         refreshed = self.get_by_external_key(state.external_key)
@@ -196,25 +169,22 @@ class ProductStateRepository:
     def list_active(self, store_id: str) -> list[ProductState]:
         """Return all active products for a given store."""
         rows = self.connection.execute(
-            "SELECT * FROM products WHERE external_key LIKE ? AND inactive = 0 ORDER BY external_key",
-            (f"{store_id}:%",),
+            "SELECT * FROM products WHERE store_id = ? AND inactive = 0 ORDER BY external_key",
+            (store_id,),
         ).fetchall()
         return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
 
-    def get_stale_products(self, days: int) -> list[ProductState]:
-        if days <= 0:
-            raise ValueError("days must be > 0")
-        threshold_dt = _utc_now() - timedelta(days=days)
-        threshold_iso = _dt_to_iso(threshold_dt)
-
+    def get_oldest_active_products(self, store_id: str, limit: int) -> list[ProductState]:
+        if limit <= 0:
+            return []
         rows = self.connection.execute(
             """
             SELECT * FROM products
-            WHERE inactive = 0
-              AND (last_seen_in_sitemap_at IS NULL OR last_seen_in_sitemap_at < ?)
-            ORDER BY external_key
+            WHERE store_id = ? AND inactive = 0
+            ORDER BY last_fetch_success_at ASC
+            LIMIT ?
             """,
-            (threshold_iso,),
+            (store_id, limit),
         ).fetchall()
         return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
 
@@ -292,31 +262,12 @@ class ProductStateRepository:
         self, store_id: str, product_url: str
     ) -> ProductState | None:
         row = self.connection.execute(
-            "SELECT * FROM products WHERE external_key LIKE ? AND product_url = ?",
-            (f"{store_id}:%", product_url),
+            "SELECT * FROM products WHERE store_id = ? AND product_url = ?",
+            (store_id, product_url),
         ).fetchone()
         if row is None:
             return None
         return _row_to_state(cast(sqlite3.Row, row))
-
-    def get_products_needing_fetch(
-        self, store_id: str, interval_hours: float
-    ) -> list[ProductState]:
-        if interval_hours <= 0:
-            raise ValueError("interval_hours must be > 0")
-        interval_param = f"-{interval_hours} hours"
-        rows = self.connection.execute(
-            """
-            SELECT * FROM products
-            WHERE external_key LIKE ?
-              AND inactive = 0
-              AND (last_fetch_success_at IS NULL
-                   OR last_fetch_success_at < datetime('now', ?))
-            ORDER BY external_key
-            """,
-            (f"{store_id}:%", interval_param),
-        ).fetchall()
-        return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
 
     def increment_consecutive_failures(self, external_key: str) -> None:
         now = _utc_now()
@@ -374,53 +325,7 @@ class ProductStateRepository:
         _ = conn.execute("PRAGMA busy_timeout=30000")
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
-        schema_sql = _read_schema_sql()
-        conn.executescript(schema_sql)
-        _ = conn.execute(
-            "INSERT OR IGNORE INTO schema_version(id, version) VALUES (1, 0)"
-        )
-        version_row = conn.execute(
-            "SELECT version FROM schema_version WHERE id = 1"
-        ).fetchone()
-        if version_row is None:
-            raise RuntimeError("schema_version row missing")
-        current = int(cast(int, version_row[0]))
-        if current > self._SCHEMA_VERSION:
-            raise RuntimeError(
-                f"Database schema version {current} is newer than supported {self._SCHEMA_VERSION}"
-            )
-        if current < self._SCHEMA_VERSION:
-            self._migrate(conn, current, self._SCHEMA_VERSION)
-
-    def _migrate(
-        self, conn: sqlite3.Connection, from_version: int, to_version: int
-    ) -> None:
-        if from_version == 0 and to_version >= 1:
-            _ = conn.execute("UPDATE schema_version SET version = 1 WHERE id = 1")
-            from_version = 1
-        if from_version == 1 and to_version >= 2:
-            with conn:
-                # ALTER TABLE ... ADD COLUMN is not idempotent in SQLite;
-                # skip if column already exists (fresh DB from schema.sql v2).
-                cols = {row[1] for row in conn.execute("PRAGMA table_info(products)")}
-                if "product_url" not in cols:
-                    _ = conn.execute("ALTER TABLE products ADD COLUMN product_url TEXT")
-                _ = conn.execute(
-                    "CREATE TABLE IF NOT EXISTS crawl_queue ("
-                    "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
-                    "  store_id    TEXT    NOT NULL,"
-                    "  product_url TEXT    NOT NULL,"
-                    "  created_at  TEXT    NOT NULL"
-                    "    DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),"
-                    "  UNIQUE(store_id, product_url)"
-                    ")"
-                )
-                _ = conn.execute("UPDATE schema_version SET version = 2 WHERE id = 1")
-            from_version = 2
-        if from_version != to_version:
-            raise RuntimeError(
-                f"Unsupported migration path {from_version} -> {to_version}"
-            )
+        conn.executescript(_read_schema_sql())
 
 
 def _read_schema_sql() -> str:
@@ -450,30 +355,21 @@ def _iso_to_dt(value: str | None) -> datetime | None:
 
 
 def _row_to_state(row: sqlite3.Row) -> ProductState:
-    keys = row.keys()
-    dify_document_id_str = cast(str | None, row["dify_document_id"])
-    inactive_reason_str = cast(str | None, row["inactive_reason"])
-    last_seen = cast(str | None, row["last_seen_in_sitemap_at"])
-    last_fetch = cast(str | None, row["last_fetch_success_at"])
-    created_at = cast(str | None, row["created_at"])
-    updated_at = cast(str | None, row["updated_at"])
-    inactive_since = cast(str | None, row["inactive_since"])
-    product_url_str = (
-        cast(str | None, row["product_url"]) if "product_url" in keys else None
-    )
     return ProductState(
         external_key=str(row["external_key"]),
-        dify_document_id=dify_document_id_str,
+        store_id=str(row["store_id"]),
+        product_id=str(row["product_id"]),
+        product_url=str(row["product_url"]),
         content_hash=str(row["content_hash"]),
         normalizer_version=int(cast(int, row["normalizer_version"])),
-        last_seen_in_sitemap_at=_iso_to_dt(last_seen),
-        last_fetch_success_at=_iso_to_dt(last_fetch),
-        created_at=_iso_to_dt(created_at),
-        updated_at=_iso_to_dt(updated_at),
+        last_seen_in_sitemap_at=_iso_to_dt(cast("str | None", row["last_seen_in_sitemap_at"])),
+        last_fetch_success_at=_iso_to_dt(cast("str | None", row["last_fetch_success_at"])),
+        last_indexed_at=_iso_to_dt(cast("str | None", row["last_indexed_at"])),
+        created_at=_iso_to_dt(cast("str | None", row["created_at"])),
+        updated_at=_iso_to_dt(cast("str | None", row["updated_at"])),
         consecutive_failures=int(cast(int, row["consecutive_failures"])),
         consecutive_sitemap_misses=int(cast(int, row["consecutive_sitemap_misses"])),
         inactive=bool(int(cast(int, row["inactive"]))),
-        inactive_reason=inactive_reason_str,
-        inactive_since=_iso_to_dt(inactive_since),
-        product_url=product_url_str,
+        inactive_reason=cast("str | None", row["inactive_reason"]),
+        inactive_since=_iso_to_dt(cast("str | None", row["inactive_since"])),
     )
