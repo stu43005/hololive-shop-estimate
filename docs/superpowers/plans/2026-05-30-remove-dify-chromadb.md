@@ -902,7 +902,9 @@ class ProductState:
     inactive_reason: str | None = None
     inactive_since: datetime | None = None
 
-    def with_updated_timestamps(self, *, created_at, updated_at):
+    def with_updated_timestamps(
+        self, *, created_at: datetime, updated_at: datetime
+    ) -> "ProductState":
         return replace(self, created_at=created_at, updated_at=updated_at)
 ```
 
@@ -1741,7 +1743,7 @@ class FakeVectorStore:
         self.deleted.append(list(ids))
 
 
-def test_marks_inactive_and_deletes_vectors(repo):  # `repo` = existing fixture
+def test_marks_inactive_and_deletes_vectors(repo):
     repo.upsert(_state("hololive:1", consecutive_failures=3))
     vs = FakeVectorStore()
 
@@ -2120,7 +2122,7 @@ Replace Dify/interval assertions with provider + budget ones:
 import os
 from unittest.mock import patch
 
-from estimator_king.config_schema import AppConfig, CrawlerPolicy, Store, load_config
+from estimator_king.config_schema import CrawlerPolicy, Store, load_config
 
 
 def test_crawler_policy_budget_defaults():
@@ -3043,10 +3045,14 @@ calls in Step 1; only the `deploy/` edits remain. Do **not** use `git add -A`.)
 - [ ] **Step 1: Delete Dify docs and stray dir**
 
 ```bash
-git rm docs/dify-dataset-setup.md docs/dify-workflow-contract.md dify_python_sdk_research_report.md estimator-dify-plan.md
+git rm docs/dify-dataset-setup.md docs/dify-workflow-contract.md
+# These root files are gitignored/untracked — use rm, not git rm (git rm aborts on untracked paths):
+rm -f dify_python_sdk_research_report.md estimator-dify-plan.md
 # `dify/` at repo root is an untracked nested dir (not tracked by this repo) — use rm, not git rm:
 [ -d dify ] && rm -rf dify || true
 ```
+
+(Verify which Dify docs are tracked first with `git ls-files docs/dify-*.md dify_python_sdk_research_report.md estimator-dify-plan.md`; `git rm` only the tracked ones, `rm -f` the untracked ones.)
 
 - [ ] **Step 2: Rewrite `.env.example`**
 
