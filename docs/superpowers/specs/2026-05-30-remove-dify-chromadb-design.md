@@ -312,7 +312,11 @@ Keep the document formatting; replace the Dify calls with embed + upsert.
   4. **persist `ProductState`** (the single write — see "Single writer" below) with `store_id`,
      `product_id`, `product_url`, `content_hash`, `normalizer_version`,
      `last_fetch_success_at = now`, `last_indexed_at` (now if (re)indexed in step 3, else the
-     carried-forward value), `consecutive_failures = 0`.
+     carried-forward value), `consecutive_failures = 0`, and the **sitemap-tracking fields carried
+     forward** from `state`: `last_seen_in_sitemap_at = state.last_seen_in_sitemap_at` and
+     `consecutive_sitemap_misses = state.consecutive_sitemap_misses` when `state` exists, else
+     `last_seen_in_sitemap_at = now` (a brand-new product was just seen in the sitemap that
+     enqueued it) and `consecutive_sitemap_misses = 0`.
 
 - **Single writer (reconciles the async double-upsert).** Today `async_process_queue` writes each
   product twice — once via `normalizer(...) → state_repo.upsert(normalized)` and again via
@@ -339,9 +343,19 @@ Keep the document formatting; replace the Dify calls with embed + upsert.
   - `repository.upsert` must **`COALESCE`** only the **nullable** timestamp columns
     `last_fetch_success_at` and `last_indexed_at` (in addition to those it already coalesces:
     `dify_document_id` is gone; `product_url` stays coalesced), so a write that legitimately omits
-    one of these never wipes a previously-stored value. `consecutive_failures` is a non-nullable
-    `int` and is **not** coalesced — it is always written with the concrete value the caller
-    supplies (`0` on success, the incremented value via `increment_consecutive_failures`).
+    one of these never wipes a previously-stored value. `consecutive_failures` and
+    `consecutive_sitemap_misses` are non-nullable `int`s and are **not** coalesced — they are
+    always written with the concrete value the caller supplies.
+  - **Do not clobber sitemap-tracking state.** Within a cycle, `populate_queue_from_sitemap` runs
+    *before* `async_process_queue` and calls `record_sitemap_seen` (sets
+    `last_seen_in_sitemap_at = now`, `consecutive_sitemap_misses = 0`) / `increment_sitemap_miss`
+    on existing rows. Because `upsert` overwrites non-coalesced columns from `excluded.*`, the
+    single-writer `sync_products` MUST carry `last_seen_in_sitemap_at` and
+    `consecutive_sitemap_misses` forward from the loaded `state` (step 4) so the fetch does not
+    reset the sitemap-seen timestamp to NULL or zero out accrued misses — otherwise the §10
+    sitemap-miss inactivation path is broken. (`record_sitemap_seen` / `increment_sitemap_miss` /
+    `increment_consecutive_failures` / `reset_consecutive_failures` remain targeted `UPDATE`
+    statements that touch only their own columns, so they never clobber each other.)
 
 - **Vector deletion on disappearance** is **not** done per-fetch. A removed product simply stops
   appearing in the sitemap (→ `consecutive_sitemap_misses` accrues) and/or starts failing to
