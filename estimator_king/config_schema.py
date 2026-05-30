@@ -106,6 +106,7 @@ class AppConfig:
     embedding_base_url: str | None = None
     embedding_model: str = "text-embedding-3-large"
     embedding_dimensions: int | None = 1024
+    embedding_max_tokens: int = 8192
     embedding_query_prefix: str = ""
     embedding_doc_prefix: str = ""
     chat_api_key: str | None = None
@@ -149,6 +150,7 @@ class AppConfig:
             embedding_base_url=self.embedding_base_url or self.openai_base_url,
             embedding_model=self.embedding_model,
             embedding_dimensions=self.embedding_dimensions,
+            embedding_max_tokens=self.embedding_max_tokens,
             embedding_query_prefix=self.embedding_query_prefix,
             embedding_doc_prefix=self.embedding_doc_prefix,
             chat_base_url=self.chat_base_url or self.openai_base_url,
@@ -248,6 +250,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         embedding_base_url=os.getenv("EMBEDDING_BASE_URL"),
         embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
         embedding_dimensions=_opt_int("EMBEDDING_DIMENSIONS", 1024),
+        embedding_max_tokens=_opt_int("EMBEDDING_MAX_TOKENS", 8192) or 8192,
         embedding_query_prefix=os.getenv("EMBEDDING_QUERY_PREFIX", ""),
         embedding_doc_prefix=os.getenv("EMBEDDING_DOC_PREFIX", ""),
         chat_api_key=os.getenv("CHAT_API_KEY"),
