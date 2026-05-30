@@ -57,7 +57,6 @@ async def async_process_queue(
 
     loop = asyncio.get_running_loop()
     result = PipelineResult()
-    lock = asyncio.Lock()
 
     async with AsyncHTTPClient(policy, proxy=proxy) as client:
         adapter = _AsyncToSyncHTTPAdapter(client, loop)
@@ -73,16 +72,15 @@ async def async_process_queue(
                     state_repo, embedder, vector_store,
                 )
                 state_repo.delete_queue_entry(entry_id)
-                async with lock:
-                    result.created += sync_result.created
-                    result.updated += sync_result.updated
-                    result.sync_skipped += sync_result.skipped
-                    result.processed += 1
-                    if result.processed % _PROGRESS_LOG_EVERY == 0:
-                        logger.info(
-                            "store=%s progress: %d/%d processed",
-                            store_id, result.processed, len(entries),
-                        )
+                result.created += sync_result.created
+                result.updated += sync_result.updated
+                result.sync_skipped += sync_result.skipped
+                result.processed += 1
+                if result.processed % _PROGRESS_LOG_EVERY == 0:
+                    logger.info(
+                        "store=%s progress: %d/%d processed",
+                        store_id, result.processed, len(entries),
+                    )
             except Exception as exc:
                 logger.exception("Error processing %s (url=%s)", entry_id, product_url)
                 existing = state_repo.get_by_product_url(store_id, product_url)
@@ -92,16 +90,23 @@ async def async_process_queue(
                     # Definitively gone (HTTP 404/410): drop from queue so it is
                     # not re-fetched every cycle. Transient errors keep retrying.
                     state_repo.delete_queue_entry(entry_id)
-                async with lock:
-                    result.failed += 1
+                result.failed += 1
 
-        sem = asyncio.Semaphore(policy.concurrency_per_domain)
+        queue: asyncio.Queue[dict[str, int | str]] = asyncio.Queue()
+        for entry in entries:
+            queue.put_nowait(entry)
 
-        async def _bounded(entry: dict[str, int | str]) -> None:
-            async with sem:
+        async def _worker() -> None:
+            while True:
+                try:
+                    entry = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
                 await _handle(entry)
 
-        await asyncio.gather(*[_bounded(entry) for entry in entries])
+        worker_count = max(1, policy.concurrency_per_domain)
+        workers = [asyncio.create_task(_worker()) for _ in range(worker_count)]
+        await asyncio.gather(*workers)
 
     logger.info(
         "store=%s done: created=%d updated=%d skipped=%d failed=%d",

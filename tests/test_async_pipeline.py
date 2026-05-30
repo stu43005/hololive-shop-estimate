@@ -144,3 +144,21 @@ def test_client_error_400_keeps_queue_entry(repo):
 
     assert result.failed == 1
     assert repo.peek_all("hololive") != []  # only 404/410 are definitive; 400 is retried
+
+
+def test_worker_pool_processes_all_entries(repo):
+    for i in range(1, 6):
+        repo.enqueue_url("hololive", f"https://x/products/{i}")
+    vs = FakeVectorStore()
+    policy = CrawlerPolicy(concurrency_per_domain=2)
+    snaps = {f"https://x/products/{i}": _snap(i) for i in range(1, 6)}
+
+    def fake_fetch(url, client):
+        return snaps[url]
+
+    with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=fake_fetch):
+        result = asyncio.run(async_process_queue(
+            "hololive", policy, repo, FakeEmbedder(), vs))
+
+    assert result.processed == 5
+    assert repo.peek_all("hololive") == []  # queue fully drained by the worker pool
