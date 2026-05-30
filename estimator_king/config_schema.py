@@ -1,9 +1,14 @@
 """Configuration schema and validation for Estimator King."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import TYPE_CHECKING, Optional, List
 import yaml
 import os
+
+if TYPE_CHECKING:
+    from estimator_king.llm.config import ProviderConfig
 
 
 @dataclass
@@ -14,7 +19,6 @@ class Store:
     base_url: str
     sitemap_url: str
 
-    fetch_interval_hours: float = 24.0
     def validate(self):
         """Validate store configuration."""
         if not self.id or not isinstance(self.id, str):
@@ -23,8 +27,6 @@ class Store:
             raise ValueError(f"Store '{self.id}' must have a valid 'base_url'")
         if not self.sitemap_url or not isinstance(self.sitemap_url, str):
             raise ValueError(f"Store '{self.id}' must have a valid 'sitemap_url'")
-        if self.fetch_interval_hours <= 0:
-            raise ValueError(f"Store '{self.id}' must have 'fetch_interval_hours' greater than 0")
 
 
 @dataclass
@@ -37,7 +39,8 @@ class CrawlerPolicy:
     timeout_connect: int = 10
     timeout_read: int = 30
     max_retries: int = 3
-    default_fetch_interval_hours: float = 24.0
+    max_products_per_run: int = 32
+    crawl_schedule_hours: float = 24.0
     inactive_failure_threshold: int = 3
     inactive_sitemap_miss_threshold: int = 4
 
@@ -55,8 +58,10 @@ class CrawlerPolicy:
             raise ValueError("'timeout_read' must be greater than 0")
         if self.max_retries < 0:
             raise ValueError("'max_retries' must be non-negative")
-        if self.default_fetch_interval_hours <= 0:
-            raise ValueError("'default_fetch_interval_hours' must be greater than 0")
+        if self.max_products_per_run <= 0:
+            raise ValueError("'max_products_per_run' must be greater than 0")
+        if self.crawl_schedule_hours <= 0:
+            raise ValueError("'crawl_schedule_hours' must be greater than 0")
         if self.inactive_failure_threshold <= 0:
             raise ValueError("'inactive_failure_threshold' must be greater than 0")
         if self.inactive_sitemap_miss_threshold <= 0:
@@ -84,7 +89,7 @@ class AppConfig:
     """Complete application configuration.
 
     Central configuration object that aggregates YAML-based settings
-    (stores, crawler, proxy) and environment-based credentials (Dify, Discord).
+    (stores, crawler, proxy) and environment-based credentials (providers, Discord).
 
     Each entry point (crawler, bot) is responsible for validating only the
     fields it actually requires.
@@ -94,14 +99,20 @@ class AppConfig:
     crawler: CrawlerPolicy = field(default_factory=CrawlerPolicy)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
 
-    # Dify Knowledge Base (crawler)
-    dify_api_key: Optional[str] = None
-    dify_base_url: Optional[str] = None
-    dify_dataset_id: Optional[str] = None
-
-    # Dify Workflow (bot)
-    dify_workflow_api_key: Optional[str] = None
-    dify_workflow_base_url: Optional[str] = None
+    # Providers / vector store
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    embedding_api_key: str | None = None
+    embedding_base_url: str | None = None
+    embedding_model: str = "text-embedding-3-large"
+    embedding_dimensions: int | None = 1024
+    embedding_query_prefix: str = ""
+    embedding_doc_prefix: str = ""
+    chat_api_key: str | None = None
+    chat_base_url: str | None = None
+    chat_model: str = "gpt-4o"
+    chat_structured_output: bool = True
+    chroma_path: str = "./chroma"
 
     # Discord (bot)
     discord_token: Optional[str] = None
@@ -127,6 +138,23 @@ class AppConfig:
 
         # Validate proxy config
         self.proxy.validate()
+
+    def build_provider_config(self) -> "ProviderConfig":
+        from estimator_king.llm.config import ProviderConfig
+        emb_key = self.embedding_api_key or self.openai_api_key or ""
+        chat_key = self.chat_api_key or self.openai_api_key or ""
+        return ProviderConfig(
+            embedding_api_key=emb_key,
+            chat_api_key=chat_key,
+            embedding_base_url=self.embedding_base_url or self.openai_base_url,
+            embedding_model=self.embedding_model,
+            embedding_dimensions=self.embedding_dimensions,
+            embedding_query_prefix=self.embedding_query_prefix,
+            embedding_doc_prefix=self.embedding_doc_prefix,
+            chat_base_url=self.chat_base_url or self.openai_base_url,
+            chat_model=self.chat_model,
+            chat_structured_output=self.chat_structured_output,
+        )
 
     @staticmethod
     def from_yaml(path: str) -> "AppConfig":
@@ -170,7 +198,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
     with open(config_path, "r") as f:
         yaml_data = yaml.safe_load(f) or {}
 
-    # Parse crawler policy (before stores, so default_fetch_interval_hours is available)
+    # Parse crawler policy
     crawler_data = yaml_data.get("crawler", {})
     crawler = CrawlerPolicy(
         rate_limit_rps=crawler_data.get("rate_limit_rps", 1.5),
@@ -179,7 +207,8 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         timeout_connect=crawler_data.get("timeout_connect", 10),
         timeout_read=crawler_data.get("timeout_read", 30),
         max_retries=crawler_data.get("max_retries", 3),
-        default_fetch_interval_hours=crawler_data.get("default_fetch_interval_hours", 24.0),
+        max_products_per_run=crawler_data.get("max_products_per_run", 32),
+        crawl_schedule_hours=crawler_data.get("crawl_schedule_hours", 24.0),
         inactive_failure_threshold=crawler_data.get("inactive_failure_threshold", 3),
         inactive_sitemap_miss_threshold=crawler_data.get("inactive_sitemap_miss_threshold", 4),
     )
@@ -191,7 +220,6 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             id=s["id"],
             base_url=s["base_url"],
             sitemap_url=s["sitemap_url"],
-            fetch_interval_hours=s.get("fetch_interval_hours", crawler.default_fetch_interval_hours),
         )
         for s in stores_data
     ]
@@ -204,27 +232,31 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         https_proxy=os.getenv("HTTPS_PROXY", proxy_data.get("https_proxy", "")),
     )
 
-    # Load environment variables
-    dify_api_key = os.getenv("DIFY_API_KEY")
-    dify_base_url = os.getenv("DIFY_BASE_URL")
-    dify_dataset_id = os.getenv("DIFY_DATASET_ID")
-    dify_workflow_api_key = os.getenv("DIFY_WORKFLOW_API_KEY")
-    dify_workflow_base_url = os.getenv("DIFY_WORKFLOW_BASE_URL")
-    discord_token = os.getenv("DISCORD_TOKEN", os.getenv("DISCORD_BOT_TOKEN"))
-    database_path = os.getenv("DATABASE_PATH", "./estimator_king.db")
+    def _opt_int(name: str, default: int | None) -> int | None:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        return int(raw) if raw.strip() != "" else None
 
-    # Create config object
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    openai_base_url = os.getenv("OPENAI_BASE_URL")
     config = AppConfig(
-        stores=stores,
-        crawler=crawler,
-        proxy=proxy,
-        dify_api_key=dify_api_key,
-        dify_base_url=dify_base_url,
-        dify_dataset_id=dify_dataset_id,
-        dify_workflow_api_key=dify_workflow_api_key,
-        dify_workflow_base_url=dify_workflow_base_url,
-        discord_token=discord_token,
-        database_path=database_path,
+        stores=stores, crawler=crawler, proxy=proxy,
+        openai_api_key=openai_api_key,
+        openai_base_url=openai_base_url,
+        embedding_api_key=os.getenv("EMBEDDING_API_KEY"),
+        embedding_base_url=os.getenv("EMBEDDING_BASE_URL"),
+        embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
+        embedding_dimensions=_opt_int("EMBEDDING_DIMENSIONS", 1024),
+        embedding_query_prefix=os.getenv("EMBEDDING_QUERY_PREFIX", ""),
+        embedding_doc_prefix=os.getenv("EMBEDDING_DOC_PREFIX", ""),
+        chat_api_key=os.getenv("CHAT_API_KEY"),
+        chat_base_url=os.getenv("CHAT_BASE_URL"),
+        chat_model=os.getenv("CHAT_MODEL", "gpt-4o"),
+        chat_structured_output=os.getenv("CHAT_STRUCTURED_OUTPUT", "true").lower() != "false",
+        chroma_path=os.getenv("CHROMA_PATH", "./chroma"),
+        discord_token=os.getenv("DISCORD_TOKEN", os.getenv("DISCORD_BOT_TOKEN")),
+        database_path=os.getenv("DATABASE_PATH", "./estimator_king.db"),
     )
 
     # Validate structural configuration (not credentials)
