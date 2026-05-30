@@ -9,11 +9,11 @@
 **Tech Stack:** Python 3.14、標準庫 `logging`、`pytest` + `pytest-asyncio`（既有 `@pytest.mark.asyncio`）、`caplog` fixture、`unittest.mock`、`pyright`、`ruff`。
 
 **驗證工具指令（全程沿用）：**
-- 單一測試：`.venv/bin/python -m pytest <path>::<test> -v -p no:cov`
+- 單一測試：`.venv/bin/python -m pytest <path>::<test> -v -o addopts=""`
 - 型別檢查：`.venv/bin/basedpyright <file>`
 - Lint：`uvx ruff check <file>`
 
-> 註：`pytest.ini` 預設 `addopts` 帶 `--cov`，逐測試執行時加 `-p no:cov` 可避免覆蓋率雜訊；最終驗證（Task 13）會跑完整含 cov 的測試。
+> 註：`pytest.ini` 預設 `addopts` 帶 `--cov`；逐測試執行時用 `-o addopts=""` 覆寫整個 addopts 以避免覆蓋率雜訊（注意：不可用 `-p no:cov`，因停用 cov 外掛後 addopts 殘留的 `--cov` 會變成無法辨識的參數而報錯）。最終驗證（Task 13）會跑完整含 cov 的測試。
 
 ---
 
@@ -72,7 +72,7 @@ def test_run_crawl_config_failure_logs_under_module_logger(monkeypatch, caplog):
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_main_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_main_logging.py -v -o addopts=""`
 Expected: FAIL（`AttributeError: module ... has no attribute '_LOG_FORMAT'`，以及記錄 name 為 `root` 而非模組路徑）
 
 - [ ] **Step 3: 實作**
@@ -117,7 +117,7 @@ _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_main_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_main_logging.py -v -o addopts=""`
 Expected: PASS（2 passed）
 
 - [ ] **Step 5: 型別與 lint**
@@ -156,7 +156,7 @@ def test_runner_has_module_logger_with_qualified_name():
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_runner_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_runner_logging.py -v -o addopts=""`
 Expected: FAIL（`AttributeError: module 'estimator_king.bot.runner' has no attribute 'logger'`）
 
 - [ ] **Step 3: 實作**
@@ -187,7 +187,7 @@ logger = logging.getLogger(__name__)
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_runner_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_runner_logging.py -v -o addopts=""`
 Expected: PASS（1 passed）
 
 - [ ] **Step 5: 型別與 lint**
@@ -257,7 +257,7 @@ def test_sync_failure_logs_under_module_logger(caplog):
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_sync_engine_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_sync_engine_logging.py -v -o addopts=""`
 Expected: FAIL（記錄 name 為 `root`，篩選後 `recs` 為空）
 
 - [ ] **Step 3: 實作**
@@ -277,7 +277,7 @@ logger = logging.getLogger(__name__)
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_sync_engine_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_sync_engine_logging.py -v -o addopts=""`
 Expected: PASS（1 passed）
 
 - [ ] **Step 5: 型別與 lint**
@@ -327,7 +327,7 @@ def test_no_blocks_debug_logs_under_module_logger(caplog):
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_html_extractor_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_html_extractor_logging.py -v -o addopts=""`
 Expected: FAIL（記錄 name 為 `root`，篩選後 `recs` 為空）
 
 - [ ] **Step 3: 實作**
@@ -354,7 +354,7 @@ logger = logging.getLogger(__name__)
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_html_extractor_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_html_extractor_logging.py -v -o addopts=""`
 Expected: PASS（1 passed）
 
 - [ ] **Step 5: 型別與 lint**
@@ -472,7 +472,7 @@ async def test_debug_logs_error_status_before_raise(monkeypatch, caplog):
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_async_http_client_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_async_http_client_logging.py -v -o addopts=""`
 Expected: FAIL（無 DEBUG 記錄，`recs` 為空）
 
 - [ ] **Step 3: 實作**
@@ -506,12 +506,12 @@ logger = logging.getLogger(__name__)
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_async_http_client_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_async_http_client_logging.py -v -o addopts=""`
 Expected: PASS（2 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_async_http_client.py -v -p no:cov && .venv/bin/basedpyright estimator_king/crawler/async_http_client.py tests/test_async_http_client_logging.py && uvx ruff check estimator_king/crawler/async_http_client.py tests/test_async_http_client_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_async_http_client.py -v -o addopts="" && .venv/bin/basedpyright estimator_king/crawler/async_http_client.py tests/test_async_http_client_logging.py && uvx ruff check estimator_king/crawler/async_http_client.py tests/test_async_http_client_logging.py`
 Expected: 既有 async http client 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -589,7 +589,7 @@ def test_debug_logs_successful_request(monkeypatch, caplog):
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_http_client_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_http_client_logging.py -v -o addopts=""`
 Expected: FAIL（無 DEBUG 記錄）
 
 - [ ] **Step 3: 實作**
@@ -623,12 +623,12 @@ logger = logging.getLogger(__name__)
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_http_client_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_http_client_logging.py -v -o addopts=""`
 Expected: PASS（1 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_http_client.py -v -p no:cov && .venv/bin/basedpyright estimator_king/crawler/http_client.py tests/test_http_client_logging.py && uvx ruff check estimator_king/crawler/http_client.py tests/test_http_client_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_http_client.py -v -o addopts="" && .venv/bin/basedpyright estimator_king/crawler/http_client.py tests/test_http_client_logging.py && uvx ruff check estimator_king/crawler/http_client.py tests/test_http_client_logging.py`
 Expected: 既有 http client 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -692,7 +692,7 @@ def test_embed_emits_debug_with_count_and_model(mock_openai, caplog):
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_embeddings_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_embeddings_logging.py -v -o addopts=""`
 Expected: FAIL（無 DEBUG 記錄）
 
 - [ ] **Step 3: 實作**
@@ -733,12 +733,12 @@ logger = logging.getLogger(__name__)
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_embeddings_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_embeddings_logging.py -v -o addopts=""`
 Expected: PASS（1 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_embeddings.py -v -p no:cov && .venv/bin/basedpyright estimator_king/llm/embeddings.py tests/test_embeddings_logging.py && uvx ruff check estimator_king/llm/embeddings.py tests/test_embeddings_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_embeddings.py -v -o addopts="" && .venv/bin/basedpyright estimator_king/llm/embeddings.py tests/test_embeddings_logging.py && uvx ruff check estimator_king/llm/embeddings.py tests/test_embeddings_logging.py`
 Expected: 既有 embeddings 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -826,7 +826,7 @@ def test_debug_logged_even_on_error(mock_openai, caplog):
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_chat_provider_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_chat_provider_logging.py -v -o addopts=""`
 Expected: FAIL（無 DEBUG 記錄）
 
 - [ ] **Step 3: 實作**
@@ -864,12 +864,12 @@ logger = logging.getLogger(__name__)
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_chat_provider_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_chat_provider_logging.py -v -o addopts=""`
 Expected: PASS（2 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_chat_provider.py -v -p no:cov && .venv/bin/basedpyright estimator_king/llm/chat.py tests/test_chat_provider_logging.py && uvx ruff check estimator_king/llm/chat.py tests/test_chat_provider_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_chat_provider.py -v -o addopts="" && .venv/bin/basedpyright estimator_king/llm/chat.py tests/test_chat_provider_logging.py && uvx ruff check estimator_king/llm/chat.py tests/test_chat_provider_logging.py`
 Expected: 既有 chat provider 測試全 PASS（含 refusal/invalid-json 例外仍正常傳遞）；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -951,7 +951,7 @@ def test_empty_sitemap_warns_and_skips_summary(repo, caplog):
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_pipeline_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_pipeline_logging.py -v -o addopts=""`
 Expected: FAIL（第一個測試無 summary INFO）
 
 - [ ] **Step 3: 實作**
@@ -970,12 +970,12 @@ Expected: FAIL（第一個測試無 summary INFO）
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_pipeline_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_pipeline_logging.py -v -o addopts=""`
 Expected: PASS（2 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_pipeline.py -v -p no:cov && .venv/bin/basedpyright estimator_king/crawler/pipeline.py tests/test_pipeline_logging.py && uvx ruff check estimator_king/crawler/pipeline.py tests/test_pipeline_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_pipeline.py -v -o addopts="" && .venv/bin/basedpyright estimator_king/crawler/pipeline.py tests/test_pipeline_logging.py && uvx ruff check estimator_king/crawler/pipeline.py tests/test_pipeline_logging.py`
 Expected: 既有 pipeline 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -1069,7 +1069,7 @@ def test_queue_start_heartbeat_and_done_logged(repo, caplog):
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_async_pipeline_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_async_pipeline_logging.py -v -o addopts=""`
 Expected: FAIL（`AttributeError: ... '_PROGRESS_LOG_EVERY'` 或無對應 INFO）
 
 - [ ] **Step 3: 實作**
@@ -1125,12 +1125,12 @@ _PROGRESS_LOG_EVERY = 20
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_async_pipeline_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_async_pipeline_logging.py -v -o addopts=""`
 Expected: PASS（1 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_async_pipeline.py tests/test_integration_async_pipeline.py -v -p no:cov && .venv/bin/basedpyright estimator_king/crawler/async_pipeline.py tests/test_async_pipeline_logging.py && uvx ruff check estimator_king/crawler/async_pipeline.py tests/test_async_pipeline_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_async_pipeline.py tests/test_integration_async_pipeline.py -v -o addopts="" && .venv/bin/basedpyright estimator_king/crawler/async_pipeline.py tests/test_async_pipeline_logging.py && uvx ruff check estimator_king/crawler/async_pipeline.py tests/test_async_pipeline_logging.py`
 Expected: 既有 async pipeline 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -1205,7 +1205,7 @@ def test_chunk_debug_and_done_info(caplog):
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_estimator_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_estimator_logging.py -v -o addopts=""`
 Expected: FAIL（無 chunk DEBUG / done INFO）
 
 - [ ] **Step 3: 實作**
@@ -1239,12 +1239,12 @@ Expected: FAIL（無 chunk DEBUG / done INFO）
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_estimator_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_estimator_logging.py -v -o addopts=""`
 Expected: PASS（1 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_estimator.py -v -p no:cov && .venv/bin/basedpyright estimator_king/bot/estimator.py tests/test_estimator_logging.py && uvx ruff check estimator_king/bot/estimator.py tests/test_estimator_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_estimator.py -v -o addopts="" && .venv/bin/basedpyright estimator_king/bot/estimator.py tests/test_estimator_logging.py && uvx ruff check estimator_king/bot/estimator.py tests/test_estimator_logging.py`
 Expected: 既有 estimator 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -1345,7 +1345,7 @@ def test_estimation_error_logs_error(monkeypatch, caplog):
 
 - [ ] **Step 2: 執行測試確認失敗**
 
-Run: `.venv/bin/python -m pytest tests/test_bot_commands_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_bot_commands_logging.py -v -o addopts=""`
 Expected: FAIL（無對應 WARNING/ERROR 記錄）
 
 - [ ] **Step 3: 實作**
@@ -1407,12 +1407,12 @@ logger = logging.getLogger(__name__)
 
 - [ ] **Step 4: 執行測試確認通過**
 
-Run: `.venv/bin/python -m pytest tests/test_bot_commands_logging.py -v -p no:cov`
+Run: `.venv/bin/python -m pytest tests/test_bot_commands_logging.py -v -o addopts=""`
 Expected: PASS（2 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_bot_commands.py -v -p no:cov && .venv/bin/basedpyright estimator_king/bot/commands.py tests/test_bot_commands_logging.py && uvx ruff check estimator_king/bot/commands.py tests/test_bot_commands_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_bot_commands.py -v -o addopts="" && .venv/bin/basedpyright estimator_king/bot/commands.py tests/test_bot_commands_logging.py && uvx ruff check estimator_king/bot/commands.py tests/test_bot_commands_logging.py`
 Expected: 既有 bot commands 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
