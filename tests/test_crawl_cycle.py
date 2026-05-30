@@ -5,7 +5,6 @@ import pytest
 
 from estimator_king.config_schema import AppConfig, CrawlerPolicy, Store
 from estimator_king.crawler.cycle import run_crawl_cycle
-from estimator_king.database.repository import ProductStateRepository
 
 
 class FakeEmbedder:
