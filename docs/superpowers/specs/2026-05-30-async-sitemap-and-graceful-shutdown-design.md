@@ -43,7 +43,11 @@ Discord bot 與 in-process 爬蟲排程器共用同一個 asyncio event loop。`
 - `AsyncHTTPClient.get()` 回傳 `str`，因此：
   - XML 解析改為 `ET.fromstring(text)`（傳入 `str`）。
   - **移除** `resp.content` 與 `resp.raise_for_status()` 的使用（`AsyncHTTPClient` 內部已對 403/430/429/4xx/5xx 主動 raise）。
-- except 子句：把對 `HTTPClientError` 的捕捉改為 `AsyncHTTPClientError`（從 `estimator_king.crawler.async_http_client` import）。`ET.ParseError` 維持。
+- except 子句：把**三處**對 `HTTPClientError` 的捕捉全部改為 `AsyncHTTPClientError`（從 `estimator_king.crawler.async_http_client` import）：
+  - `enumerate_products` 的 `except (ET.ParseError, HTTPClientError)`（現 sitemap.py:68）
+  - `_extract_products_sitemaps` 的 `except HTTPClientError`（現 sitemap.py:92）
+  - `_extract_product_urls` 的 `except HTTPClientError`（現 sitemap.py:129）
+  其中 `ET.ParseError` 的捕捉維持。內層兩處仍把錯誤包成 `SitemapParseError`（`SitemapError` 子類），外層 `enumerate_products` 包成 `SitemapError`，語意不變。
 - 各 products sitemap 維持**循序**抓取（不引入 sitemap 層級的並發 gather，縮小改動面；rate limiter 本就負責 pacing）。
 - 保留 `SitemapError`、`SitemapParseError` 類別與既有錯誤包裝語意。
 
@@ -122,7 +126,7 @@ Discord bot 與 in-process 爬蟲排程器共用同一個 asyncio event loop。`
 
 ### 3.5 行為變更（明確記錄）
 
-- **sitemap 4xx 回應**：原同步路徑以 `requests` 的 `resp.raise_for_status()` 處理（且其拋出的 `requests.HTTPError` 並非 `HTTPClientError`，捕捉行為不一致）。遷移後，4xx 由 `AsyncHTTPClient` 統一 raise `ClientError`（`AsyncHTTPClientError` 子類），被 `SitemapEnumerator` 包成 `SitemapError`，再由 `cycle.run_crawl_cycle` 以 per-store error 計數處理（`counters["errors"] += 1` 並 `continue`）。此為行為改善（更一致的錯誤處理），需在實作與測試中明確涵蓋。
+- **sitemap 4xx 回應**：原同步路徑以 `requests` 的 `resp.raise_for_status()` 處理（且其拋出的 `requests.HTTPError` 並非 `HTTPClientError`，捕捉行為不一致）。遷移後，4xx 由 `AsyncHTTPClient` 統一 raise `ClientError`（`AsyncHTTPClientError` 子類）；在 `_extract_*` 內層先被包成 `SitemapParseError`（`SitemapError` 子類），最終以 `SitemapError` 形式由 `cycle.run_crawl_cycle` 以 per-store error 計數處理（`counters["errors"] += 1` 並 `continue`）。此為行為改善（更一致的錯誤處理），需在實作與測試中明確涵蓋。
 - **proxy 一致化**：遷移後商品抓取也支援 proxy（先前忽略）。proxy 預設 `enabled: false`，預設情境行為不變（皆直連）。
 
 ## 4. 受影響檔案清單
@@ -140,19 +144,21 @@ production：
 - `estimator_king/crawler/__init__.py`（若有 http_client re-export 則移除）
 
 tests：
-- `tests/test_sitemap.py`（改 async via `asyncio.run`，mock async get）
-- `tests/test_pipeline.py`（`populate_queue_from_sitemap` 測試改 async）
-- `tests/test_crawl_cycle.py`（驗證 cycle 在 async sitemap 下正常）
-- `tests/test_async_http_client.py`（新增 proxy 測試）
+- `tests/test_sitemap.py`（改 async via `asyncio.run`，mock async get；fake `get` 直接回傳 XML 字串）
+- `tests/test_pipeline.py`（`populate_queue_from_sitemap` 測試改 async；其 `FakeEnumerator.enumerate_products` 須改為 `async def`，且測試以 `asyncio.run(populate_queue_from_sitemap(...))` 呼叫，否則 `await` 同步回傳值會 `TypeError`）
+- `tests/test_crawl_cycle.py`（驗證 cycle 在 async sitemap 下正常；現有 `patch("...cycle.populate_queue_from_sitemap", return_value=0)` 須改為 awaitable mock——例如 `new=AsyncMock(return_value=0)` 或 `side_effect` 為 async 函式，比照同檔 `async_process_queue` 的 `fake_proc` 寫法，否則 `await 0` 會 `TypeError`）
+- `tests/test_async_http_client.py`（新增 proxy 測試；須擴充該檔 `_FakeSession.request`/`request_factory`，使其捕獲並暴露 `proxy`/`proxy_auth` 等 kwargs——現有 factory 只接 `(method, url)` 並把 `**kwargs` 吞掉，無法觀察 proxy 參數）
 - `tests/test_http_client.py`（**刪除**）
 - `tests/test_http_client_logging.py`（**刪除**）
 - 關閉行為測試（新增或擴充 `tests/test_scheduler.py` / runner 相關）：scheduler 被 cancel 後乾淨退出；第一次訊號觸發 cancel + close、第二次觸發強退路徑（強退以可注入的 exit 函式測試，避免測試真的呼叫 `os._exit`）。
 
 ## 5. 測試策略
 
-- 沿用本專案既有 async 測試慣例：以同步 `def test_...` 內 `asyncio.run(...)` 呼叫 async 程式碼，**不使用** `@pytest.mark.asyncio`（與 `tests/test_async_pipeline.py` 一致）。
-- sitemap/pipeline 測試的 HTTP mock：以提供 `async def get(self, url) -> str` 的 fake 物件（或 `unittest.mock.AsyncMock` 設定 `return_value` 為 XML 字串）取代原本回傳 `requests.Response`（具 `.content`/`.raise_for_status`）的 `MagicMock`。沿用 `tests/fixtures/*.xml`（以字串讀入）。
-- proxy 測試：以 mock 的 `aiohttp` session/或攔截 `session.request` 的呼叫參數，斷言在 `enabled` 且設定值非空時帶入正確的 proxy 參數、scheme 對應正確（http vs https）、且 `enabled: false` 時不帶 proxy。
+- **本專案兩種 async 測試慣例並存，依目標檔沿用該檔既有風格**（不可一概而論）：
+  - `tests/test_sitemap.py`、`tests/test_pipeline.py`、`tests/test_crawl_cycle.py`：沿用 `asyncio.run(...)` 在同步 `def test_...` 內呼叫（比照 `tests/test_async_pipeline.py`、`tests/test_crawl_cycle.py`）。
+  - `tests/test_async_http_client.py`、`tests/test_scheduler.py`：沿用該檔既有的 `@pytest.mark.asyncio` + `async def test_...`（兩檔現皆採此寫法）。
+- sitemap/pipeline 測試的 HTTP mock：以提供 `async def get(self, url) -> str` 的 fake 物件（或 `unittest.mock.AsyncMock` 設定 `return_value` 為 XML 字串）取代原本回傳 `requests.Response`（具 `.content`/`.raise_for_status`）的 `MagicMock`。**fake 的 `get` 直接回傳 XML 字串本身**，不再包裝任何具 `.content`/`.raise_for_status` 的物件（因 §3.1 已移除這兩者的使用）。沿用 `tests/fixtures/*.xml`（以字串讀入）。
+- proxy 測試：擴充 `tests/test_async_http_client.py` 既有的 `_FakeSession`/`request_factory` 使其捕獲 `proxy`/`proxy_auth` 等 kwargs（現有 factory 只收 `(method, url)` 並把 `**kwargs` 吞掉，無法觀察 proxy）。斷言在 `enabled` 且設定值非空時帶入正確的 proxy 參數、scheme 對應正確（http vs https）、且 `enabled: false` 時不帶 proxy。
 - 4xx 行為測試：mock async get 對 sitemap URL 拋 `ClientError`，斷言 `enumerate_products` 包成 `SitemapError`，且 `run_crawl_cycle` 計入 per-store error 並 continue。
 - 關閉行為測試：以可注入的「強退函式」替代 `os._exit`，驗證第二次訊號走強退分支；驗證 `shutdown()` 會 cancel scheduler task 並 await、再 close bot。
 
