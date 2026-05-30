@@ -22,8 +22,8 @@ vspo 的 `https://store.vspo.jp/sitemap.xml` 是一個多語系 Shopify 站，si
 
 ### 目標
 
-1. 修正 sitemap 過濾，使其對任意多語系 Shopify 站只保留**預設語系**（無語系前綴）的 sitemap 與 product URL，並可透過設定調整允許的語系。
-2. index 層只抓取被允許語系的 products sitemap（vspo 從 402 次抓取降為 1 次）。
+1. 修正 sitemap 過濾，使其對任意多語系 Shopify 站只保留**單一語系**（預設為無語系前綴的預設語系）的 sitemap 與 product URL，且該語系可透過 per-store 設定調整。
+2. index 層只抓取該語系的 products sitemap（vspo 從 402 次抓取降為 1 次）。
 3. 提供一支可重複執行的維護腳本，直接清空 `crawl_queue`，附使用說明文件。
 
 ### 非目標
@@ -31,6 +31,7 @@ vspo 的 `https://store.vspo.jp/sitemap.xml` 是一個多語系 Shopify 站，si
 - 不清理 / 不修改 `products` 表或 ChromaDB（語系抓取未造成重複列；`product_url` 會 self-heal）。
 - 清理腳本**不**做 per-store / per-locale 的選擇性刪除——直接全清（使用者決策：全刪不會造成資料遺失）。
 - 不調整 daily budget、rate limit 等既有 crawler policy。
+- **不支援單一 store 同時保存多語系商品內容**。資料模型 `external_key = "{store_id}:{product_id}"` 不含 locale 維度，且 `product_id` 跨語系相同，故多語系抓取會在 upsert 時互相覆蓋（`content_hash` 非 COALESCE，最後抓取者勝，見 [repository.py:122-126](../../../estimator_king/database/repository.py#L122-L126)），同一 ChromaDB 向量亦被覆蓋。因此一個 store 只保存一個語系。跨語言查詢由多語系 embedding model（預設 `text-embedding-3-large`）的語意相似度處理，不需要儲存多語系副本。基於此，per-store 語系設定採**單一字串**而非清單，以誠實反映此限制並避免使用者誤設多語系造成每輪 re-embed 的 thrashing。
 
 ## 3. 設計
 
@@ -65,55 +66,54 @@ def locale_of_url(url: str) -> str:
 - 第一個 segment 為 `products` 或以 `sitemap` 開頭 → 視為 `DEFAULT_LOCALE`。
 - 否則第一個 segment（小寫）即語系字串（`en`、`en-al`、`ja-al` …）。
 
-回傳值一律為小寫，使其與小寫化後的 `allowed_locales` 集合可直接比對。同一函式同時涵蓋 sitemap-index 的 loc 與 product URL 兩種輸入；`urlparse().path` 會自動去除 query string（`?from=...&to=...`、`?variant=red`），故帶查詢參數的 loc 也能正確判定。
+回傳值一律為小寫，使其與小寫化後的 `locale` 參數可直接做等值比對。同一函式同時涵蓋 sitemap-index 的 loc 與 product URL 兩種輸入；`urlparse().path` 會自動去除 query string（`?from=...&to=...`、`?variant=red`），故帶查詢參數的 loc 也能正確判定。
 
-### 3.2 enumerator 改用 locale 集合過濾
+### 3.2 enumerator 改用單一 locale 等值過濾
 
 `SitemapEnumerator.enumerate_products` 新增參數：
 
 ```python
 async def enumerate_products(
-    self, base_url: str, allowed_locales: set[str] | None = None
+    self, base_url: str, locale: str = DEFAULT_LOCALE
 ) -> list[str]:
 ```
 
-- `allowed_locales is None` → 視為 `{DEFAULT_LOCALE}`。此預設確保**向後相容**：現有呼叫端與測試不傳此參數時，行為等同「只留預設語系」，`/en/` 等語系一律排除。
-- index 層（`_extract_products_sitemaps`）改為同時收 `allowed_locales`，條件由 `"products" in url` 改為 `"products" in url and locale_of_url(url) in allowed_locales`。允許集合需由 `enumerate_products` 傳入 `_extract_products_sitemaps`。對 vspo 而言，只有無前綴的預設 products sitemap 會被抓取（402 → 1）。
-- 最終 URL 層由 `"/products/" in url and "/en/" not in url` 改為 `"/products/" in url and locale_of_url(url) in allowed_locales`（防禦性過濾，移除寫死的 `/en/`）。
+- 參數 `locale` 為單一語系字串，預設 `DEFAULT_LOCALE`。此預設確保**向後相容**：現有呼叫端與測試不傳此參數時，行為等同「只留預設語系」，`/en/` 等語系一律排除。
+- `enumerate_products` 在進入過濾前先把 `locale` 正規化為小寫（`locale = locale.lower()`），與 `locale_of_url` 回傳的小寫值對齊。
+- index 層（`_extract_products_sitemaps`）改為同時收 `locale`，條件由 `"products" in url` 改為 `"products" in url and locale_of_url(url) == locale`。`locale` 由 `enumerate_products` 傳入 `_extract_products_sitemaps`。對 vspo 而言，只有無前綴的預設 products sitemap 會被抓取（402 → 1）。
+- 最終 URL 層由 `"/products/" in url and "/en/" not in url` 改為 `"/products/" in url and locale_of_url(url) == locale`（防禦性過濾，移除寫死的 `/en/`）。
 
-`_extract_products_sitemaps` 簽名調整為接收 `allowed_locales: set[str]`；`enumerate_products` 在預設 `None` 時先解析為 `{DEFAULT_LOCALE}` 再往下傳。回傳維持 sorted、去重的 list。class docstring 中描述 `/en/` 過濾的步驟同步更新為描述 locale 過濾。
+`_extract_products_sitemaps` 簽名調整為接收 `locale: str`。回傳維持 sorted、去重的 list。class docstring 中描述 `/en/` 過濾的步驟同步更新為描述單一 locale 過濾。
 
-### 3.3 設定：per-store `locales`
+### 3.3 設定：per-store `locale`（單一語系）
 
-`Store` dataclass（[config_schema.py](../../../estimator_king/config_schema.py)）新增欄位：
+`Store` dataclass（[config_schema.py](../../../estimator_king/config_schema.py)）新增單一字串欄位：
 
 ```python
-from dataclasses import dataclass, field
-
 @dataclass
 class Store:
     id: str
     base_url: str
     sitemap_url: str
-    locales: list[str] = field(default_factory=lambda: ["default"])
+    locale: str = "default"
 ```
 
-- YAML 省略 `locales` → 預設 `["default"]`（程式端維持此預設行為）。
-- `Store.validate()` 新增檢查：`locales` 必須為非空 list，且每個元素為非空字串；否則 `raise ValueError`。此檢查確實會執行：`AppConfig.validate()`（config_schema.py 既有流程，line 134-135）會 `for store in self.stores: store.validate()`，而 `from_yaml` 在結尾呼叫 `config.validate()`（line 266）。
-- `AppConfig.from_yaml` 解析 store 時讀取 `s.get("locales", ["default"])`。
-- **不變式**：`Store.locales` 中代表預設語系的字串必須恰好等於 `DEFAULT_LOCALE`（`"default"`）。`stores_config.yaml` 的 `locales: [default]`、dataclass 的 `default_factory=lambda: ["default"]`、以及 `locale_of_url` 的 `DEFAULT_LOCALE` 三者必須保持同步——若改動 `DEFAULT_LOCALE` 字面值，須一併更新另兩處，否則預設語系 URL 會比對失敗而被全數丟棄。
+- YAML 省略 `locale` → 預設 `"default"`（程式端維持此預設行為）。
+- `Store.validate()` 新增檢查：`locale` 必須為非空字串；否則 `raise ValueError`。此檢查確實會執行：`AppConfig.validate()`（config_schema.py 既有流程，line 134-135）會 `for store in self.stores: store.validate()`，而 `from_yaml` 在結尾呼叫 `config.validate()`（line 266）。
+- `AppConfig.from_yaml` 解析 store 時讀取 `s.get("locale", "default")`。
+- **不變式**：`Store.locale` 代表預設語系時其值必須恰好等於 `DEFAULT_LOCALE`（`"default"`）。`stores_config.yaml` 的 `locale: default`、dataclass 的預設值 `"default"`、以及 `locale_of_url` 的 `DEFAULT_LOCALE` 三者必須保持同步——若改動 `DEFAULT_LOCALE` 字面值，須一併更新另兩處，否則預設語系 URL 會比對失敗而被全數丟棄。
+- 單一字串（而非清單）為刻意設計：資料模型只能保存一個語系（見 §2 非目標），單值可避免使用者誤設多語系。
 
-store 的 allowed-locale 集合在 `populate_queue_from_sitemap`（[crawler/pipeline.py](../../../estimator_king/crawler/pipeline.py)）內部計算並傳給 `enumerate_products`，呼叫端 `cycle.py` **不需改動**。`populate_queue_from_sitemap` 目前已接收 `store` 並呼叫 `enumerator.enumerate_products(store.base_url)`；改為：
+store 的 `locale` 由 `populate_queue_from_sitemap`（[crawler/pipeline.py](../../../estimator_king/crawler/pipeline.py)）直接傳給 `enumerate_products`，呼叫端 `cycle.py` **不需改動**。`populate_queue_from_sitemap` 目前已接收 `store` 並呼叫 `enumerator.enumerate_products(store.base_url)`；改為：
 
 ```python
 # 在 populate_queue_from_sitemap 內
-allowed_locales = {loc.lower() for loc in store.locales}
-sitemap_urls = await enumerator.enumerate_products(store.base_url, allowed_locales)
+sitemap_urls = await enumerator.enumerate_products(store.base_url, store.locale)
 ```
 
-`store.locales` 內的字串集合化並小寫化後，`"default"` 即對應 `DEFAULT_LOCALE`。`locale_of_url` 回傳值已為小寫（見 §3.1），`allowed_locales` 亦小寫化，故兩側集合比對 case-correct。
+`enumerate_products` 內部會把 `locale` 正規化為小寫（見 §3.2），`locale_of_url` 回傳值亦為小寫（見 §3.1），故等值比對 case-correct。
 
-`stores_config.yaml` 為兩個 store 顯式加上 `locales`：
+`stores_config.yaml` 為兩個 store 顯式加上 `locale`：
 
 ```yaml
 stores:
@@ -121,13 +121,13 @@ stores:
     base_url: https://shop.hololivepro.com
     sitemap_url: https://shop.hololivepro.com/sitemap.xml
     # 只抓預設語系（無語系前綴）；排除 /en/ 等所有語系版本
-    locales: [default]
+    locale: default
 
   - id: vspo
     base_url: https://store.vspo.jp
     sitemap_url: https://store.vspo.jp/sitemap.xml
     # 只抓預設日文（無語系前綴）；排除 /en/、/en-al/、/ja-al/ 等所有語系版本
-    locales: [default]
+    locale: default
 ```
 
 ### 3.4 清理維護腳本 `scripts/clean_crawl_queue.py`
@@ -173,8 +173,8 @@ stores:
 - `locale_of_url` 單元測試：預設 product URL（`/products/x` → `default`）、sitemap loc（`/sitemap_products_1.xml` → `default`）、語系 product URL（`/en/products/x` → `en`、`/ja-al/products/x` → `ja-al`）、語系 sitemap loc（`/en-dz/sitemap_products_1.xml` → `en-dz`）。
 - 新增多語系 fixture（含 `default`、`en`、`ja-al`、`en-dz` 的 sitemap index 與 product URL），驗證 `enumerate_products` 預設只回傳 `default` 語系的 URL。
 - 驗證 index 層不抓取語系 sitemap：檢查 `client.call_urls` 不含語系前綴的 sitemap loc。
-- 驗證傳入自訂 `allowed_locales`（例如 `{"default", "en"}`）時，`en` 的 URL 會被保留。
-- 既有測試（`test_enumerate_products_excludes_en_paths` 等）在不傳 `allowed_locales` 時仍應通過（預設 = `{default}`，`/en/` 仍被排除）。
+- 驗證傳入自訂 `locale`（例如 `"en"`）時，只回傳 `en` 語系的 URL，`default` 與其他語系被排除。
+- 既有測試（`test_enumerate_products_excludes_en_paths` 等）在不傳 `locale` 時仍應通過（預設 = `default`，`/en/` 仍被排除）。
 
 ### 4.2 清理腳本測試
 
@@ -194,7 +194,7 @@ stores:
 
 1. 對 vspo sitemap，`enumerate_products` 在預設設定下只回傳 `https://store.vspo.jp/products/...`（無語系前綴）的 URL，且 index 層只抓取 1 份預設 products sitemap。
 2. 對 hololive，行為與修正前一致（只留預設、排除 `/en/`）。
-3. `Store.locales` 省略時預設 `["default"]`；`stores_config.yaml` 兩 store 均顯式標註 `locales: [default]`。
+3. `Store.locale` 省略時預設 `"default"`；`stores_config.yaml` 兩 store 均顯式標註 `locale: default`。
 4. `scripts/clean_crawl_queue.py` 可用 `-m` 與直接執行兩種方式運行，能全清或依 `--store` 清除 `crawl_queue`，`--dry-run` 不刪除。
 5. `docs/scripts/clean-crawl-queue.md` 完整說明用途、前置、參數與範例。
 6. basedpyright（production 0 errors）、ruff、pytest 全數通過。
