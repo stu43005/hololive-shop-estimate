@@ -75,11 +75,15 @@ Discord bot 與 in-process 爬蟲排程器共用同一個 asyncio event loop。`
 **`estimator_king/crawler/async_http_client.py`**
 
 - `AsyncHTTPClient.__init__` 新增參數 `proxy: ProxyConfig | None = None`（從 `..config_schema` import `ProxyConfig`）；存為 `self._proxy = proxy or ProxyConfig()`。
-- `_request_once` 在呼叫 `session.request("GET", url, ...)` 時，依目標 URL 的 scheme 決定 proxy：
+- `_request_once` 在呼叫 `session.request("GET", url, ...)` 時，依目標 URL 的 scheme 決定要用哪個 proxy 設定值：
   - http URL → 用 `self._proxy.http_proxy`
   - https URL → 用 `self._proxy.https_proxy`
-  - 僅在 `self._proxy.enabled` 且選中的值非空字串時，傳入 aiohttp 的 proxy 參數；否則不傳（直連）。
-- proxy 參數選空字串時的 fallback 行為、以及 proxy URL 內含帳密的處理，**以 research subagent 對 aiohttp 3.13.5 查證後的 API 為準**（見 §6）。
+  - 僅在 `self._proxy.enabled` 且選中的值為非空字串時才走 proxy；否則不傳任何 proxy 參數（直連）。
+- **帳密處理（已對 aiohttp 3.13.5 原始碼查證，見 §6）**：aiohttp 對「顯式傳入」的 proxy URL **不會**自動拆出 userinfo 帳密（只有 `trust_env=True` 的 env 來源才會拆）。而 `ProxyConfig` 沒有獨立 auth 欄位，使用者可能把帳密寫進 URL（`http://user:pass@host:port`）。因此 `AsyncHTTPClient` 必須自己拆解：
+  - 以 `aiohttp.helpers.strip_auth_from_url(yarl.URL(value))` 把選中的 proxy 值拆成 `(stripped_url, auth)`（`auth` 為 `BasicAuth | None`）。
+  - 呼叫 `session.request(..., proxy=stripped_url, proxy_auth=auth)`；`auth` 為 `None` 時等同不帶認證。
+  - `stripped_url` 型別為 `yarl.URL`（aiohttp 的 `proxy` 接受 `str | yarl.URL`）。
+- **scheme 限制（已查證）**：aiohttp 只支援 `http://`（與 socks5）proxy；`https://` proxy 會被忽略並警告。即使目標 URL 是 https，`http_proxy`/`https_proxy` 兩個設定值都應填 `http://` 形式的 proxy（aiohttp 會走 CONNECT 隧道）。本規格不對設定值做 scheme 驗證/轉換，沿用設定原值；此限制於 spec 與測試註記即可。
 
 **`estimator_king/crawler/async_pipeline.py`**
 
@@ -162,15 +166,21 @@ tests：
 - 4xx 行為測試：mock async get 對 sitemap URL 拋 `ClientError`，斷言 `enumerate_products` 包成 `SitemapError`，且 `run_crawl_cycle` 計入 per-store error 並 continue。
 - 關閉行為測試：以可注入的「強退函式」替代 `os._exit`，驗證第二次訊號走強退分支；驗證 `shutdown()` 會 cancel scheduler task 並 await、再 close bot。
 
-## 6. 寫 plan 前須完成的 research（第三方套件查證）
+## 6. 第三方套件查證（research）
 
-依專案規則，以下 aiohttp 3.13.5 的行為**必須在撰寫實現計畫前**由 research subagent（haiku）查證，不得在 plan 中以「事前查證」型 Task 呈現：
+依專案規則，以下行為須在撰寫實現計畫前查證，不得在 plan 中以「事前查證」型 Task 呈現。
 
-1. `aiohttp.ClientSession.request` 的 `proxy` 與 `proxy_auth` 參數簽名與型別（aiohttp 3.13.5）。
-2. https 目標 URL 經 http proxy 時的 CONNECT 隧道行為，及 `proxy` 應傳入的 URL 形式。
-3. proxy URL 內含帳密（`http://user:pass@host`）時是否被接受，或必須改用 `proxy_auth=BasicAuth`。
-4. `ET.fromstring` 接受 `str` 輸入（含含 XML 宣告編碼時）的行為，確認改吃字串無誤。
-5. tenacity 在 async 函式上的取消（`CancelledError`）傳遞行為，確認重試 wrapper 不會吞掉取消。
+### 6.1 aiohttp 3.13.5 proxy API — 已查證（讀實際安裝原始碼）
+
+- **參數簽名**（`client.py` `_request`）：`proxy: Optional[StrOrURL] = None`、`proxy_auth: Optional[BasicAuth] = None`、`proxy_headers: Optional[LooseHeaders] = None`。`BasicAuth(login: str, password: str = "", encoding: str = "latin1")`（`helpers.py`）。
+- **顯式 proxy URL 內含帳密**：**不會**被自動拆解。`client.py:580-587` 對顯式 `proxy` 僅做 `URL(proxy)`，不呼叫 `strip_auth_from_url`；自動拆解只發生在 `trust_env=True` 的 env 來源（`helpers.py:281` `proxies_from_env`）。→ 結論：本專案需自行用 `aiohttp.helpers.strip_auth_from_url(yarl.URL(value))` 拆成 `(stripped_url, BasicAuth|None)`，再分別傳 `proxy=` 與 `proxy_auth=`（見 §3.2）。
+- **scheme 限制**：只支援 `http://`（與 socks5）proxy；`https://`/`wss` proxy 被忽略並 warning（`helpers.py:285-289`）。https 目標 URL 也用 http proxy（走 CONNECT）。
+- **trust_env**：預設 `False`（`client.py`）。本專案走顯式 proxy，與 env 無關；config 載入時已自行把 `HTTP_PROXY`/`HTTPS_PROXY` 併入設定值。
+
+### 6.2 待查證（寫 plan 前完成）
+
+1. `xml.etree.ElementTree.fromstring` 接受 `str` 輸入的行為（特別是內容含 `<?xml ... encoding="..."?>` 宣告時，傳 `str` 是否會因 encoding 宣告報錯，或需傳 `bytes`）。
+2. tenacity 在 async 函式上的取消（`CancelledError`）傳遞行為，確認 `AsyncHTTPClient` 的重試 wrapper 不會吞掉取消。
 
 研究產出（API 簽名、範例、版本、注意事項）將直接寫入實現計畫中各 Task 的具體程式碼。
 
