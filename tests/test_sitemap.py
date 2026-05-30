@@ -289,3 +289,72 @@ class TestLocaleOfUrl:
 
     def test_uppercase_segment_normalized_to_lower(self):
         assert locale_of_url("https://shop.example.com/EN/products/x") == "en"
+
+
+_MULTILOCALE_INDEX = """<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://shop.example.com/sitemap_products_1.xml</loc></sitemap>
+  <sitemap><loc>https://shop.example.com/en/sitemap_products_1.xml</loc></sitemap>
+  <sitemap><loc>https://shop.example.com/ja-al/sitemap_products_1.xml</loc></sitemap>
+  <sitemap><loc>https://shop.example.com/en-dz/sitemap_products_1.xml</loc></sitemap>
+  <sitemap><loc>https://shop.example.com/sitemap_pages_1.xml</loc></sitemap>
+</sitemapindex>
+"""
+
+_DEFAULT_PRODUCTS = """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://shop.example.com/products/jp-001</loc></url>
+  <url><loc>https://shop.example.com/products/jp-002</loc></url>
+</urlset>
+"""
+
+_EN_PRODUCTS = """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://shop.example.com/en/products/en-001</loc></url>
+</urlset>
+"""
+
+
+def _multilocale_router(url: str) -> str:
+    if url.endswith("/sitemap.xml"):
+        return _MULTILOCALE_INDEX
+    if "/en/sitemap_products" in url:
+        return _EN_PRODUCTS
+    if "sitemap_products" in url:  # default (no prefix) and any other locale
+        return _DEFAULT_PRODUCTS
+    raise AssertionError(f"Unexpected URL: {url}")
+
+
+class TestSitemapEnumeratorLocaleFiltering:
+    def test_default_locale_returns_only_default_urls(self):
+        client = FakeAsyncClient(_multilocale_router)
+        enumerator = SitemapEnumerator(http_client=client)
+        urls = asyncio.run(enumerator.enumerate_products("https://shop.example.com"))
+        assert urls == [
+            "https://shop.example.com/products/jp-001",
+            "https://shop.example.com/products/jp-002",
+        ]
+
+    def test_index_level_skips_locale_sitemaps(self):
+        client = FakeAsyncClient(_multilocale_router)
+        enumerator = SitemapEnumerator(http_client=client)
+        asyncio.run(enumerator.enumerate_products("https://shop.example.com"))
+        assert any(
+            u.endswith("/sitemap_products_1.xml") and "/en/" not in u
+            and "/ja-al/" not in u and "/en-dz/" not in u
+            for u in client.call_urls
+        )
+        assert not any("/en/sitemap_products" in u for u in client.call_urls)
+        assert not any("/ja-al/sitemap_products" in u for u in client.call_urls)
+        assert not any("/en-dz/sitemap_products" in u for u in client.call_urls)
+
+    def test_custom_locale_returns_only_that_locale(self):
+        client = FakeAsyncClient(_multilocale_router)
+        enumerator = SitemapEnumerator(http_client=client)
+        urls = asyncio.run(enumerator.enumerate_products("https://shop.example.com", "en"))
+        assert urls == ["https://shop.example.com/en/products/en-001"]
+        assert any("/en/sitemap_products" in u for u in client.call_urls)
+        assert not any(
+            u.endswith("/sitemap_products_1.xml") and "/en/" not in u
+            for u in client.call_urls
+        )

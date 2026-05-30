@@ -45,7 +45,7 @@ class SitemapEnumerator:
     1. Fetch /sitemap.xml (sitemapindex)
     2. Extract all <sitemap><loc> entries containing "products"
     3. For each products sitemap, fetch and extract <url><loc> entries
-    4. Filter out /en/ locale paths
+    4. Keep only the requested locale's sitemaps and product URLs
     5. Return stable-ordered (sorted), deduplicated list
     """
 
@@ -53,29 +53,39 @@ class SitemapEnumerator:
         """Initialize enumerator with an async HTTP client."""
         self.http_client = http_client
 
-    async def enumerate_products(self, base_url: str) -> list[str]:
-        """Enumerate all product URLs from a Shopify store.
+    async def enumerate_products(
+        self, base_url: str, locale: str = DEFAULT_LOCALE
+    ) -> list[str]:
+        """Enumerate all product URLs from a Shopify store for one locale.
 
         Args:
             base_url: Store base URL (e.g., "https://shop.example.com")
+            locale: Locale to keep; ``DEFAULT_LOCALE`` (default) means the
+                unprefixed default-language store. Compared case-insensitively.
 
         Returns:
-            Sorted, deduplicated list of product URLs (excluding /en/ paths)
+            Sorted, deduplicated list of product URLs for the given locale.
 
         Raises:
             SitemapError: If sitemap parsing or fetching fails
         """
+        locale = locale.lower()
         sitemap_index_url = urljoin(base_url, "/sitemap.xml")
 
         try:
-            products_sitemap_urls = await self._extract_products_sitemaps(sitemap_index_url)
+            products_sitemap_urls = await self._extract_products_sitemaps(
+                sitemap_index_url, locale
+            )
 
             all_product_urls: set[str] = set()
             for sitemap_url in products_sitemap_urls:
                 urls = await self._extract_product_urls(sitemap_url)
                 all_product_urls.update(urls)
 
-            filtered = [url for url in all_product_urls if "/products/" in url and "/en/" not in url]
+            filtered = [
+                url for url in all_product_urls
+                if "/products/" in url and locale_of_url(url) == locale
+            ]
             return sorted(filtered)
 
         except (ET.ParseError, AsyncHTTPClientError) as e:
@@ -83,8 +93,10 @@ class SitemapEnumerator:
                 f"Failed to enumerate products from {base_url}: {e}"
             ) from e
 
-    async def _extract_products_sitemaps(self, sitemap_index_url: str) -> list[str]:
-        """Extract all products sitemap URLs from sitemapindex."""
+    async def _extract_products_sitemaps(
+        self, sitemap_index_url: str, locale: str
+    ) -> list[str]:
+        """Extract products sitemap URLs for `locale` from the sitemapindex."""
         try:
             text = await self.http_client.get(sitemap_index_url)
             root = ET.fromstring(text)
@@ -99,7 +111,7 @@ class SitemapEnumerator:
             loc_elem = sitemap_elem.find("sitemap:loc", SITEMAP_NS)
             if loc_elem is not None and loc_elem.text:
                 url = loc_elem.text.strip()
-                if "products" in url:
+                if "products" in url and locale_of_url(url) == locale:
                     products_urls.append(url)
 
         return products_urls
