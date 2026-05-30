@@ -371,6 +371,72 @@ git commit -m "feat(log): converge html_extractor debug log to module logger"
 
 ---
 
+## Task 4b: `crawler/shopify.py` — 模組 logger 收斂
+
+**Files:**
+- Modify: `estimator_king/crawler/shopify.py`
+- Test: `tests/test_shopify_logging.py`（Create）
+
+實作要點：`shopify.py` 已有頂層 `import logging` 但無模組 logger，且有 3 處裸 `logging.debug(...)`（第 153、156、159 行）。在頂層新增 `logger = logging.getLogger(__name__)`，將 3 處 `logging.debug` 改為 `logger.debug`，name 變為 `estimator_king.crawler.shopify`（歸 CRAWLER）。此 Task 為 spec §1.2 修正後新增（原 spec 誤列 shopify.py 為已正確）。
+
+- [ ] **Step 1: 撰寫失敗測試**
+
+建立 `tests/test_shopify_logging.py`：
+
+```python
+import logging
+
+from estimator_king.crawler import shopify
+
+
+def test_shopify_has_module_logger_with_qualified_name():
+    assert shopify.logger.name == "estimator_king.crawler.shopify"
+```
+
+- [ ] **Step 2: 執行測試確認失敗**
+
+Run: `.venv/bin/python -m pytest tests/test_shopify_logging.py -v -o addopts=""`
+Expected: FAIL（`AttributeError: module 'estimator_king.crawler.shopify' has no attribute 'logger'`）
+
+- [ ] **Step 3: 實作**
+
+在 `estimator_king/crawler/shopify.py` 既有 `import logging` 之後的模組頂層新增：
+
+```python
+logger = logging.getLogger(__name__)
+```
+
+將 3 處 `logging.debug(...)`（第 153、156、159 行）改為 `logger.debug(...)`，訊息字串原樣保留：
+
+```python
+    logger.debug(f"Extracted html_details for {canonical_url}: {html_details}")
+```
+```python
+            logger.debug(f"  {key}: {value[:50] if len(value) > 50 else value}")
+```
+```python
+    logger.debug(f"Product {snapshot.product_id} hash: {content_hash[:8]}...")
+```
+
+- [ ] **Step 4: 執行測試確認通過**
+
+Run: `.venv/bin/python -m pytest tests/test_shopify_logging.py -v -o addopts=""`
+Expected: PASS（1 passed）
+
+- [ ] **Step 5: 回歸 + 型別 + lint**
+
+Run: `.venv/bin/python -m pytest tests/test_shopify.py -v -o addopts="" && .venv/bin/basedpyright estimator_king/crawler/shopify.py tests/test_shopify_logging.py && uvx ruff check estimator_king/crawler/shopify.py tests/test_shopify_logging.py`
+Expected: 既有 shopify 測試全 PASS；型別/lint 0 errors
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add estimator_king/crawler/shopify.py tests/test_shopify_logging.py
+git commit -m "feat(log): converge shopify debug logs to module logger"
+```
+
+---
+
 ## Task 5: `crawler/async_http_client.py` — DEBUG 請求記錄
 
 **Files:**

@@ -91,10 +91,14 @@ LLM 呼叫（embedding、chat）。只記 url/status/耗時，**不記錄 header
 - `estimator_king/crawler/html_extractor.py`：第 159 行的區域 `import logging` 與
   其後的 logging 呼叫，改為使用模組頂層 `logger = logging.getLogger(__name__)`
   並移除區域 import（name 變為 `estimator_king.crawler.html_extractor`，歸 CRAWLER）。
+- `estimator_king/crawler/shopify.py`：已有頂層 `import logging` 但無模組 logger，
+  且有 3 處裸 `logging.debug(...)`（第 153、156、159 行）。新增模組頂層
+  `logger = logging.getLogger(__name__)`，將 3 處改為 `logger.debug(...)`
+  （name 變為 `estimator_king.crawler.shopify`，歸 CRAWLER）。
 
 已正確使用 `logging.getLogger(__name__)` 的模組（`crawler/cycle.py`、
-`crawler/pipeline.py`、`crawler/async_pipeline.py`、`crawler/shopify.py`、
-`bot/estimator.py`、`bot/scheduler.py`）不需改動其 logger 建立方式。
+`crawler/pipeline.py`、`crawler/async_pipeline.py`、`bot/estimator.py`、
+`bot/scheduler.py`）不需改動其 logger 建立方式。
 
 ### 2. DEBUG：所有對外請求
 
