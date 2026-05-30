@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
 from collections.abc import Iterable
 
 from bs4 import BeautifulSoup  # pyright: ignore[reportMissingImports]
 from bs4.element import NavigableString, Tag  # pyright: ignore[reportMissingImports]
+
+logger = logging.getLogger(__name__)
 
 HEADING_TAGS: tuple[str, ...] = ("h2", "h3", "h4")
 SKIP_TEXT_IN_PARENTS: tuple[str, ...] = ("script", "style", "noscript")
@@ -156,9 +159,7 @@ def extract_detail_sections(html: str) -> dict[str, str]:
                 blocks_by_key[key].append(section_text)
 
     if not blocks_by_key:
-        import logging
-
-        logging.debug(
+        logger.debug(
             f"extract_detail_sections: No blocks found in HTML (len={len(html or '')})"
         )
         return {}
