@@ -181,12 +181,12 @@ tests：
 - **scheme 限制**：只支援 `http://`（與 socks5）proxy；`https://`/`wss` proxy 被忽略並 warning（`helpers.py:285-289`）。https 目標 URL 也用 http proxy（走 CONNECT）。
 - **trust_env**：預設 `False`（`client.py`）。本專案走顯式 proxy，與 env 無關；config 載入時已自行把 `HTTP_PROXY`/`HTTPS_PROXY` 併入設定值。
 
-### 6.2 待查證（寫 plan 前完成）
+### 6.2 ElementTree 與 tenacity — 已查證（實際執行驗證）
 
-1. `xml.etree.ElementTree.fromstring` 接受 `str` 輸入的行為（特別是內容含 `<?xml ... encoding="..."?>` 宣告時，傳 `str` 是否會因 encoding 宣告報錯，或需傳 `bytes`）。
-2. tenacity 在 async 函式上的取消（`CancelledError`）傳遞行為，確認 `AsyncHTTPClient` 的重試 wrapper 不會吞掉取消。
+1. **`xml.etree.ElementTree.fromstring(str)` 含 encoding 宣告**：在本專案 Python 3.14.3 上**可行**。以含 `<?xml version="1.0" encoding="UTF-8"?>` 的 `str` 直接 `ET.fromstring(text)` 不報錯；真實 fixtures（`tests/fixtures/sitemap_index.xml`、`sitemap_products_1.xml`，皆帶 UTF-8 宣告）以 decode 後字串解析成功。→ §3.1 直接 `ET.fromstring(text)`（`text: str`）安全，無需 `.encode()` 或 strip 宣告。
+2. **tenacity 9.1.4 在 async 上對 `CancelledError`**：**不重試、正常往外傳**。`retry_if_exception_type((RateLimitError, ServerError))` 以 `isinstance` 比對（`tenacity/retry.py:87-98`），`CancelledError` 不在其中故不觸發重試；`reraise=True` 下原例外正常拋出（`tenacity/asyncio/__init__.py:119`、`tenacity/__init__.py:391-393`）。實測 cancel 後僅 1 次 attempt、`CancelledError` 正常傳播。→ §3.1 cancellation 穿透 retry wrapper 安全，無需特殊處理。
 
-研究產出（API 簽名、範例、版本、注意事項）將直接寫入實現計畫中各 Task 的具體程式碼。
+研究產出已直接反映於 §3.1、§3.2 的設計描述；實現計畫各 Task 將沿用這些確認結果。
 
 ## 7. 非目標（Out of Scope）
 
