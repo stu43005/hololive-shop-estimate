@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_PROGRESS_LOG_EVERY = 20
+
 
 @dataclass
 class PipelineResult:
@@ -50,6 +52,8 @@ async def async_process_queue(
     if not entries:
         return PipelineResult()
 
+    logger.info("store=%s queue: %d entries to process", store_id, len(entries))
+
     loop = asyncio.get_running_loop()
     result = PipelineResult()
     lock = asyncio.Lock()
@@ -73,6 +77,11 @@ async def async_process_queue(
                     result.updated += sync_result.updated
                     result.sync_skipped += sync_result.skipped
                     result.processed += 1
+                    if result.processed % _PROGRESS_LOG_EVERY == 0:
+                        logger.info(
+                            "store=%s progress: %d/%d processed",
+                            store_id, result.processed, len(entries),
+                        )
             except Exception:
                 logger.exception("Error processing %s (url=%s)", entry_id, product_url)
                 existing = state_repo.get_by_product_url(store_id, product_url)
@@ -90,4 +99,8 @@ async def async_process_queue(
 
         await asyncio.gather(*[_bounded(entry) for entry in entries])
 
+    logger.info(
+        "store=%s done: created=%d updated=%d skipped=%d failed=%d",
+        store_id, result.created, result.updated, result.sync_skipped, result.failed,
+    )
     return result
