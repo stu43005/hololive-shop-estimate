@@ -12,16 +12,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy package code
 COPY estimator_king/ estimator_king/
 
-# Stage 2: Crawler
-FROM base AS crawler
-
-RUN pip install --no-cache-dir gunicorn
-
-ENTRYPOINT ["python", "-m", "estimator_king.crawler"]
-
-# Stage 3: Bot
-FROM base AS bot
+# Stage 2: App (unified entry point for run + crawl)
+FROM base AS app
 
 RUN pip install --no-cache-dir python-dotenv
 
-ENTRYPOINT ["python", "-m", "estimator_king.bot"]
+ENTRYPOINT ["python", "-m", "estimator_king"]
+CMD ["run"]
