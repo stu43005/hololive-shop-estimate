@@ -1,277 +1,241 @@
-"""Unit tests for async pipeline integration in __main__.py."""
+"""Tests for main() wiring: EmbeddingProvider + VectorStore + run_crawl_cycle."""
 
+import json
 from unittest.mock import MagicMock, patch
+
 import pytest
 
-from estimator_king.config_schema import AppConfig, Store, CrawlerPolicy, ProxyConfig
-from estimator_king.crawler.async_pipeline import PipelineResult
-from estimator_king.sync.inactive import InactiveResult
 
 
-def test_async_process_queue_called_when_use_async_true():
-    """Test that async_process_queue is called when USE_ASYNC is True.
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    MUST: Verify that when USE_ASYNC flag is True, run_crawler uses
-    asyncio.run(async_process_queue()) instead of sync process_queue().
-    """
-    with (
-        patch("estimator_king.__main__.USE_ASYNC", True),
-        patch("estimator_king.__main__.mark_inactive_products") as mock_inactive,
-        patch("estimator_king.__main__.populate_queue_from_sitemap") as mock_populate,
-        patch("estimator_king.__main__.enqueue_stale_products") as mock_enqueue_stale,
-        patch("estimator_king.__main__.SitemapEnumerator") as mock_enum,
-        patch("estimator_king.__main__.ProductStateRepository") as mock_repo_class,
-        patch("estimator_king.__main__.asyncio.run") as mock_asyncio_run,
-        patch("estimator_king.__main__.async_process_queue") as mock_async_process,
-        patch("estimator_king.__main__.process_queue") as mock_sync_process,
-    ):
-        # Setup repository mock
-        mock_repo = MagicMock()
-        mock_repo.__enter__ = MagicMock(return_value=mock_repo)
-        mock_repo.__exit__ = MagicMock(return_value=None)
-        mock_repo_class.return_value = mock_repo
-
-        # Setup pipeline mocks
-        mock_populate.return_value = 2
-        mock_enqueue_stale.return_value = 0
-        mock_enum.return_value = MagicMock()
-
-        # Setup async_process_queue to return PipelineResult with sync counts
-        async_result = PipelineResult(processed=2, failed=0, skipped=0, created=0, updated=0, sync_skipped=0)
-        mock_asyncio_run.return_value = async_result
-
-
-        # Setup inactive
-        mock_inactive.return_value = InactiveResult(
-            marked_inactive=0, already_inactive=0
-        )
-
-        # Create config with one store
-        config = AppConfig(
-            stores=[
-                Store(
-                    id="test",
-                    base_url="https://test.com",
-                    sitemap_url="https://test.com/sitemap.xml",
-                )
-            ],
-            crawler=CrawlerPolicy(),
-            proxy=ProxyConfig(),
-        )
-        dify_client = MagicMock()
-
-        # Import and run
-        from estimator_king.__main__ import run_crawler
-
-        result = run_crawler(config, ":memory:", dify_client)
-
-        # Verify asyncio.run was called (async path taken)
-        assert mock_asyncio_run.called, (
-            "asyncio.run() should be called when USE_ASYNC is True"
-        )
-
-        # Verify sync process_queue was NOT called
-        assert not mock_sync_process.called, (
-            "sync process_queue() should NOT be called when USE_ASYNC is True"
-        )
-
-        # Verify result has expected structure from async conversion
-        assert "fetched_ok" in result, "Result should have 'fetched_ok' key"
-        assert result["fetched_ok"] == 2, "fetched_ok should equal processed count"
-
-
-def test_sync_process_queue_fallback_when_use_async_false():
-    """Test that sync process_queue is used when USE_ASYNC is False.
-
-    MUST: Verify that when USE_ASYNC flag is False, run_crawler
-    uses sync process_queue() without async/asyncio.run().
-    """
-    with (
-        patch("estimator_king.__main__.USE_ASYNC", False),
-        patch("estimator_king.__main__.mark_inactive_products") as mock_inactive,
-        patch("estimator_king.__main__.populate_queue_from_sitemap") as mock_populate,
-        patch("estimator_king.__main__.enqueue_stale_products") as mock_enqueue_stale,
-        patch("estimator_king.__main__.SitemapEnumerator") as mock_enum,
-        patch("estimator_king.__main__.ProductStateRepository") as mock_repo_class,
-        patch("estimator_king.__main__.process_queue") as mock_sync_process,
-        patch("estimator_king.__main__.asyncio.run") as mock_asyncio_run,
-    ):
-        # Setup repository mock
-        mock_repo = MagicMock()
-        mock_repo.__enter__ = MagicMock(return_value=mock_repo)
-        mock_repo.__exit__ = MagicMock(return_value=None)
-        mock_repo_class.return_value = mock_repo
-
-        # Setup pipeline mocks
-        mock_populate.return_value = 0
-        mock_enqueue_stale.return_value = 0
-        mock_enum.return_value = MagicMock()
-
-        # Setup sync process_queue to return dict
-        sync_result = {
-            "fetched_ok": 2,
-            "created": 1,
-            "updated": 0,
-            "skipped": 0,
-            "errors": 0,
-        }
-        mock_sync_process.return_value = sync_result
-
-        # Setup inactive
-        mock_inactive.return_value = InactiveResult(
-            marked_inactive=0, already_inactive=0
-        )
-
-        # Create config with one store
-        config = AppConfig(
-            stores=[
-                Store(
-                    id="test",
-                    base_url="https://test.com",
-                    sitemap_url="https://test.com/sitemap.xml",
-                )
-            ],
-            crawler=CrawlerPolicy(),
-            proxy=ProxyConfig(),
-        )
-        dify_client = MagicMock()
-
-        # Import and run
-        from estimator_king.__main__ import run_crawler
-
-        result = run_crawler(config, ":memory:", dify_client)
-
-        # Verify sync process_queue was called (sync path taken)
-        assert mock_sync_process.called, (
-            "sync process_queue() should be called when USE_ASYNC is False"
-        )
-
-        # Verify asyncio.run was NOT called
-        assert not mock_asyncio_run.called, (
-            "asyncio.run() should NOT be called when USE_ASYNC is False"
-        )
-
-        # Verify result matches sync return value
-        assert result["fetched_ok"] == 2, "Result should match sync return"
-
-
-def test_async_result_conversion():
-    """Test that async PipelineResult is correctly converted to result dict.
-
-    MUST: Verify that when async_process_queue returns PipelineResult,
-    it is converted to the expected dict format with proper key mapping.
-    """
-    with (
-        patch("estimator_king.__main__.USE_ASYNC", True),
-        patch("estimator_king.__main__.mark_inactive_products") as mock_inactive,
-        patch("estimator_king.__main__.populate_queue_from_sitemap") as mock_populate,
-        patch("estimator_king.__main__.enqueue_stale_products") as mock_enqueue_stale,
-        patch("estimator_king.__main__.SitemapEnumerator") as mock_enum,
-        patch("estimator_king.__main__.ProductStateRepository") as mock_repo_class,
-        patch("estimator_king.__main__.asyncio.run") as mock_asyncio_run,
-    ):
-        # Setup repository mock
-        mock_repo = MagicMock()
-        mock_repo.__enter__ = MagicMock(return_value=mock_repo)
-        mock_repo.__exit__ = MagicMock(return_value=None)
-        mock_repo_class.return_value = mock_repo
-
-        # Setup pipeline mocks
-        mock_populate.return_value = 1
-        mock_enqueue_stale.return_value = 0
-        mock_enum.return_value = MagicMock()
-
-        # Return PipelineResult with specific values including sync counts
-        async_result = PipelineResult(processed=5, failed=2, skipped=1, created=3, updated=1, sync_skipped=1)
-        mock_asyncio_run.return_value = async_result
-
-
-        # Setup inactive
-        mock_inactive.return_value = InactiveResult(
-            marked_inactive=0, already_inactive=0
-        )
-
-        # Create config with one store
-        config = AppConfig(
-            stores=[
-                Store(
-                    id="test",
-                    base_url="https://test.com",
-                    sitemap_url="https://test.com/sitemap.xml",
-                )
-            ],
-            crawler=CrawlerPolicy(),
-            proxy=ProxyConfig(),
-        )
-        dify_client = MagicMock()
-
-        # Import and run
-        from estimator_king.__main__ import run_crawler
-
-        result = run_crawler(config, ":memory:", dify_client)
-
-        # Verify conversion: processed→fetched_ok, failed→errors, skipped→skipped
-        assert result["fetched_ok"] == 5, "processed should map to fetched_ok"
-        assert result["errors"] == 2, "failed should map to errors"
-        assert result["skipped"] == 2, "skipped should include both fetch skips and sync skips"
-        assert result["created"] == 3, "created should come from sync_products result"
-        assert result["updated"] == 1, "updated should come from sync_products result"
-
-
-def test_use_async_flag_reflects_aiohttp_availability():
-    """Test that USE_ASYNC flag correctly reflects aiohttp availability.
-
-    MUST: Verify that USE_ASYNC is True when aiohttp can be imported,
-    False otherwise. This test verifies the module-level flag state.
-    """
-    from estimator_king import __main__
-
-    # Check that USE_ASYNC is a boolean
-    assert isinstance(__main__.USE_ASYNC, bool), "USE_ASYNC should be a boolean flag"
-
-    # If USE_ASYNC is True, async_process_queue should be available
-    if __main__.USE_ASYNC:
-        assert __main__.async_process_queue is not None, (
-            "async_process_queue should be imported when USE_ASYNC is True"
-        )
-    else:
-        assert __main__.async_process_queue is None, (
-            "async_process_queue should be None when USE_ASYNC is False"
-        )
-
-
-def test_normalizer_function_converts_snapshot_to_state():
-    """Test that _product_state_normalizer converts ProductSnapshot to ProductState.
-    
-    MUST: Verify that the normalizer function properly creates ProductState
-    objects from ProductSnapshot data for async pipeline use.
-    """
-    from estimator_king.__main__ import _product_state_normalizer
-    from estimator_king.database.repository import ProductState
-    
-    # Mock snapshot with required attributes for compute_content_hash
-    mock_snapshot = MagicMock()
-    mock_snapshot.product_id = "test-product-id"
-    mock_snapshot.title = "Test Product"
-    mock_snapshot.description = "Test Description"
-    mock_snapshot.variants = []
-    mock_snapshot.html_details = {}
-    
-    # Call normalizer
-    result = _product_state_normalizer(
-        mock_snapshot,
-        store_id="store123",
-        product_url="https://test.com/products/test",
-        existing_state=None,
+def _make_args(**kwargs):
+    defaults = dict(
+        config="stores.yaml",
+        db=None,
+        log_level="INFO",
+        force_refetch=False,
     )
-    
-    # Verify result is a ProductState
-    assert isinstance(result, ProductState), (
-        "Normalizer should return a ProductState instance"
-    )
-    
-    # Verify key fields are set correctly
-    assert result.external_key == "store123:test-product-id", "external_key should be store_id:product_id"
-    assert result.product_url == "https://test.com/products/test", "product_url should be set"
-    assert result.content_hash is not None, "content_hash should be computed"
-    assert result.normalizer_version > 0, "normalizer_version should be set"
+    defaults.update(kwargs)
+    return MagicMock(**defaults)
+
+
+def _make_cfg(*, embedding_api_key: str = "sk-test", db: str = "./estimator_king.db"):
+    mock_cfg = MagicMock()
+    mock_cfg.database_path = db
+    mock_cfg.chroma_path = "./chroma"
+    provider_cfg = MagicMock()
+    provider_cfg.embedding_api_key = embedding_api_key
+    mock_cfg.build_provider_config.return_value = provider_cfg
+    return mock_cfg
+
+
+# ---------------------------------------------------------------------------
+# main() builds EmbeddingProvider and VectorStore, then calls run_crawl_cycle
+# ---------------------------------------------------------------------------
+
+def test_main_builds_embedding_provider_and_vector_store():
+    """main() constructs EmbeddingProvider(provider_config) and VectorStore(chroma_path)."""
+    from estimator_king.__main__ import main
+
+    mock_cfg = _make_cfg()
+    counters = {"discovered": 0, "fetched_ok": 0, "created": 0,
+                "updated": 0, "skipped": 0, "inactive": 0, "errors": 0}
+
+    with patch("estimator_king.__main__.parse_args", return_value=_make_args()), \
+         patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.EmbeddingProvider") as mock_ep, \
+         patch("estimator_king.__main__.VectorStore") as mock_vs, \
+         patch("estimator_king.__main__.asyncio.run", return_value=counters):
+        with pytest.raises(SystemExit) as exc:
+            main()
+
+    assert exc.value.code == 0
+    # EmbeddingProvider must be constructed with the provider_config
+    mock_ep.assert_called_once_with(mock_cfg.build_provider_config.return_value)
+    # VectorStore must be constructed with chroma_path
+    mock_vs.assert_called_once_with(mock_cfg.chroma_path)
+
+
+def test_main_passes_embedder_and_vector_store_to_cycle():
+    """main() passes EmbeddingProvider and VectorStore instances to asyncio.run(run_crawl_cycle(...))."""
+    from estimator_king.__main__ import main
+
+    mock_cfg = _make_cfg()
+    counters = {"discovered": 1, "fetched_ok": 1, "created": 0,
+                "updated": 0, "skipped": 1, "inactive": 0, "errors": 0}
+
+    captured_coro = []
+
+    def fake_asyncio_run(coro):
+        captured_coro.append(coro)
+        return counters
+
+    with patch("estimator_king.__main__.parse_args", return_value=_make_args()), \
+         patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.EmbeddingProvider") as mock_ep, \
+         patch("estimator_king.__main__.VectorStore") as mock_vs, \
+         patch("estimator_king.__main__.run_crawl_cycle") as mock_cycle, \
+         patch("estimator_king.__main__.asyncio.run", side_effect=fake_asyncio_run):
+        with pytest.raises(SystemExit):
+            main()
+
+    # run_crawl_cycle must have been called with (config, db_path, embedder, vector_store, force_refetch=...)
+    assert mock_cycle.called
+    call_args = mock_cycle.call_args
+    # positional: config, db_path, embedder, vector_store
+    assert call_args.args[0] is mock_cfg  # config
+    assert call_args.args[2] is mock_ep.return_value  # embedder
+    assert call_args.args[3] is mock_vs.return_value  # vector_store
+
+
+def test_main_passes_force_refetch_to_cycle():
+    """main() passes force_refetch=True to run_crawl_cycle when --force-refetch given."""
+    from estimator_king.__main__ import main
+
+    mock_cfg = _make_cfg()
+    counters = {"discovered": 0, "fetched_ok": 0, "created": 0,
+                "updated": 0, "skipped": 0, "inactive": 0, "errors": 0}
+
+    with patch("estimator_king.__main__.parse_args", return_value=_make_args(force_refetch=True)), \
+         patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.EmbeddingProvider"), \
+         patch("estimator_king.__main__.VectorStore"), \
+         patch("estimator_king.__main__.run_crawl_cycle") as mock_cycle, \
+         patch("estimator_king.__main__.asyncio.run", return_value=counters):
+        with pytest.raises(SystemExit):
+            main()
+
+    call_kwargs = mock_cycle.call_args.kwargs
+    assert call_kwargs.get("force_refetch") is True
+
+
+def test_main_uses_db_path_from_config():
+    """main() passes config.database_path to run_crawl_cycle."""
+    from estimator_king.__main__ import main
+
+    mock_cfg = _make_cfg(db="/configured/path.db")
+    counters = {"discovered": 0, "fetched_ok": 0, "created": 0,
+                "updated": 0, "skipped": 0, "inactive": 0, "errors": 0}
+
+    with patch("estimator_king.__main__.parse_args", return_value=_make_args()), \
+         patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.EmbeddingProvider"), \
+         patch("estimator_king.__main__.VectorStore"), \
+         patch("estimator_king.__main__.run_crawl_cycle") as mock_cycle, \
+         patch("estimator_king.__main__.asyncio.run", return_value=counters):
+        with pytest.raises(SystemExit):
+            main()
+
+    call_args = mock_cycle.call_args
+    assert call_args.args[1] == "/configured/path.db"
+
+
+def test_main_applies_db_override_before_cycle():
+    """main() overrides config.database_path with --db value before calling cycle."""
+    from estimator_king.__main__ import main
+
+    mock_cfg = _make_cfg(db="./original.db")
+    counters = {"discovered": 0, "fetched_ok": 0, "created": 0,
+                "updated": 0, "skipped": 0, "inactive": 0, "errors": 0}
+
+    with patch("estimator_king.__main__.parse_args", return_value=_make_args(db="/override.db")), \
+         patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.EmbeddingProvider"), \
+         patch("estimator_king.__main__.VectorStore"), \
+         patch("estimator_king.__main__.run_crawl_cycle") as mock_cycle, \
+         patch("estimator_king.__main__.asyncio.run", return_value=counters):
+        with pytest.raises(SystemExit):
+            main()
+
+    # The override should be reflected in the db_path positional arg
+    call_args = mock_cycle.call_args
+    assert call_args.args[1] == "/override.db"
+
+
+def test_main_prints_json_counters(capsys):
+    """main() prints JSON counters from run_crawl_cycle to stdout."""
+    from estimator_king.__main__ import main
+
+    mock_cfg = _make_cfg()
+    counters = {
+        "discovered": 10,
+        "fetched_ok": 9,
+        "created": 3,
+        "updated": 2,
+        "skipped": 4,
+        "inactive": 1,
+        "errors": 1,
+    }
+
+    with patch("estimator_king.__main__.parse_args", return_value=_make_args()), \
+         patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.EmbeddingProvider"), \
+         patch("estimator_king.__main__.VectorStore"), \
+         patch("estimator_king.__main__.asyncio.run", return_value=counters):
+        with pytest.raises(SystemExit) as exc:
+            main()
+
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert output == counters
+
+
+def test_main_exits_2_when_embedding_key_missing():
+    """main() exits 2 when embedding_api_key is falsy (None or empty string)."""
+    from estimator_king.__main__ import main
+
+    for empty_key in (None, ""):
+        mock_cfg = _make_cfg(embedding_api_key=empty_key)
+
+        with patch("estimator_king.__main__.parse_args", return_value=_make_args()), \
+             patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg):
+            with pytest.raises(SystemExit) as exc:
+                main()
+
+        assert exc.value.code == 2, f"Expected exit 2 for embedding_api_key={empty_key!r}"
+
+
+def test_main_exits_1_on_cycle_exception():
+    """main() exits 1 when asyncio.run(run_crawl_cycle(...)) raises."""
+    from estimator_king.__main__ import main
+
+    mock_cfg = _make_cfg()
+
+    with patch("estimator_king.__main__.parse_args", return_value=_make_args()), \
+         patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.EmbeddingProvider"), \
+         patch("estimator_king.__main__.VectorStore"), \
+         patch("estimator_king.__main__.asyncio.run",
+               side_effect=RuntimeError("network error")):
+        with pytest.raises(SystemExit) as exc:
+            main()
+
+    assert exc.value.code == 1
+
+
+def test_main_no_dify_client_constructed():
+    """main() must NOT construct a DifyKBClient — only EmbeddingProvider + VectorStore."""
+    from estimator_king.__main__ import main
+
+    mock_cfg = _make_cfg()
+    counters = {"discovered": 0, "fetched_ok": 0, "created": 0,
+                "updated": 0, "skipped": 0, "inactive": 0, "errors": 0}
+
+    with patch("estimator_king.__main__.parse_args", return_value=_make_args()), \
+         patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.EmbeddingProvider"), \
+         patch("estimator_king.__main__.VectorStore"), \
+         patch("estimator_king.__main__.asyncio.run", return_value=counters):
+        # If DifyKBClient were still imported and instantiated, the import would
+        # fail on the refactored module (the symbol no longer exists). We assert
+        # the module attribute is absent.
+        import estimator_king.__main__ as m
+        assert not hasattr(m, "DifyKBClient"), (
+            "DifyKBClient should not be present in the refactored __main__"
+        )
+        with pytest.raises(SystemExit):
+            main()

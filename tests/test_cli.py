@@ -1,18 +1,70 @@
 """Unit tests for CLI argument parser and orchestration."""
 
-import os
 import subprocess
 import sys
 import pytest
 from unittest.mock import MagicMock, patch
 
-from estimator_king.__main__ import run_crawler
-from estimator_king.config_schema import AppConfig, Store, CrawlerPolicy, ProxyConfig
-from estimator_king.sync.inactive import InactiveResult
+from estimator_king.__main__ import parse_args
 
+
+# ---------------------------------------------------------------------------
+# parse_args
+# ---------------------------------------------------------------------------
+
+def test_parse_args_has_no_dify_flags():
+    """parse_args() must not expose any --dify-* flag."""
+    args = parse_args(["--config", "c.yaml", "--force-refetch"])
+    assert args.config == "c.yaml"
+    assert args.force_refetch is True
+    assert not hasattr(args, "dify_api_key")
+
+
+def test_parse_args_defaults():
+    """parse_args() with no arguments uses expected defaults."""
+    args = parse_args([])
+    assert args.config == "stores_config.yaml"
+    assert args.db is None
+    assert args.log_level == "INFO"
+    assert args.force_refetch is False
+
+
+def test_parse_args_config_flag():
+    """parse_args() accepts --config."""
+    args = parse_args(["--config", "custom.yaml"])
+    assert args.config == "custom.yaml"
+
+
+def test_parse_args_db_flag():
+    """parse_args() accepts --db."""
+    args = parse_args(["--db", "/tmp/test.db"])
+    assert args.db == "/tmp/test.db"
+
+
+def test_parse_args_log_level():
+    """parse_args() accepts --log-level."""
+    args = parse_args(["--log-level", "DEBUG"])
+    assert args.log_level == "DEBUG"
+
+
+def test_parse_args_force_refetch_default():
+    """parse_args() --force-refetch defaults to False."""
+    args = parse_args([])
+    assert args.force_refetch is False
+
+
+def test_parse_args_force_refetch_set():
+    """parse_args() --force-refetch sets flag to True."""
+    args = parse_args(["--force-refetch"])
+    assert args.force_refetch is True
+
+
+# ---------------------------------------------------------------------------
+# --help
+# ---------------------------------------------------------------------------
 
 def test_help_flag():
-    """Test --help flag produces help text."""
+    """--help flag produces help text that mentions the four expected flags."""
     result = subprocess.run(
         [sys.executable, "-m", "estimator_king", "--help"],
         capture_output=True,
@@ -22,381 +74,49 @@ def test_help_flag():
     assert "Estimator King" in result.stdout
     assert "--config" in result.stdout
     assert "--db" in result.stdout
-    assert "--dify-base-url" in result.stdout
+    assert "--force-refetch" in result.stdout
+    # Dify flags must NOT appear
+    assert "--dify" not in result.stdout
 
 
-def test_missing_dify_api_key(monkeypatch):
-    """Test missing DIFY_API_KEY raises error."""
-    monkeypatch.delenv("DIFY_API_KEY", raising=False)
-    monkeypatch.delenv("DIFY_BASE_URL", raising=False)
-    monkeypatch.delenv("DIFY_DATASET_ID", raising=False)
-
-    result = subprocess.run(
-        [sys.executable, "-m", "estimator_king"], capture_output=True, text=True
-    )
-    assert result.returncode == 2
-    assert "required" in result.stderr.lower()
-
-
-def test_missing_dify_base_url(monkeypatch):
-    """Test missing DIFY_BASE_URL raises error."""
-    monkeypatch.delenv("DIFY_BASE_URL", raising=False)
-    monkeypatch.setenv("DIFY_API_KEY", "dataset-test123")
-    monkeypatch.setenv("DIFY_DATASET_ID", "uuid-test456")
-
-    result = subprocess.run(
-        [sys.executable, "-m", "estimator_king"],
-        capture_output=True,
-        text=True,
-        env=os.environ,
-    )
-    assert result.returncode == 2
-    assert "required" in result.stderr.lower()
-
-
-def test_config_argument():
-    """Test --config argument works."""
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "estimator_king",
-            "--config",
-            "/custom/stores.yaml",
-            "--dify-api-key",
-            "dataset-test",
-            "--dify-base-url",
-            "https://test.com",
-            "--dify-dataset-id",
-            "test-uuid",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0
-
-
-def test_db_argument():
-    """Test --db argument works."""
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "estimator_king",
-            "--db",
-            "/custom/db.sqlite",
-            "--dify-api-key",
-            "dataset-test",
-            "--dify-base-url",
-            "https://test.com",
-            "--dify-dataset-id",
-            "test-uuid",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0
-
-
-def test_all_arguments():
-    """Test all arguments provided via CLI."""
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "estimator_king",
-            "--config",
-            "/stores.yaml",
-            "--db",
-            "/data/db.sqlite",
-            "--dify-api-key",
-            "dataset-abc123",
-            "--dify-base-url",
-            "https://dify.example.com",
-            "--dify-dataset-id",
-            "uuid-xyz789",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0
-
-
-def test_env_vars_dify_credentials(monkeypatch):
-    """Test Dify credentials via environment variables."""
-    monkeypatch.setenv("DIFY_API_KEY", "dataset-env123")
-    monkeypatch.setenv("DIFY_BASE_URL", "https://env.example.com")
-    monkeypatch.setenv("DIFY_DATASET_ID", "env-uuid-456")
-
-    result = subprocess.run(
-        [sys.executable, "-m", "estimator_king"],
-        capture_output=True,
-        text=True,
-        env=os.environ,
-    )
-    assert result.returncode == 0
-
-
-def test_database_path_env_var(monkeypatch):
-    """Test DATABASE_PATH environment variable works."""
-    monkeypatch.setenv("DATABASE_PATH", "/env/path/db.sqlite")
-    monkeypatch.setenv("DIFY_API_KEY", "dataset-test")
-    monkeypatch.setenv("DIFY_BASE_URL", "https://test.com")
-    monkeypatch.setenv("DIFY_DATASET_ID", "test-uuid")
-
-    result = subprocess.run(
-        [sys.executable, "-m", "estimator_king"],
-        capture_output=True,
-        text=True,
-        env=os.environ,
-    )
-    assert result.returncode == 0
-
-
-@patch("estimator_king.__main__.mark_inactive_products")
-@patch("estimator_king.__main__.process_queue")
-@patch("estimator_king.__main__.enqueue_stale_products")
-@patch("estimator_king.__main__.populate_queue_from_sitemap")
-@patch("estimator_king.__main__.SitemapEnumerator")
-@patch("estimator_king.__main__.ProductStateRepository")
-def test_run_crawler_success(
-    mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
-):
-    """Test run_crawler with successful operations across all stores."""
-    mock_repo = MagicMock()
-    mock_repo.__enter__ = MagicMock(return_value=mock_repo)
-    mock_repo.__exit__ = MagicMock(return_value=None)
-    mock_repo_class.return_value = mock_repo
-
-    mock_enumerate_class.return_value = MagicMock()
-
-    mock_populate.return_value = 2
-    mock_enqueue_stale.return_value = 0
-    mock_process.return_value = {"fetched_ok": 2, "errors": 0}
-    mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
-
-    config = AppConfig(
-        stores=[
-            Store(
-                id="test",
-                base_url="https://test.com",
-                sitemap_url="https://test.com/sitemap.xml",
-            )
-        ],
-        crawler=CrawlerPolicy(),
-        proxy=ProxyConfig(),
-    )
-    dify_client = MagicMock()
-
-    result = run_crawler(config, ":memory:", dify_client)
-
-    assert result["discovered"] == 2
-    assert result["fetched_ok"] == 2
-    assert result["created"] == 0
-    assert result["updated"] == 0
-    assert result["skipped"] == 0
-    assert result["errors"] == 0
-    assert result["inactive"] == 0
-
-@patch("estimator_king.__main__.mark_inactive_products")
-@patch("estimator_king.__main__.process_queue")
-@patch("estimator_king.__main__.enqueue_stale_products")
-@patch("estimator_king.__main__.populate_queue_from_sitemap")
-@patch("estimator_king.__main__.SitemapEnumerator")
-@patch("estimator_king.__main__.ProductStateRepository")
-def test_run_crawler_empty_sitemap(
-    mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
-):
-    """Test run_crawler with empty sitemap yields zero errors."""
-    mock_repo = MagicMock()
-    mock_repo.__enter__ = MagicMock(return_value=mock_repo)
-    mock_repo.__exit__ = MagicMock(return_value=None)
-    mock_repo_class.return_value = mock_repo
-
-    mock_enumerate_class.return_value = MagicMock()
-
-    mock_populate.return_value = 0
-    mock_enqueue_stale.return_value = 0
-    mock_process.return_value = {"fetched_ok": 0, "errors": 0}
-    mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
-
-    config = AppConfig(
-        stores=[
-            Store(
-                id="test",
-                base_url="https://test.com",
-                sitemap_url="https://test.com/sitemap.xml",
-            )
-        ],
-        crawler=CrawlerPolicy(),
-        proxy=ProxyConfig(),
-    )
-    dify_client = MagicMock()
-
-    result = run_crawler(config, ":memory:", dify_client)
-
-    assert result["discovered"] == 0
-    assert result["fetched_ok"] == 0
-    assert result["errors"] == 0
-
-@patch("estimator_king.__main__.mark_inactive_products")
-@patch("estimator_king.__main__.process_queue")
-@patch("estimator_king.__main__.enqueue_stale_products")
-@patch("estimator_king.__main__.populate_queue_from_sitemap")
-@patch("estimator_king.__main__.SitemapEnumerator")
-@patch("estimator_king.__main__.ProductStateRepository")
-def test_run_crawler_fetch_failure(
-    mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
-):
-    """Test run_crawler continues after fetch failure."""
-    mock_repo = MagicMock()
-    mock_repo.__enter__ = MagicMock(return_value=mock_repo)
-    mock_repo.__exit__ = MagicMock(return_value=None)
-    mock_repo_class.return_value = mock_repo
-
-    mock_enumerate_class.return_value = MagicMock()
-
-    mock_populate.return_value = 2
-    mock_enqueue_stale.return_value = 0
-    mock_process.return_value = {"fetched_ok": 1, "errors": 1}
-    mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
-
-    config = AppConfig(
-        stores=[
-            Store(
-                id="test",
-                base_url="https://test.com",
-                sitemap_url="https://test.com/sitemap.xml",
-            )
-        ],
-        crawler=CrawlerPolicy(),
-        proxy=ProxyConfig(),
-    )
-    dify_client = MagicMock()
-
-    result = run_crawler(config, ":memory:", dify_client)
-
-    assert result["discovered"] == 2
-    assert result["fetched_ok"] == 1
-    assert result["errors"] == 1
-
-@patch("estimator_king.__main__.mark_inactive_products")
-@patch("estimator_king.__main__.process_queue")
-@patch("estimator_king.__main__.enqueue_stale_products")
-@patch("estimator_king.__main__.populate_queue_from_sitemap")
-@patch("estimator_king.__main__.SitemapEnumerator")
-@patch("estimator_king.__main__.ProductStateRepository")
-def test_run_crawler_multiple_stores(
-    mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
-):
-    """Test run_crawler aggregates counters across multiple stores."""
-    mock_repo = MagicMock()
-    mock_repo.__enter__ = MagicMock(return_value=mock_repo)
-    mock_repo.__exit__ = MagicMock(return_value=None)
-    mock_repo_class.return_value = mock_repo
-
-    mock_enumerate_class.return_value = MagicMock()
-
-    mock_populate.side_effect = [1, 2]
-    mock_enqueue_stale.return_value = 0
-    mock_process.side_effect = [
-        {"fetched_ok": 1, "errors": 0},
-        {"fetched_ok": 2, "errors": 0},
-    ]
-    mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
-
-    config = AppConfig(
-        stores=[
-            Store(
-                id="store1",
-                base_url="https://store1.com",
-                sitemap_url="https://store1.com/sitemap.xml",
-            ),
-            Store(
-                id="store2",
-                base_url="https://store2.com",
-                sitemap_url="https://store2.com/sitemap.xml",
-            ),
-        ],
-        crawler=CrawlerPolicy(),
-        proxy=ProxyConfig(),
-    )
-    dify_client = MagicMock()
-
-    result = run_crawler(config, ":memory:", dify_client)
-
-    assert result["discovered"] == 3
-    assert result["fetched_ok"] == 3
-    assert result["created"] == 0
-
-@patch("estimator_king.__main__.mark_inactive_products")
-@patch("estimator_king.__main__.process_queue")
-@patch("estimator_king.__main__.enqueue_stale_products")
-@patch("estimator_king.__main__.populate_queue_from_sitemap")
-@patch("estimator_king.__main__.SitemapEnumerator")
-@patch("estimator_king.__main__.ProductStateRepository")
-def test_run_crawler_sync_failure(
-    mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
-):
-    """Test run_crawler handles process_queue errors gracefully."""
-    mock_repo = MagicMock()
-    mock_repo.__enter__ = MagicMock(return_value=mock_repo)
-    mock_repo.__exit__ = MagicMock(return_value=None)
-    mock_repo_class.return_value = mock_repo
-
-    mock_enumerate_class.return_value = MagicMock()
-
-    mock_populate.return_value = 1
-    mock_enqueue_stale.return_value = 0
-    mock_process.return_value = {"fetched_ok": 0, "errors": 1}
-    mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
-
-    config = AppConfig(
-        stores=[
-            Store(
-                id="test",
-                base_url="https://test.com",
-                sitemap_url="https://test.com/sitemap.xml",
-            )
-        ],
-        crawler=CrawlerPolicy(),
-        proxy=ProxyConfig(),
-    )
-    dify_client = MagicMock()
-
-    result = run_crawler(config, ":memory:", dify_client)
-
-    assert result["discovered"] == 1
-    assert result["fetched_ok"] == 0
-    assert result["errors"] == 1
+# ---------------------------------------------------------------------------
+# main() unit tests (mocked)
+# ---------------------------------------------------------------------------
 
 class TestMainSuccess:
     """Test successful main() execution."""
 
-    @patch("estimator_king.__main__.run_crawler")
-    @patch("estimator_king.__main__.DifyKBClient")
+    @patch("estimator_king.__main__.run_crawl_cycle")
+    @patch("estimator_king.__main__.VectorStore")
+    @patch("estimator_king.__main__.EmbeddingProvider")
     @patch("estimator_king.__main__.AppConfig.from_yaml")
     @patch("estimator_king.__main__.parse_args")
-    def test_main_success(self, mock_parse, mock_config, mock_dify, mock_run, capsys):
-        """Test main() with successful execution outputs JSON."""
+    def test_main_success(
+        self, mock_parse, mock_from_yaml, mock_embedder_cls, mock_vs_cls,
+        mock_cycle, capsys
+    ):
+        """main() prints JSON counters and exits 0 on success."""
+        import json
         from estimator_king.__main__ import main
 
-        # Setup mocks
         mock_parse.return_value = MagicMock(
             config="stores.yaml",
-            db="/tmp/db.sqlite",
-            dify_api_key="dataset-test",
-            dify_base_url="https://test.com",
-            dify_dataset_id="uuid-test",
+            db=None,
+            log_level="INFO",
+            force_refetch=False,
         )
         mock_cfg = MagicMock()
-        mock_cfg.dify_api_key = None
-        mock_cfg.dify_base_url = None
-        mock_cfg.dify_dataset_id = None
         mock_cfg.database_path = "./estimator_king.db"
-        mock_config.return_value = mock_cfg
-        mock_dify.return_value = MagicMock()
-        mock_run.return_value = {
+        mock_cfg.chroma_path = "./chroma"
+        provider_cfg = MagicMock()
+        provider_cfg.embedding_api_key = "sk-test"
+        mock_cfg.build_provider_config.return_value = provider_cfg
+        mock_from_yaml.return_value = mock_cfg
+
+        mock_embedder_cls.return_value = MagicMock()
+        mock_vs_cls.return_value = MagicMock()
+
+        counters = {
             "discovered": 5,
             "fetched_ok": 5,
             "created": 2,
@@ -405,147 +125,118 @@ class TestMainSuccess:
             "inactive": 0,
             "errors": 0,
         }
+        mock_cycle.return_value = counters
+        # asyncio.run will call the coroutine — we stub the whole thing
+        with patch("estimator_king.__main__.asyncio.run", return_value=counters):
+            with pytest.raises(SystemExit) as exc:
+                main()
 
-        # Execute (should exit 0)
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-
-        assert exc_info.value.code == 0
-
-        # Verify JSON output
+        assert exc.value.code == 0
         captured = capsys.readouterr()
-        import json
-
         output = json.loads(captured.out)
         assert output["discovered"] == 5
         assert output["created"] == 2
         assert output["fetched_ok"] == 5
 
-class TestMainConfigLoadFailure:
-    """Test main() with config loading failure."""
+
+class TestMainMissingEmbeddingKey:
+    """main() exits 2 when embedding_api_key is falsy."""
 
     @patch("estimator_king.__main__.AppConfig.from_yaml")
     @patch("estimator_king.__main__.parse_args")
-    def test_main_config_load_failure(self, mock_parse, mock_config):
-        """Test main() exits 1 when config loading fails."""
+    def test_missing_embedding_key(self, mock_parse, mock_from_yaml):
         from estimator_king.__main__ import main
 
-        mock_parse.return_value = MagicMock(config="missing.yaml")
-        mock_config.side_effect = FileNotFoundError("Config not found")
+        mock_parse.return_value = MagicMock(
+            config="stores.yaml",
+            db=None,
+            log_level="INFO",
+            force_refetch=False,
+        )
+        mock_cfg = MagicMock()
+        mock_cfg.database_path = "./estimator_king.db"
+        mock_cfg.chroma_path = "./chroma"
+        provider_cfg = MagicMock()
+        provider_cfg.embedding_api_key = ""  # missing
+        mock_cfg.build_provider_config.return_value = provider_cfg
+        mock_from_yaml.return_value = mock_cfg
 
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(SystemExit) as exc:
             main()
+        assert exc.value.code == 2
 
-        assert exc_info.value.code == 1
+
+class TestMainConfigLoadFailure:
+    """main() exits 1 when config loading fails."""
+
+    @patch("estimator_king.__main__.AppConfig.from_yaml")
+    @patch("estimator_king.__main__.parse_args")
+    def test_main_config_load_failure(self, mock_parse, mock_from_yaml):
+        from estimator_king.__main__ import main
+
+        mock_parse.return_value = MagicMock(config="missing.yaml", log_level="INFO")
+        mock_from_yaml.side_effect = FileNotFoundError("Config not found")
+
+        with pytest.raises(SystemExit) as exc:
+            main()
+        assert exc.value.code == 1
 
 
 class TestMainCrawlerFailure:
-    """Test main() with crawler execution failure."""
+    """main() exits 1 when run_crawl_cycle raises."""
 
-    @patch("estimator_king.__main__.run_crawler")
-    @patch("estimator_king.__main__.DifyKBClient")
     @patch("estimator_king.__main__.AppConfig.from_yaml")
     @patch("estimator_king.__main__.parse_args")
-    def test_main_crawler_failure(self, mock_parse, mock_config, mock_dify, mock_run):
-        """Test main() exits 1 when crawler fails."""
+    def test_main_crawler_failure(self, mock_parse, mock_from_yaml):
         from estimator_king.__main__ import main
 
         mock_parse.return_value = MagicMock(
             config="stores.yaml",
-            db="/tmp/db.sqlite",
-            dify_api_key="dataset-test",
-            dify_base_url="https://test.com",
-            dify_dataset_id="uuid-test",
+            db=None,
+            log_level="INFO",
+            force_refetch=False,
         )
         mock_cfg = MagicMock()
-        mock_cfg.dify_api_key = None
-        mock_cfg.dify_base_url = None
-        mock_cfg.dify_dataset_id = None
         mock_cfg.database_path = "./estimator_king.db"
-        mock_config.return_value = mock_cfg
-        mock_dify.return_value = MagicMock()
-        mock_run.side_effect = Exception("Crawler error")
+        mock_cfg.chroma_path = "./chroma"
+        provider_cfg = MagicMock()
+        provider_cfg.embedding_api_key = "sk-test"
+        mock_cfg.build_provider_config.return_value = provider_cfg
+        mock_from_yaml.return_value = mock_cfg
 
-        with pytest.raises(SystemExit) as exc_info:
-            main()
+        with patch("estimator_king.__main__.EmbeddingProvider"), \
+             patch("estimator_king.__main__.VectorStore"), \
+             patch("estimator_king.__main__.asyncio.run",
+                   side_effect=RuntimeError("Crawler exploded")):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 1
 
-        assert exc_info.value.code == 1
 
+class TestMainJsonOutput:
+    """main() writes valid JSON with all counter keys to stdout."""
 
-class TestMainLoggingToStderr:
-    """Test main() logging configuration."""
-
-    @patch("estimator_king.__main__.run_crawler")
-    @patch("estimator_king.__main__.DifyKBClient")
     @patch("estimator_king.__main__.AppConfig.from_yaml")
     @patch("estimator_king.__main__.parse_args")
-    def test_main_logging_to_stderr(
-        self, mock_parse, mock_config, mock_dify, mock_run, capsys
-    ):
-        """Test main() outputs JSON to stdout (not stderr)."""
-        from estimator_king.__main__ import main
-
-        mock_parse.return_value = MagicMock(
-            config="stores.yaml",
-            db="/tmp/db.sqlite",
-            dify_api_key="dataset-test",
-            dify_base_url="https://test.com",
-            dify_dataset_id="uuid-test",
-        )
-        mock_cfg = MagicMock()
-        mock_cfg.dify_api_key = None
-        mock_cfg.dify_base_url = None
-        mock_cfg.dify_dataset_id = None
-        mock_cfg.database_path = "./estimator_king.db"
-        mock_config.return_value = mock_cfg
-        mock_dify.return_value = MagicMock()
-        mock_run.return_value = {
-            "discovered": 1,
-            "fetched_ok": 1,
-            "created": 0,
-            "updated": 0,
-            "skipped": 1,
-            "inactive": 0,
-            "errors": 0,
-        }
-
-        with pytest.raises(SystemExit):
-            main()
-
-        captured = capsys.readouterr()
-        # JSON should be on stdout (verified separately)
-        assert "discovered" in captured.out
-        assert "{" in captured.out
-
-class TestMainJsonFormat:
-    """Test main() JSON output format."""
-
-    @patch("estimator_king.__main__.run_crawler")
-    @patch("estimator_king.__main__.DifyKBClient")
-    @patch("estimator_king.__main__.AppConfig.from_yaml")
-    @patch("estimator_king.__main__.parse_args")
-    def test_main_json_format(
-        self, mock_parse, mock_config, mock_dify, mock_run, capsys
-    ):
-        """Test main() outputs valid JSON with all counter keys."""
-        from estimator_king.__main__ import main
+    def test_main_json_format(self, mock_parse, mock_from_yaml, capsys):
         import json
+        from estimator_king.__main__ import main
 
         mock_parse.return_value = MagicMock(
             config="stores.yaml",
-            db="/tmp/db.sqlite",
-            dify_api_key="dataset-test",
-            dify_base_url="https://test.com",
-            dify_dataset_id="uuid-test",
+            db=None,
+            log_level="INFO",
+            force_refetch=False,
         )
         mock_cfg = MagicMock()
-        mock_cfg.dify_api_key = None
-        mock_cfg.dify_base_url = None
-        mock_cfg.dify_dataset_id = None
         mock_cfg.database_path = "./estimator_king.db"
-        mock_config.return_value = mock_cfg
-        mock_dify.return_value = MagicMock()
-        mock_run.return_value = {
+        mock_cfg.chroma_path = "./chroma"
+        provider_cfg = MagicMock()
+        provider_cfg.embedding_api_key = "sk-test"
+        mock_cfg.build_provider_config.return_value = provider_cfg
+        mock_from_yaml.return_value = mock_cfg
+
+        counters = {
             "discovered": 150,
             "fetched_ok": 148,
             "created": 5,
@@ -554,28 +245,15 @@ class TestMainJsonFormat:
             "inactive": 2,
             "errors": 2,
         }
+        with patch("estimator_king.__main__.EmbeddingProvider"), \
+             patch("estimator_king.__main__.VectorStore"), \
+             patch("estimator_king.__main__.asyncio.run", return_value=counters):
+            with pytest.raises(SystemExit) as exc:
+                main()
 
-        with pytest.raises(SystemExit) as exc_info:
-            main()
-
-        assert exc_info.value.code == 0
-
+        assert exc.value.code == 0
         captured = capsys.readouterr()
         output = json.loads(captured.out)
-
-        # Verify all expected keys present
-        expected_keys = {
-            "discovered",
-            "fetched_ok",
-            "created",
-            "updated",
-            "skipped",
-            "inactive",
-            "errors",
-        }
-        assert set(output.keys()) == expected_keys
-
-        # Verify values
         assert output["discovered"] == 150
         assert output["fetched_ok"] == 148
         assert output["created"] == 5
@@ -585,182 +263,69 @@ class TestMainJsonFormat:
         assert output["errors"] == 2
 
 
-class TestCLIIntegration:
-    """Integration tests for full CLI execution via subprocess."""
+class TestMainDbOverride:
+    """main() applies --db override to config.database_path."""
 
-    def test_cli_help_flag_integration(self):
-        """Test --help flag via subprocess produces complete help text."""
+    @patch("estimator_king.__main__.AppConfig.from_yaml")
+    @patch("estimator_king.__main__.parse_args")
+    def test_db_override_applied(self, mock_parse, mock_from_yaml, capsys):
+        from estimator_king.__main__ import main
+
+        mock_parse.return_value = MagicMock(
+            config="stores.yaml",
+            db="/custom/override.db",
+            log_level="INFO",
+            force_refetch=False,
+        )
+        mock_cfg = MagicMock()
+        mock_cfg.database_path = "./estimator_king.db"
+        mock_cfg.chroma_path = "./chroma"
+        provider_cfg = MagicMock()
+        provider_cfg.embedding_api_key = "sk-test"
+        mock_cfg.build_provider_config.return_value = provider_cfg
+        mock_from_yaml.return_value = mock_cfg
+
+        counters = {"discovered": 0, "fetched_ok": 0, "created": 0,
+                    "updated": 0, "skipped": 0, "inactive": 0, "errors": 0}
+        with patch("estimator_king.__main__.EmbeddingProvider"), \
+             patch("estimator_king.__main__.VectorStore"), \
+             patch("estimator_king.__main__.asyncio.run", return_value=counters):
+            with pytest.raises(SystemExit):
+                main()
+
+        # database_path should have been overridden
+        assert mock_cfg.database_path == "/custom/override.db"
+
+
+# ---------------------------------------------------------------------------
+# CLI integration (subprocess)
+# ---------------------------------------------------------------------------
+
+class TestCLIIntegration:
+    """Integration tests via subprocess."""
+
+    def test_cli_help_flag(self):
+        """--help lists --config, --db, --force-refetch; no --dify- flags."""
         result = subprocess.run(
             [sys.executable, "-m", "estimator_king", "--help"],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0
-        assert "Estimator King" in result.stdout
         assert "--config" in result.stdout
         assert "--db" in result.stdout
-        assert "dify" in result.stdout.lower()
+        assert "--force-refetch" in result.stdout
+        assert "--dify" not in result.stdout
 
-    def test_cli_missing_config_file(self, monkeypatch, tmp_path):
-        """Test CLI exits with error when config file doesn't exist."""
-        monkeypatch.setenv("DIFY_API_KEY", "test-key-12345")
-        monkeypatch.setenv("DIFY_BASE_URL", "https://test.example.com")
-        monkeypatch.setenv("DIFY_DATASET_ID", "test-uuid-12345")
-
+    def test_cli_missing_config_file(self, tmp_path):
+        """CLI exits 1 when config file doesn't exist (no env key needed now)."""
         result = subprocess.run(
             [
-                sys.executable,
-                "-m",
-                "estimator_king",
-                "--config",
-                "/nonexistent/path/missing.yaml",
+                sys.executable, "-m", "estimator_king",
+                "--config", "/nonexistent/path/missing.yaml",
             ],
             capture_output=True,
             text=True,
-            env=os.environ,
         )
         assert result.returncode == 1
-        assert (
-            "Failed to load config" in result.stderr or "No such file" in result.stderr
-        )
-
-    def test_cli_all_env_vars_success(self, monkeypatch):
-        """Test CLI validates env vars and starts successfully.
-
-        With valid credentials, the crawler will try to make HTTP requests.
-        We use a short timeout and accept TimeoutExpired as 'started ok'.
-        """
-        monkeypatch.setenv("DIFY_API_KEY", "dataset-integration-test")
-        monkeypatch.setenv("DIFY_BASE_URL", "https://api.example.com")
-        monkeypatch.setenv("DIFY_DATASET_ID", "uuid-integration-test")
-
-        try:
-            result = subprocess.run(
-                [sys.executable, "-m", "estimator_king"],
-                capture_output=True,
-                text=True,
-                env=os.environ,
-                timeout=5,
-            )
-            # If it returns quickly, accept 0 or 1
-            assert result.returncode in [0, 1]
-        except subprocess.TimeoutExpired:
-            # Timeout means the process started successfully (didn't crash on args)
-            pass
-
-    def test_cli_custom_db_path(self, monkeypatch, tmp_path):
-        """Test CLI accepts custom database path argument.
-
-        With valid credentials, the crawler will try to make HTTP requests.
-        We use a short timeout and accept TimeoutExpired as 'started ok'.
-        """
-        db_path = str(tmp_path / "custom.db")
-        monkeypatch.setenv("DIFY_API_KEY", "test-key")
-        monkeypatch.setenv("DIFY_BASE_URL", "https://test.com")
-        monkeypatch.setenv("DIFY_DATASET_ID", "test-uuid")
-
-        try:
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "estimator_king",
-                    "--db",
-                    db_path,
-                ],
-                capture_output=True,
-                text=True,
-                env=os.environ,
-                timeout=5,
-            )
-            # CLI should accept the argument without error
-            assert result.returncode in [0, 1]
-        except subprocess.TimeoutExpired:
-            # Timeout means the process started successfully (didn't crash on args)
-            pass
-
-    def test_cli_combined_cli_and_env_args(self, monkeypatch, tmp_path):
-        """Test CLI with combination of CLI args and env vars."""
-        config_path = str(tmp_path / "test_config.yaml")
-        monkeypatch.setenv("DIFY_API_KEY", "env-key")
-        monkeypatch.setenv("DIFY_BASE_URL", "https://env.example.com")
-        monkeypatch.setenv("DIFY_DATASET_ID", "env-uuid")
-
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "estimator_king",
-                "--config",
-                config_path,
-                "--db",
-                str(tmp_path / "test.db"),
-            ],
-            capture_output=True,
-            text=True,
-            env=os.environ,
-            timeout=10,
-        )
-        # CLI args should override env + be accepted
-        assert result.returncode in [0, 1]
-
-
-class TestForceRefetchFlag:
-    """Tests for the --force-refetch CLI flag."""
-
-    def test_parse_args_no_force_refetch(self):
-        """parse_args() with no --force-refetch defaults to False."""
-        from estimator_king.__main__ import parse_args
-
-        args = parse_args([])
-        assert args.force_refetch is False
-
-    def test_parse_args_with_force_refetch(self):
-        """parse_args() with --force-refetch sets flag to True."""
-        from estimator_king.__main__ import parse_args
-
-        args = parse_args(["--force-refetch"])
-        assert args.force_refetch is True
-
-    @patch("estimator_king.__main__.mark_inactive_products")
-    @patch("estimator_king.__main__.process_queue")
-    @patch("estimator_king.__main__.enqueue_stale_products")
-    @patch("estimator_king.__main__.populate_queue_from_sitemap")
-    @patch("estimator_king.__main__.SitemapEnumerator")
-    @patch("estimator_king.__main__.ProductStateRepository")
-    def test_run_crawler_accepts_force_refetch(
-        self, mock_repo_class, mock_enumerate_class, mock_populate, mock_enqueue_stale, mock_process, mock_inactive
-    ):
-        """run_crawler() accepts force_refetch=True without error."""
-        mock_repo = MagicMock()
-        mock_repo.__enter__ = MagicMock(return_value=mock_repo)
-        mock_repo.__exit__ = MagicMock(return_value=None)
-        mock_repo_class.return_value = mock_repo
-
-        mock_enumerate_class.return_value = MagicMock()
-
-        mock_populate.return_value = 0
-        mock_enqueue_stale.return_value = 0
-        mock_process.return_value = {"fetched_ok": 0, "errors": 0}
-        mock_inactive.return_value = InactiveResult(marked_inactive=0, already_inactive=0)
-
-        config = AppConfig(
-            stores=[
-                Store(
-                    id="test",
-                    base_url="https://test.com",
-                    sitemap_url="https://test.com/sitemap.xml",
-                )
-            ],
-            crawler=CrawlerPolicy(),
-            proxy=ProxyConfig(),
-        )
-        dify_client = MagicMock()
-
-        result = run_crawler(config, ":memory:", dify_client, force_refetch=True)
-
-        assert result["errors"] == 0
-        # Verify force_refetch was passed through to enqueue_stale_products
-        call_kwargs = mock_enqueue_stale.call_args
-        assert call_kwargs is not None
-        assert call_kwargs.kwargs.get("force_refetch") is True
+        assert "Failed to load config" in result.stderr or "No such file" in result.stderr
