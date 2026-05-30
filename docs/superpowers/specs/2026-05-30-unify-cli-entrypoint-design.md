@@ -102,16 +102,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 ### 5.1 [estimator_king/__main__.py](../../../estimator_king/__main__.py)：統一 dispatcher
 
 頂層維持匯入 `AppConfig`、`run_crawl_cycle`、`EmbeddingProvider`、`VectorStore`、
-`asyncio`、`json`（讓測試以 patch `estimator_king.__main__.X` 攔截）。
+`asyncio`、`json`，並新增 `from estimator_king.bot import runner as bot_runner`
+（讓測試以 patch `estimator_king.__main__.X` / `estimator_king.__main__.bot_runner.run_bot`
+攔截各分派路徑）。
 
 - `parse_args(argv=None)`：如 §4。
-- `run_crawl(args) -> None`：等同現有 `main()` body —— 載入 config、套用 `--db`
-  覆寫、驗證 embedding key（缺則 `sys.exit(2)`）、建 embedder + vector_store、
+- `run_crawl(args) -> None`：等同現有 `main()` body —— 以 `AppConfig.from_yaml(args.config)`
+  載入 config、套用 `--db` 覆寫、驗證 embedding key（缺則 `sys.exit(2)`）、建
+  embedder + vector_store、
   `asyncio.run(run_crawl_cycle(..., force_refetch=args.force_refetch))`、把
   counters 以 `json.dumps(..., indent=2)` `print` 到 stdout、`sys.exit(0)`；
   config 載入失敗或循環例外 → `sys.exit(1)`。
-- `run_bot(args) -> None`：載入 config、套用 `--token` 覆寫、驗證 discord token
-  （缺則 `sys.exit(1)`），再 `asyncio.run(bot_runner.run_bot(config, guild_id=args.guild_id))`，
+- `run_bot(args) -> None`：以 `AppConfig.from_yaml(args.config)` 載入 config
+  （與 `run_crawl` 共用同一頂層匯入符號，使兩條分派路徑共享單一 patch 點）、
+  套用 `--token` 覆寫、驗證 discord token（缺則 `sys.exit(1)`），再
+  `asyncio.run(bot_runner.run_bot(config, guild_id=args.guild_id))`，
   並以 `try/except KeyboardInterrupt` 安靜結束。
 - `_main() -> None`：`args = parse_args()`；設定
   `logging.basicConfig(level=getattr(logging, args.log_level),
@@ -153,7 +158,8 @@ bot bootstrap 邏輯搬來：
 - **移除整個 `crawler` 階段**（現 16–20 行，含 `pip install gunicorn` 與指向不存在
   module 的 `ENTRYPOINT ["python","-m","estimator_king.crawler"]`）——死階段。
 - 把原 `bot` 階段改為單一最終階段（命名為 `app`），保留
-  `pip install --no-cache-dir python-dotenv`（不在本任務動它，避免行為變動）。
+  `pip install --no-cache-dir python-dotenv`（疑似未使用，但屬獨立清理，本任務
+  保留不動；見 §8.2）。
 - ENTRYPOINT 固定為 module、子命令交給 CMD：
 
 ```dockerfile
@@ -220,6 +226,9 @@ deployment / PVC label 維持不動（屬既有命名，與本任務無關）。
 - `docs/superpowers/` 下的歷史 spec / plan：是當時時間點的記錄，維持原樣不追改。
 - Dockerfile 的 `python-dotenv` 安裝：原始碼未 import，疑似可移除，但屬獨立清理，
   本任務保留不動。
+- [README.md:94-95](../../../README.md) 的 `docker run ... estimator-king`
+  （無子命令）片段：因新 image 以 `CMD ["run"]` 為預設，bare `docker run` 仍會啟動
+  `run`，語意維持正確，**無需編輯**（列此僅為完成入口點引用稽核）。
 
 ## 9. 測試
 
@@ -242,6 +251,10 @@ deployment / PVC label 維持不動（屬既有命名，與本任務無關）。
 - [tests/test_bot_commands.py](../../../tests/test_bot_commands.py) 等其餘測試
   匯入自 `estimator_king.bot.commands` / `.estimator` / `.scheduler`，不受入口點
   重構影響，不需改動。
+- [tests/test_smoke.py](../../../tests/test_smoke.py)：`import estimator_king.bot`
+  匯入的是 package（`bot/__init__.py`），刪除 `bot/__main__.py` 後 package 仍存在；
+  其對 `estimator_king.crawler` 的匯入同理（匯入的是 package，本就無 `__main__`），
+  皆不受影響，不需改動。
 
 ## 10. 驗收條件
 
