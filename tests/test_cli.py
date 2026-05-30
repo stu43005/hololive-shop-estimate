@@ -1,331 +1,226 @@
-"""Unit tests for CLI argument parser and orchestration."""
+"""Unit tests for CLI argument parser and orchestration (run/crawl subcommands)."""
 
 import subprocess
 import sys
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from estimator_king.__main__ import parse_args
 
 
 # ---------------------------------------------------------------------------
-# parse_args
+# parse_args — crawl subcommand
 # ---------------------------------------------------------------------------
 
-def test_parse_args_has_no_dify_flags():
-    """parse_args() must not expose any --dify-* flag."""
-    args = parse_args(["--config", "c.yaml", "--force-refetch"])
+def test_parse_args_crawl_flags():
+    """crawl subcommand exposes --config / --force-refetch; no --dify-* flag."""
+    args = parse_args(["crawl", "--config", "c.yaml", "--force-refetch"])
+    assert args.command == "crawl"
     assert args.config == "c.yaml"
     assert args.force_refetch is True
     assert not hasattr(args, "dify_api_key")
 
 
-def test_parse_args_defaults():
-    """parse_args() with no arguments uses expected defaults."""
-    args = parse_args([])
+def test_parse_args_crawl_defaults():
+    """crawl with no extra args uses expected defaults."""
+    args = parse_args(["crawl"])
+    assert args.command == "crawl"
     assert args.config == "stores_config.yaml"
     assert args.db is None
     assert args.log_level == "INFO"
     assert args.force_refetch is False
 
 
-def test_parse_args_config_flag():
-    """parse_args() accepts --config."""
-    args = parse_args(["--config", "custom.yaml"])
-    assert args.config == "custom.yaml"
-
-
-def test_parse_args_db_flag():
-    """parse_args() accepts --db."""
-    args = parse_args(["--db", "/tmp/test.db"])
+def test_parse_args_crawl_db_flag():
+    """crawl accepts --db."""
+    args = parse_args(["crawl", "--db", "/tmp/test.db"])
     assert args.db == "/tmp/test.db"
 
 
-def test_parse_args_log_level():
-    """parse_args() accepts --log-level."""
-    args = parse_args(["--log-level", "DEBUG"])
+def test_parse_args_crawl_log_level():
+    """crawl accepts the shared --log-level."""
+    args = parse_args(["crawl", "--log-level", "DEBUG"])
     assert args.log_level == "DEBUG"
 
 
-def test_parse_args_force_refetch_default():
-    """parse_args() --force-refetch defaults to False."""
-    args = parse_args([])
-    assert args.force_refetch is False
+# ---------------------------------------------------------------------------
+# parse_args — run subcommand
+# ---------------------------------------------------------------------------
+
+def test_parse_args_run_defaults():
+    """run with no extra args uses expected defaults."""
+    args = parse_args(["run"])
+    assert args.command == "run"
+    assert args.config == "stores_config.yaml"
+    assert args.token is None
+    assert args.guild_id is None
+    assert args.log_level == "INFO"
 
 
-def test_parse_args_force_refetch_set():
-    """parse_args() --force-refetch sets flag to True."""
-    args = parse_args(["--force-refetch"])
-    assert args.force_refetch is True
+def test_parse_args_run_token_and_guild():
+    """run accepts --token and --guild-id."""
+    args = parse_args(["run", "--token", "abc", "--guild-id", "123"])
+    assert args.command == "run"
+    assert args.token == "abc"
+    assert args.guild_id == 123
 
 
 # ---------------------------------------------------------------------------
-# --help
+# parse_args — subcommand required
 # ---------------------------------------------------------------------------
 
-def test_help_flag():
-    """--help flag produces help text that mentions the four expected flags."""
+def test_parse_args_requires_subcommand():
+    """No subcommand is a SystemExit (hard cutover: subcommand required)."""
+    with pytest.raises(SystemExit):
+        parse_args([])
+
+
+# ---------------------------------------------------------------------------
+# --help (subprocess)
+# ---------------------------------------------------------------------------
+
+def test_top_level_help_lists_subcommands():
+    """Top-level --help lists the run and crawl subcommands, no --dify-* flag."""
     result = subprocess.run(
         [sys.executable, "-m", "estimator_king", "--help"],
-        capture_output=True,
-        text=True,
+        capture_output=True, text=True,
     )
     assert result.returncode == 0
     assert "Estimator King" in result.stdout
+    assert "run" in result.stdout
+    assert "crawl" in result.stdout
+    assert "--dify" not in result.stdout
+
+
+def test_crawl_help_lists_crawl_flags():
+    """`crawl --help` lists --config / --db / --force-refetch; no --dify-* flag."""
+    result = subprocess.run(
+        [sys.executable, "-m", "estimator_king", "crawl", "--help"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
     assert "--config" in result.stdout
     assert "--db" in result.stdout
     assert "--force-refetch" in result.stdout
-    # Dify flags must NOT appear
     assert "--dify" not in result.stdout
 
 
 # ---------------------------------------------------------------------------
-# main() unit tests (mocked)
+# run_crawl() — exit codes (mocked)
 # ---------------------------------------------------------------------------
 
-class TestMainSuccess:
-    """Test successful main() execution."""
-
-    @patch("estimator_king.__main__.run_crawl_cycle")
-    @patch("estimator_king.__main__.VectorStore")
-    @patch("estimator_king.__main__.EmbeddingProvider")
-    @patch("estimator_king.__main__.AppConfig.from_yaml")
-    @patch("estimator_king.__main__.parse_args")
-    def test_main_success(
-        self, mock_parse, mock_from_yaml, mock_embedder_cls, mock_vs_cls,
-        mock_cycle, capsys
-    ):
-        """main() prints JSON counters and exits 0 on success."""
-        import json
-        from estimator_king.__main__ import main
-
-        mock_parse.return_value = MagicMock(
-            config="stores.yaml",
-            db=None,
-            log_level="INFO",
-            force_refetch=False,
-        )
-        mock_cfg = MagicMock()
-        mock_cfg.database_path = "./estimator_king.db"
-        mock_cfg.chroma_path = "./chroma"
-        provider_cfg = MagicMock()
-        provider_cfg.embedding_api_key = "sk-test"
-        mock_cfg.build_provider_config.return_value = provider_cfg
-        mock_from_yaml.return_value = mock_cfg
-
-        mock_embedder_cls.return_value = MagicMock()
-        mock_vs_cls.return_value = MagicMock()
-
-        counters = {
-            "discovered": 5,
-            "fetched_ok": 5,
-            "created": 2,
-            "updated": 1,
-            "skipped": 2,
-            "inactive": 0,
-            "errors": 0,
-        }
-        mock_cycle.return_value = counters
-        # asyncio.run will call the coroutine — we stub the whole thing
-        with patch("estimator_king.__main__.asyncio.run", return_value=counters):
-            with pytest.raises(SystemExit) as exc:
-                main()
-
-        assert exc.value.code == 0
-        captured = capsys.readouterr()
-        output = json.loads(captured.out)
-        assert output["discovered"] == 5
-        assert output["created"] == 2
-        assert output["fetched_ok"] == 5
+def _make_crawl_args(**kwargs):
+    defaults = dict(config="stores.yaml", db=None, force_refetch=False)
+    defaults.update(kwargs)
+    return MagicMock(**defaults)
 
 
-class TestMainMissingEmbeddingKey:
-    """main() exits 2 when embedding_api_key is falsy."""
+def _make_cfg(*, embedding_api_key="sk-test"):
+    mock_cfg = MagicMock()
+    mock_cfg.database_path = "./estimator_king.db"
+    mock_cfg.chroma_path = "./chroma"
+    provider_cfg = MagicMock()
+    provider_cfg.embedding_api_key = embedding_api_key
+    mock_cfg.build_provider_config.return_value = provider_cfg
+    return mock_cfg
 
-    @patch("estimator_king.__main__.AppConfig.from_yaml")
-    @patch("estimator_king.__main__.parse_args")
-    def test_missing_embedding_key(self, mock_parse, mock_from_yaml):
-        from estimator_king.__main__ import main
 
-        mock_parse.return_value = MagicMock(
-            config="stores.yaml",
-            db=None,
-            log_level="INFO",
-            force_refetch=False,
-        )
-        mock_cfg = MagicMock()
-        mock_cfg.database_path = "./estimator_king.db"
-        mock_cfg.chroma_path = "./chroma"
-        provider_cfg = MagicMock()
-        provider_cfg.embedding_api_key = ""  # missing
-        mock_cfg.build_provider_config.return_value = provider_cfg
-        mock_from_yaml.return_value = mock_cfg
+def test_run_crawl_success_prints_json_and_exits_0(capsys):
+    import json
+    from estimator_king.__main__ import run_crawl
 
+    mock_cfg = _make_cfg()
+    counters = {"discovered": 5, "fetched_ok": 5, "created": 2,
+                "updated": 1, "skipped": 2, "inactive": 0, "errors": 0}
+    with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.EmbeddingProvider"), \
+         patch("estimator_king.__main__.VectorStore"), \
+         patch("estimator_king.__main__.asyncio.run", return_value=counters):
         with pytest.raises(SystemExit) as exc:
-            main()
-        assert exc.value.code == 2
+            run_crawl(_make_crawl_args())
+
+    assert exc.value.code == 0
+    assert json.loads(capsys.readouterr().out)["discovered"] == 5
 
 
-class TestMainConfigLoadFailure:
-    """main() exits 1 when config loading fails."""
+def test_run_crawl_missing_embedding_key_exits_2():
+    from estimator_king.__main__ import run_crawl
 
-    @patch("estimator_king.__main__.AppConfig.from_yaml")
-    @patch("estimator_king.__main__.parse_args")
-    def test_main_config_load_failure(self, mock_parse, mock_from_yaml):
-        from estimator_king.__main__ import main
-
-        mock_parse.return_value = MagicMock(config="missing.yaml", log_level="INFO")
-        mock_from_yaml.side_effect = FileNotFoundError("Config not found")
-
+    mock_cfg = _make_cfg(embedding_api_key="")
+    with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg):
         with pytest.raises(SystemExit) as exc:
-            main()
-        assert exc.value.code == 1
+            run_crawl(_make_crawl_args())
+    assert exc.value.code == 2
 
 
-class TestMainCrawlerFailure:
-    """main() exits 1 when run_crawl_cycle raises."""
+def test_run_crawl_config_load_failure_exits_1():
+    from estimator_king.__main__ import run_crawl
 
-    @patch("estimator_king.__main__.AppConfig.from_yaml")
-    @patch("estimator_king.__main__.parse_args")
-    def test_main_crawler_failure(self, mock_parse, mock_from_yaml):
-        from estimator_king.__main__ import main
-
-        mock_parse.return_value = MagicMock(
-            config="stores.yaml",
-            db=None,
-            log_level="INFO",
-            force_refetch=False,
-        )
-        mock_cfg = MagicMock()
-        mock_cfg.database_path = "./estimator_king.db"
-        mock_cfg.chroma_path = "./chroma"
-        provider_cfg = MagicMock()
-        provider_cfg.embedding_api_key = "sk-test"
-        mock_cfg.build_provider_config.return_value = provider_cfg
-        mock_from_yaml.return_value = mock_cfg
-
-        with patch("estimator_king.__main__.EmbeddingProvider"), \
-             patch("estimator_king.__main__.VectorStore"), \
-             patch("estimator_king.__main__.asyncio.run",
-                   side_effect=RuntimeError("Crawler exploded")):
-            with pytest.raises(SystemExit) as exc:
-                main()
-        assert exc.value.code == 1
+    with patch("estimator_king.__main__.AppConfig.from_yaml",
+               side_effect=FileNotFoundError("Config not found")):
+        with pytest.raises(SystemExit) as exc:
+            run_crawl(_make_crawl_args(config="missing.yaml"))
+    assert exc.value.code == 1
 
 
-class TestMainJsonOutput:
-    """main() writes valid JSON with all counter keys to stdout."""
+# ---------------------------------------------------------------------------
+# run_bot() — routing + token handling (mocked)
+# ---------------------------------------------------------------------------
 
-    @patch("estimator_king.__main__.AppConfig.from_yaml")
-    @patch("estimator_king.__main__.parse_args")
-    def test_main_json_format(self, mock_parse, mock_from_yaml, capsys):
-        import json
-        from estimator_king.__main__ import main
+def test_run_bot_routes_to_bot_runner_with_token_override():
+    """run_bot() applies --token override and dispatches to bot_runner.run_bot."""
+    import inspect
+    from estimator_king.__main__ import run_bot
 
-        mock_parse.return_value = MagicMock(
-            config="stores.yaml",
-            db=None,
-            log_level="INFO",
-            force_refetch=False,
-        )
-        mock_cfg = MagicMock()
-        mock_cfg.database_path = "./estimator_king.db"
-        mock_cfg.chroma_path = "./chroma"
-        provider_cfg = MagicMock()
-        provider_cfg.embedding_api_key = "sk-test"
-        mock_cfg.build_provider_config.return_value = provider_cfg
-        mock_from_yaml.return_value = mock_cfg
+    mock_cfg = MagicMock()
+    mock_cfg.discord_token = "cfg-token"
+    with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.bot_runner.run_bot") as mock_run_bot, \
+         patch("estimator_king.__main__.asyncio.run") as mock_asyncio_run:
+        run_bot(MagicMock(config="stores.yaml", token="cli-token", guild_id=123))
 
-        counters = {
-            "discovered": 150,
-            "fetched_ok": 148,
-            "created": 5,
-            "updated": 12,
-            "skipped": 131,
-            "inactive": 2,
-            "errors": 2,
-        }
-        with patch("estimator_king.__main__.EmbeddingProvider"), \
-             patch("estimator_king.__main__.VectorStore"), \
-             patch("estimator_king.__main__.asyncio.run", return_value=counters):
-            with pytest.raises(SystemExit) as exc:
-                main()
-
-        assert exc.value.code == 0
-        captured = capsys.readouterr()
-        output = json.loads(captured.out)
-        assert output["discovered"] == 150
-        assert output["fetched_ok"] == 148
-        assert output["created"] == 5
-        assert output["updated"] == 12
-        assert output["skipped"] == 131
-        assert output["inactive"] == 2
-        assert output["errors"] == 2
+    assert mock_cfg.discord_token == "cli-token"
+    mock_run_bot.assert_called_once_with(mock_cfg, guild_id=123)
+    # bot_runner.run_bot is async, so calling it returns a coroutine (not .return_value).
+    # Verify asyncio.run was called once with a coroutine produced by bot_runner.run_bot.
+    mock_asyncio_run.assert_called_once()
+    actual_arg = mock_asyncio_run.call_args.args[0]
+    assert inspect.iscoroutine(actual_arg), f"Expected a coroutine, got {type(actual_arg)}"
 
 
-class TestMainDbOverride:
-    """main() applies --db override to config.database_path."""
+def test_run_bot_exits_1_when_token_missing():
+    """run_bot() exits 1 when no token is provided and config has none."""
+    from estimator_king.__main__ import run_bot
 
-    @patch("estimator_king.__main__.AppConfig.from_yaml")
-    @patch("estimator_king.__main__.parse_args")
-    def test_db_override_applied(self, mock_parse, mock_from_yaml, capsys):
-        from estimator_king.__main__ import main
-
-        mock_parse.return_value = MagicMock(
-            config="stores.yaml",
-            db="/custom/override.db",
-            log_level="INFO",
-            force_refetch=False,
-        )
-        mock_cfg = MagicMock()
-        mock_cfg.database_path = "./estimator_king.db"
-        mock_cfg.chroma_path = "./chroma"
-        provider_cfg = MagicMock()
-        provider_cfg.embedding_api_key = "sk-test"
-        mock_cfg.build_provider_config.return_value = provider_cfg
-        mock_from_yaml.return_value = mock_cfg
-
-        counters = {"discovered": 0, "fetched_ok": 0, "created": 0,
-                    "updated": 0, "skipped": 0, "inactive": 0, "errors": 0}
-        with patch("estimator_king.__main__.EmbeddingProvider"), \
-             patch("estimator_king.__main__.VectorStore"), \
-             patch("estimator_king.__main__.asyncio.run", return_value=counters):
-            with pytest.raises(SystemExit):
-                main()
-
-        # database_path should have been overridden
-        assert mock_cfg.database_path == "/custom/override.db"
+    mock_cfg = MagicMock()
+    mock_cfg.discord_token = None
+    with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg):
+        with pytest.raises(SystemExit) as exc:
+            run_bot(MagicMock(config="stores.yaml", token=None, guild_id=None))
+    assert exc.value.code == 1
 
 
 # ---------------------------------------------------------------------------
 # CLI integration (subprocess)
 # ---------------------------------------------------------------------------
 
-class TestCLIIntegration:
-    """Integration tests via subprocess."""
+def test_cli_no_subcommand_exits_nonzero():
+    """`python -m estimator_king` with no subcommand prints usage and exits nonzero."""
+    result = subprocess.run(
+        [sys.executable, "-m", "estimator_king"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "usage" in result.stderr.lower()
 
-    def test_cli_help_flag(self):
-        """--help lists --config, --db, --force-refetch; no --dify- flags."""
-        result = subprocess.run(
-            [sys.executable, "-m", "estimator_king", "--help"],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0
-        assert "--config" in result.stdout
-        assert "--db" in result.stdout
-        assert "--force-refetch" in result.stdout
-        assert "--dify" not in result.stdout
 
-    def test_cli_missing_config_file(self, tmp_path):
-        """CLI exits 1 when config file doesn't exist (no env key needed now)."""
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "estimator_king",
-                "--config", "/nonexistent/path/missing.yaml",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 1
-        assert "Failed to load config" in result.stderr or "No such file" in result.stderr
+def test_cli_crawl_missing_config_file_exits_1():
+    """`crawl --config <missing>` exits 1 with a config-load error."""
+    result = subprocess.run(
+        [sys.executable, "-m", "estimator_king", "crawl",
+         "--config", "/nonexistent/path/missing.yaml"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 1
+    assert "Failed to load config" in result.stderr or "No such file" in result.stderr
