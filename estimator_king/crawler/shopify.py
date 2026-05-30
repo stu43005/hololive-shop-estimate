@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -11,13 +12,8 @@ from .snapshot import ProductSnapshot, ProductVariant, compute_content_hash
 logger = logging.getLogger(__name__)
 
 
-class _HTTPResponse(Protocol):
-    status_code: int
-    text: str
-
-
-class _HTTPGetter(Protocol):
-    def get(self, url: str) -> _HTTPResponse: ...
+class _AsyncGetter(Protocol):
+    async def get(self, url: str) -> str: ...
 
 
 def _clean_body_html(html: str) -> str:
@@ -37,24 +33,8 @@ class ShopifyProductError(Exception):
     pass
 
 
-class ShopifyHTTPError(ShopifyProductError):
-    url: str
-    status_code: int
-
-    def __init__(self, url: str, status_code: int):
-        super().__init__(f"shopify http error: {status_code} {url}")
-        self.url = url
-        self.status_code = status_code
-
-
 class ShopifyJSONError(ShopifyProductError):
     pass
-
-
-def _raise_for_status(url: str, resp: _HTTPResponse) -> None:
-    status = int(getattr(resp, "status_code", 0) or 0)
-    if status < 200 or status >= 300:
-        raise ShopifyHTTPError(url, status_code=status)
 
 
 def _parse_product_json(payload: object) -> dict[str, object]:
@@ -134,7 +114,7 @@ def _build_snapshot_from_product_json(
     )
 
 
-def fetch_product(url: str, http_client: _HTTPGetter) -> ProductSnapshot:
+async def fetch_product(url: str, client: _AsyncGetter) -> ProductSnapshot:
     canonical_url = url.strip()
     if not canonical_url:
         raise ValueError("url must be a non-empty string")
@@ -143,20 +123,18 @@ def fetch_product(url: str, http_client: _HTTPGetter) -> ProductSnapshot:
     canonical_url = canonical_url.rstrip("/")
     json_url = canonical_url + ".json"
 
-    json_resp = http_client.get(json_url)
-    _raise_for_status(json_url, json_resp)
+    json_text = await client.get(json_url)
+    html_text = await client.get(canonical_url)
+    return await asyncio.to_thread(_build_snapshot, json_text, html_text, canonical_url)
 
+
+def _build_snapshot(json_text: str, html_text: str, canonical_url: str) -> ProductSnapshot:
     try:
-        json_text = cast(str, getattr(json_resp, "text", ""))
         payload = cast(object, json.loads(json_text))
     except Exception as e:  # noqa: BLE001
         raise ShopifyJSONError(f"invalid shopify json: {e}") from e
 
     product = _parse_product_json(payload)
-
-    html_resp = http_client.get(canonical_url)
-    _raise_for_status(canonical_url, html_resp)
-    html_text = cast(str, getattr(html_resp, "text", ""))
 
     html_details = extract_html_details(html_text)
     logger.debug(f"Extracted html_details for {canonical_url}: {html_details}")

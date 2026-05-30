@@ -5,8 +5,7 @@ import pytest
 
 from estimator_king.config_schema import CrawlerPolicy, ProxyConfig
 from estimator_king.crawler.async_pipeline import async_process_queue
-from estimator_king.crawler.async_http_client import ClientError
-from estimator_king.crawler.shopify import ShopifyHTTPError
+from estimator_king.crawler.async_http_client import ClientError, ServerError
 from estimator_king.crawler.snapshot import ProductSnapshot, ProductVariant
 from estimator_king.database.repository import ProductStateRepository
 
@@ -63,7 +62,7 @@ def test_fetch_failure_increments_failures_and_keeps_queue(repo):
     repo.enqueue_url("hololive", "https://x/products/1")  # re-queue for the failing run
 
     def boom(url, client):
-        raise ShopifyHTTPError(url, status_code=500)
+        raise ServerError(url, status_code=500)
 
     with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=boom):
         result = asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
@@ -162,3 +161,26 @@ def test_worker_pool_processes_all_entries(repo):
 
     assert result.processed == 5
     assert repo.peek_all("hololive") == []  # queue fully drained by the worker pool
+
+
+def test_worker_pool_caps_concurrency_at_worker_count(repo):
+    for i in range(1, 7):
+        repo.enqueue_url("hololive", f"https://x/products/{i}")
+    policy = CrawlerPolicy(concurrency_per_domain=2)
+
+    active = 0
+    max_active = 0
+
+    async def fake_fetch(url, client):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return _snap(int(url.rsplit("/", 1)[-1]))
+
+    with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=fake_fetch):
+        asyncio.run(async_process_queue(
+            "hololive", policy, repo, FakeEmbedder(), FakeVectorStore()))
+
+    assert max_active == 2  # worker pool caps concurrent fetches at concurrency_per_domain

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING
 
 from estimator_king.crawler.async_http_client import AsyncHTTPClient, ClientError
 from estimator_king.crawler.shopify import fetch_product
@@ -30,16 +30,6 @@ class PipelineResult:
     sync_skipped: int = 0
 
 
-class _AsyncToSyncHTTPAdapter:
-    def __init__(self, client: AsyncHTTPClient, loop: asyncio.AbstractEventLoop):
-        self._client = client
-        self._loop = loop
-
-    def get(self, url: str):
-        text = asyncio.run_coroutine_threadsafe(self._client.get(url), self._loop).result()
-        return type("_Resp", (), {"status_code": 200, "text": text})()
-
-
 async def async_process_queue(
     store_id: str,
     policy: CrawlerPolicy,
@@ -55,18 +45,15 @@ async def async_process_queue(
 
     logger.info("store=%s queue: %d entries to process", store_id, len(entries))
 
-    loop = asyncio.get_running_loop()
     result = PipelineResult()
 
     async with AsyncHTTPClient(policy, proxy=proxy) as client:
-        adapter = _AsyncToSyncHTTPAdapter(client, loop)
-        fetch_with_adapter = cast(Callable[[str, Any], Any], fetch_product)
 
         async def _handle(entry: dict[str, int | str]) -> None:
             entry_id = int(entry["id"])
             product_url = str(entry["product_url"])
             try:
-                snapshot = await asyncio.to_thread(fetch_with_adapter, product_url, adapter)
+                snapshot = await fetch_product(product_url, client)
                 sync_result = await asyncio.to_thread(
                     sync_products, [(product_url, snapshot)], store_id,
                     state_repo, embedder, vector_store,
