@@ -83,6 +83,7 @@ Shopify storefront 的 `/products/<x>` 與 `/products/<x>.json` 只認 handle，
   - 新商品（`existing is None`）遇 404/410：跳過 increment（無 row），但仍刪除佇列項目。
   - 透過 `from estimator_king.crawler.async_http_client import ClientError` 匯入。
   - 為取得例外物件，except 子句改為 `except Exception as exc:`。
+- **例外來源界定**：本 except 捕捉到的 `ClientError(404/410)` 必定來自 `fetch_product` 的抓取階段（HTTP 層以 `reraise=True` 設定，且 `ClientError` 不在重試集合 `(RateLimitError, ServerError)` 內，故原樣 reraise，穿過 `run_coroutine_threadsafe(...).result()` 與 `asyncio.to_thread` 回到此處）。`sync_products` 內部的 embedding/vector 失敗是 fire-and-forget、已於 `engine.py` 內部自行 `except` 吞掉，**不會**把例外拋回 `_handle`，故不影響佇列刪除判斷；implementer 不需在 sync 失敗時判斷 404/410。
 
 ### 元件 3：呼叫端（`estimator_king/crawler/cycle.py`）
 
@@ -93,7 +94,8 @@ Shopify storefront 的 `/products/<x>` 與 `/products/<x>.json` 只認 handle，
 - 提供可匯入的函式（例如 `migrate(db_path: str) -> tuple[int, int]`，回傳 `(queue_deleted, rows_reset)`）以利測試，並附 `__main__` 進入點。
 - 動作（單一 transaction）：
   1. `DELETE FROM crawl_queue`（清空全部卡死佇列；佇列為暫時性，每輪由 sitemap + budget 重建）。
-  2. `UPDATE products SET consecutive_failures = 0, consecutive_sitemap_misses = 0, updated_at = <now> WHERE consecutive_failures > 0 OR consecutive_sitemap_misses > 0`（清除被 bug 灌大的計數器；`WHERE` 使重置筆數可量測且冪等）。
+  2. `UPDATE products SET consecutive_failures = 0, consecutive_sitemap_misses = 0, updated_at = <now> WHERE consecutive_failures > 0 OR consecutive_sitemap_misses > 0`（清除被 bug 灌大的計數器；`WHERE` 使重置筆數可量測、冪等，且不更動無辜 row 的 `updated_at`）。
+     - **為何此重置為必要前置**：現況 `consecutive_sitemap_misses` 最大已達 3，門檻 `inactive_sitemap_miss_threshold = 4`，而 `mark_inactive_products`（`estimator_king/sync/inactive.py:65`）用 `>=` 比較。若不重置，修正後第一輪 `populate_queue_from_sitemap` 仍會對舊數字 URL row 執行 `increment_sitemap_miss`（DB 仍是數字 URL、handle URL 對不上 → 走 miss 分支），使其 3→4 並滿足 `4 >= 4` → 同輪 inactive sweep 即把健康商品誤標下架。重置歸零後第一輪僅 0→1，安全。
   3. 印出刪除筆數與重置筆數。
 - **冪等**：再次執行刪除 0 筆、重置 0 筆。
 - `db_path` 來自命令列參數或 `DATABASE_PATH` 環境變數，預設 `./estimator_king.db`。
@@ -104,7 +106,7 @@ Shopify storefront 的 `/products/<x>` 與 `/products/<x>.json` 只認 handle，
 
 修正 + 遷移後跑一次普通 `crawl`：
 
-1. `populate_queue_from_sitemap`：sitemap handle URL 與 DB 舊數字 URL 仍對不上 → 全數重新入佇列為「新」；`increment_sitemap_miss` 使數字 row 計數 0→1（遠低於門檻 4，安全）。
+1. `populate_queue_from_sitemap`：sitemap handle URL 與 DB 舊數字 URL 仍對不上 → 全數重新入佇列為「新」（因遷移已 `DELETE FROM crawl_queue`，且 `enqueue_url` 用 `INSERT OR IGNORE` 配合 `crawl_queue` 的 `UNIQUE(store_id, product_url)`，故乾淨入列、無 UNIQUE 衝突）；`increment_sitemap_miss` 使已被遷移歸零的數字 row 計數 0→1（遠低於門檻 4，安全）。
 2. drain 佇列：handle URL 抓取成功 → `sync_products` 以相同數字 `product_id` 組成 `external_key` → 命中既有 row → `upsert` 就地把 `product_url` 改為 handle URL；因 `content_hash` 未變且 `last_indexed_at` 非空 → `unchanged=True` → **不重新 embedding**；`consecutive_failures` 重置為 0。
 3. inactive sweep：misses=1 < 4、failures=0 < 3 → 不誤標。
 4. 第二輪起：sitemap handle URL 命中 DB（已是 handle URL）→ `record_sitemap_seen` 使 misses 歸零，系統完全乾淨。
@@ -124,8 +126,9 @@ Shopify storefront 的 `/products/<x>` 與 `/products/<x>.json` 只認 handle，
 
 ### `tests/test_migrate_fix_product_urls.py`（新增）
 
-- 建立臨時 DB（套用既有 schema），塞入：含數字 URL 的 products（`consecutive_failures > 0`、`consecutive_sitemap_misses > 0`）與若干 `crawl_queue` 項目。
-- 呼叫遷移函式，斷言：`crawl_queue` 清空、受影響 products 的兩個計數器歸零、回傳筆數正確。
+- 建立臨時 DB（套用既有 schema），塞入：含數字 URL 的 products（`consecutive_failures > 0`、`consecutive_sitemap_misses > 0`）、**一筆 control row**（兩計數器皆為 0）與若干 `crawl_queue` 項目。
+- 呼叫遷移函式，斷言：`crawl_queue` 清空、受影響 products 的兩個計數器歸零、回傳筆數正確（`rows_reset` 只計受影響 row、不含 control row）。
+- **control row 斷言**：control row 的兩計數器仍為 0、其 `updated_at` 不變（驗證 `WHERE` 子句的最小影響語意）。
 - **冪等測試**：第二次呼叫回傳 `(0, 0)` 且狀態不變。
 
 ## 驗證（toolchain）
