@@ -28,19 +28,21 @@ def migrate(db_path: str) -> tuple[int, int]:
     """
     with ProductStateRepository(db_path) as repo:
         conn = repo.connection
-        conn.execute("BEGIN")
+        _ = conn.execute("BEGIN")
         try:
             queue_deleted = conn.execute("DELETE FROM crawl_queue").rowcount
             rows_reset = conn.execute(
-                "UPDATE products "
-                "SET consecutive_failures = 0, "
-                "    consecutive_sitemap_misses = 0, "
-                "    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
-                "WHERE consecutive_failures > 0 OR consecutive_sitemap_misses > 0"
+                """
+                UPDATE products
+                SET consecutive_failures = 0,
+                    consecutive_sitemap_misses = 0,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                WHERE consecutive_failures > 0 OR consecutive_sitemap_misses > 0
+                """
             ).rowcount
-            conn.execute("COMMIT")
+            _ = conn.execute("COMMIT")
         except Exception:
-            conn.execute("ROLLBACK")
+            _ = conn.execute("ROLLBACK")
             raise
     return queue_deleted, rows_reset
 

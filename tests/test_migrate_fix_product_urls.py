@@ -8,7 +8,7 @@ from scripts.migrate_2026_05_30_fix_product_urls import migrate
 OLD_TS = "2020-01-01T00:00:00Z"
 
 
-def _insert_product(repo, key, failures, misses):
+def _insert_product(repo: ProductStateRepository, key: str, failures: int, misses: int) -> None:
     repo.connection.execute(
         "INSERT INTO products (external_key, store_id, product_id, product_url, "
         "content_hash, normalizer_version, created_at, updated_at, "
@@ -46,6 +46,10 @@ def test_migrate_purges_queue_and_resets_only_affected_rows(db_path: str) -> Non
         assert affected is not None
         assert affected.consecutive_failures == 0
         assert affected.consecutive_sitemap_misses == 0
+        affected_ts = repo.connection.execute(
+            "SELECT updated_at FROM products WHERE external_key = ?", ("s:1",),
+        ).fetchone()
+        assert affected_ts["updated_at"] != OLD_TS  # bumped by the migration
 
         control_row = repo.connection.execute(
             "SELECT consecutive_failures, consecutive_sitemap_misses, updated_at "
