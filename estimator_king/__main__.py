@@ -17,6 +17,10 @@ from estimator_king.llm.embeddings import EmbeddingProvider
 from estimator_king.vectorstore.store import VectorStore
 from estimator_king.bot import runner as bot_runner
 
+logger = logging.getLogger(__name__)
+
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -59,14 +63,14 @@ def run_crawl(args: argparse.Namespace) -> None:
     try:
         config = AppConfig.from_yaml(args.config)
     except Exception as e:
-        logging.error("Failed to load config from %s: %s", args.config, e)
+        logger.error("Failed to load config from %s: %s", args.config, e)
         sys.exit(1)
 
     if args.db is not None:
         config.database_path = args.db
     provider_config = config.build_provider_config()
     if not provider_config.embedding_api_key:
-        logging.error("OPENAI_API_KEY (or EMBEDDING_API_KEY) is required")
+        logger.error("OPENAI_API_KEY (or EMBEDDING_API_KEY) is required")
         sys.exit(2)
 
     embedder = EmbeddingProvider(provider_config)
@@ -76,7 +80,7 @@ def run_crawl(args: argparse.Namespace) -> None:
             run_crawl_cycle(config, config.database_path, embedder, vector_store,
                             force_refetch=args.force_refetch))
     except Exception as e:
-        logging.error("Crawler failed: %s", e)
+        logger.error("Crawler failed: %s", e)
         sys.exit(1)
 
     print(json.dumps(counters, indent=2))
@@ -105,14 +109,14 @@ def run_bot(args: argparse.Namespace) -> None:
     try:
         asyncio.run(bot_runner.run_bot(config, guild_id=args.guild_id))
     except KeyboardInterrupt:
-        logging.info("Bot stopped by user")
+        logger.info("Bot stopped by user")
 
 
 def _main() -> None:
     args = parse_args()
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format="%(asctime)s [%(levelname)s] %(message)s",
+        format=_LOG_FORMAT,
         stream=sys.stderr,
     )
     if args.command == "crawl":
