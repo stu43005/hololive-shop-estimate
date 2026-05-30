@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import pytest
@@ -21,14 +22,14 @@ class FakeEnumerator:
     def __init__(self, urls):
         self._urls = urls
 
-    def enumerate_products(self, base_url):
+    async def enumerate_products(self, base_url):
         return self._urls
 
 
 def test_sitemap_summary_info_logged(repo, caplog):
     enum = FakeEnumerator(["https://x/products/1", "https://x/products/2"])
     with caplog.at_level(logging.INFO, logger="estimator_king.crawler.pipeline"):
-        populate_queue_from_sitemap(_store(), repo, enum)
+        asyncio.run(populate_queue_from_sitemap(_store(), repo, enum))
 
     recs = [
         r for r in caplog.records
@@ -45,7 +46,7 @@ def test_sitemap_summary_info_logged(repo, caplog):
 def test_empty_sitemap_warns_and_skips_summary(repo, caplog):
     enum = FakeEnumerator([])
     with caplog.at_level(logging.INFO, logger="estimator_king.crawler.pipeline"):
-        result = populate_queue_from_sitemap(_store(), repo, enum)
+        result = asyncio.run(populate_queue_from_sitemap(_store(), repo, enum))
 
     assert result == 0
     msgs = [r.getMessage() for r in caplog.records]
