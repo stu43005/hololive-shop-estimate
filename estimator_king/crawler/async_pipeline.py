@@ -10,7 +10,7 @@ from estimator_king.crawler.shopify import fetch_product
 from estimator_king.sync.engine import sync_products
 
 if TYPE_CHECKING:
-    from estimator_king.config_schema import CrawlerPolicy
+    from estimator_king.config_schema import CrawlerPolicy, ProxyConfig
     from estimator_king.database.repository import ProductStateRepository
     from estimator_king.llm.embeddings import EmbeddingProvider
     from estimator_king.vectorstore.store import VectorStore
@@ -47,6 +47,8 @@ async def async_process_queue(
     state_repo: ProductStateRepository,
     embedder: EmbeddingProvider,
     vector_store: VectorStore,
+    *,
+    proxy: ProxyConfig | None = None,
 ) -> PipelineResult:
     entries = state_repo.peek_all(store_id)
     if not entries:
@@ -58,7 +60,7 @@ async def async_process_queue(
     result = PipelineResult()
     lock = asyncio.Lock()
 
-    async with AsyncHTTPClient(policy) as client:
+    async with AsyncHTTPClient(policy, proxy=proxy) as client:
         adapter = _AsyncToSyncHTTPAdapter(client, loop)
         fetch_with_adapter = cast(Callable[[str, Any], Any], fetch_product)
 

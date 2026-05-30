@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from estimator_king.config_schema import CrawlerPolicy
+from estimator_king.config_schema import CrawlerPolicy, ProxyConfig
 from estimator_king.crawler.async_pipeline import async_process_queue
 from estimator_king.crawler.shopify import ShopifyHTTPError
 from estimator_king.crawler.snapshot import ProductSnapshot, ProductVariant
@@ -71,3 +71,27 @@ def test_fetch_failure_increments_failures_and_keeps_queue(repo):
     assert result.failed == 1
     assert repo.peek_all("hololive") != []  # entry kept for retry
     assert repo.get_by_external_key("hololive:1").consecutive_failures == 1
+
+
+def test_proxy_forwarded_to_async_http_client(repo):
+    repo.enqueue_url("hololive", "https://x/products/1")
+    captured = {}
+
+    class _FakeClient:
+        def __init__(self, policy, proxy=None):
+            captured["proxy"] = proxy
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    proxy_cfg = ProxyConfig(enabled=True, http_proxy="http://p:8080")
+    with patch("estimator_king.crawler.async_pipeline.AsyncHTTPClient", _FakeClient), \
+         patch("estimator_king.crawler.async_pipeline.fetch_product", return_value=_snap(1)):
+        asyncio.run(async_process_queue(
+            "hololive", "https://x", CrawlerPolicy(), repo,
+            FakeEmbedder(), FakeVectorStore(), proxy=proxy_cfg))
+
+    assert captured["proxy"] is proxy_cfg
