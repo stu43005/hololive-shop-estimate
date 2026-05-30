@@ -57,6 +57,18 @@ python -m estimator_king crawl [--config PATH] [--db PATH] [--log-level LVL] [--
   缺 embedding key → 1；`KeyboardInterrupt` 安靜結束。
 - logging 格式統一為 `%(asctime)s [%(levelname)s] %(message)s`（採原 bot 風格）。
 
+### ChromaDB 單寫入者約束（決定 ops 文件改寫方向）
+
+生產環境只跑單一 `run` 進程（bot + 程序內 `CrawlScheduler` 同程序，
+`run_on_start=True` 故啟動即爬一次）。本地持久化的 ChromaDB 為**單寫入者**——
+任一時刻只能有一個進程持有同一個 ChromaDB 路徑。因此：
+
+- `crawl` 子命令**不得**與正在運行的 `run` 進程並存於同一 ChromaDB 路徑；它定位為
+  **本地開發 / 離線 backfill** 工具，不是生產 ops 工具。
+- 生產的 re-index / 全量重建採**重啟重建**模式（見 §8）：scale bot 到 0 釋放
+  ChromaDB → 清空 `chroma/` 與 SQLite 狀態 DB → scale 回 1，bot 啟動時的
+  on-start 爬取因 SQLite 已空而把所有產品當新發現，一個 cycle 全量重建。
+
 ## 4. 參數結構（argparse subparsers）
 
 `parse_args()` 用 subparser，共用參數放在 parent parser 經 `parents=[common]`
@@ -208,21 +220,31 @@ deployment / PVC label 維持不動（屬既有命名，與本任務無關）。
   `python -m estimator_king.bot [OPTIONS]` → `python -m estimator_king run`
   （含第 122、128、145、170、198、204、215–216、242、252、284、320 行附近的
   指令與包裝腳本）
-- [docs/ops-runbook.md:120](../../ops-runbook.md)：
-  `python -m estimator_king --config ... --db ...` →
-  `python -m estimator_king crawl --config ... --db ...`
-- [docs/ops-runbook.md](../../ops-runbook.md) 的**手動 crawl 程序**（現以
-  `kubectl create job --from=cronjob/estimator-king-crawler` 觸發，該 CronJob
-  已不存在）：改寫為透過 `kubectl exec` 進 bot pod 執行
-  `python -m estimator_king crawl [--force-refetch]`，與本設計的 backfill 路徑一致。
+
+#### ops-runbook：移除獨立 crawler / CronJob 模型（整份貫穿改寫）
+
+[docs/ops-runbook.md](../../ops-runbook.md) 目前深度綁定「crawler 是獨立 CronJob
+進程」的舊架構。生產環境只跑 `run`（§3 ChromaDB 單寫入者約束），故整份移除獨立
+crawler 內容、把爬取重新定位為 `run` 程序內的階段。逐節改寫如下：
+
+| 節 | 現況（行附近） | 改寫 |
+| --- | --- | --- |
+| 開頭簡介 | L3「the Estimator King crawler and Discord bot」 | 改述為單一 bot 程序內含 crawl 排程器 |
+| §1 Initial Deployment | L57–60 `kubectl apply -f deploy/crawler-cronjob.yaml`（檔已刪除） | 移除 CronJob 套用步驟，只保留 bot Deployment 套用；L21 的 `crawler-pvc.yaml`（共用 PVC）維持 |
+| §2 Secret Rotation | L86–88「Verify Crawler / 下次排程取得新 secret」 | 移除；改述 secret 輪替後重啟 bot Deployment（連帶排程器）即生效 |
+| §3 Ad-hoc Crawl Commands | L92–123 整節（manual crawl / force-refetch / debug store，全部 `--from=cronjob` 或第二個 crawl 進程） | **整節移除**——生產不支援並存第二個爬取進程；本地一次性爬取改由 local-runbook 的 `python -m estimator_king crawl` 涵蓋 |
+| §4 Log Inspection | L135–141「Crawler Logs (Latest Job)」、L152–154「(Crawler only)」欄位 | 移除 crawler job log 區塊（爬取 log 現於 bot log 內）；欄位註記 `(Crawler only)` → `(crawl phase only)` |
+| §5 Recovery | L175–183「Crawler Failure / hung jobs」 | 標題改 `Crawl Cycle Failure`；移除「hung jobs」字眼，改述 in-process 爬取失敗的處置（重啟 bot；DB lock / PVC full / sitemap / embedding API 內容保留） |
+| §6 Re-index Procedure | L186–213 `kubectl exec rm -rf chroma` + `--from=cronjob` 重抓 job | **改寫為重啟重建**：`kubectl scale deployment/estimator-king-bot --replicas=0` → 以 debug pod（掛 PVC）`rm -rf /data/chroma /data/estimator_king.db` → `--replicas=1`；bot 啟動的 on-start 爬取全量重建。註明會重置 SQLite 爬取狀態 |
+| §7 Smoke Tests | L240–246「Summary Report Verification」抓 crawler pod 的 `Crawler completed` | 改抓 bot log 的 `Crawl cycle complete`（[scheduler.py:36](../../../estimator_king/bot/scheduler.py) 的 log 文字） |
+| §8 Summary Report JSON | L253「the crawler outputs a JSON object to stdout」 | 釐清：CLI `crawl` 把 JSON 印到 stdout；`run` 內的排程器以 `logger.info` 記錄 counters（不印 stdout） |
+| §9 Observability | L278–279「(Crawler only)」、L289–291「crawler CronJob fails」告警 | 欄位註記同 §4 改 `(crawl phase only)`；CronJob 告警改為「bot 每日爬取 `errors > 0` 連續 2 天」 |
+
+> `deploy/crawler-pvc.yaml`、image tag、k8s label 中的 `crawler` 既有命名不在本任務
+> 改名範圍（與入口點統一無關）。
 
 ### 8.2 標記但不在本任務處理（out of scope）
 
-- [docs/ops-runbook.md](../../ops-runbook.md) 中其餘對已刪除
-  `cronjob/estimator-king-crawler` 與 `estimator-king-crawler` pod label 的
-  **監控 / 告警 / log 蒐集**描述（97、106、139、207、244 行附近）：屬更早
-  CronJob 移除遺留的 stale 文件，與「入口點統一」無直接關聯，本任務不重寫
-  （僅在 §8.1 修正會被新 crawl 子命令取代的手動程序段落）。
 - `docs/superpowers/` 下的歷史 spec / plan：是當時時間點的記錄，維持原樣不追改。
 - Dockerfile 的 `python-dotenv` 安裝：原始碼未 import，疑似可移除，但屬獨立清理，
   本任務保留不動。
@@ -268,14 +290,17 @@ deployment / PVC label 維持不動（屬既有命名，與本任務無關）。
 5. Dockerfile 僅剩 base + app 兩階段，ENTRYPOINT=`["python","-m","estimator_king"]`、
    CMD=`["run"]`；無 `estimator_king.crawler` / `estimator_king.bot` 殘留。
 6. deployment 以 `args: [run, ...]` 啟動，rollout 後 bot 正常登入。
-7. README、local-runbook、ops-runbook（含手動 crawl 程序）的入口點呼叫全部更新。
-8. `pyright`/型別檢查、`ruff` lint、相關單元測試（test_cli、test_main_async、
+7. README、local-runbook 的入口點呼叫全部更新為 `run` / `crawl` 子命令。
+8. ops-runbook 已移除所有獨立 crawler / CronJob 內容（無 `cronjob/estimator-king-crawler`、
+   `--from=cronjob`、`estimator-king-crawler` pod label、`crawler-cronjob.yaml` 殘留）；
+   re-index 程序為重啟重建（scale 0 → 清 `chroma/`+`estimator_king.db` → scale 1）；
+   爬取定位為 `run` 程序內階段；`crawl` 僅於 local-runbook 作本地工具出現。
+9. `pyright`/型別檢查、`ruff` lint、相關單元測試（test_cli、test_main_async、
    test_scheduler、test_bot_commands）全數通過。
 
 ## 11. 不在範圍
 
 - 不改 `run_crawl_cycle` 與爬蟲核心邏輯。
 - 不改 `CrawlScheduler`、`Estimator`、Discord command 實作。
-- 不重寫 ops-runbook 的 CronJob 監控段落（§8.2）。
 - 不移除 `python-dotenv`（§8.2）。
-- 不改 image tag / k8s label 命名。
+- 不改 image tag / k8s label / `deploy/crawler-pvc.yaml` 等既有 `crawler` 命名。
