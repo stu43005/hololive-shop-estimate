@@ -80,9 +80,10 @@ Discord bot 與 in-process 爬蟲排程器共用同一個 asyncio event loop。`
   - https URL → 用 `self._proxy.https_proxy`
   - 僅在 `self._proxy.enabled` 且選中的值為非空字串時才走 proxy；否則不傳任何 proxy 參數（直連）。
 - **帳密處理（已對 aiohttp 3.13.5 原始碼查證，見 §6）**：aiohttp 對「顯式傳入」的 proxy URL **不會**自動拆出 userinfo 帳密（只有 `trust_env=True` 的 env 來源才會拆）。而 `ProxyConfig` 沒有獨立 auth 欄位，使用者可能把帳密寫進 URL（`http://user:pass@host:port`）。因此 `AsyncHTTPClient` 必須自己拆解：
-  - 以 `aiohttp.helpers.strip_auth_from_url(yarl.URL(value))` 把選中的 proxy 值拆成 `(stripped_url, auth)`（`auth` 為 `BasicAuth | None`）。
+  - 以 `strip_auth_from_url(URL(value))` 把選中的 proxy 值拆成 `(stripped_url, auth)`（`auth` 為 `BasicAuth | None`）。
   - 呼叫 `session.request(..., proxy=stripped_url, proxy_auth=auth)`；`auth` 為 `None` 時等同不帶認證。
   - `stripped_url` 型別為 `yarl.URL`（aiohttp 的 `proxy` 接受 `str | yarl.URL`）。
+  - **import 來源（明示，避免猜測）**：實作端 `from aiohttp.helpers import strip_auth_from_url`、`from yarl import URL`；`BasicAuth` 由 `strip_auth_from_url` 回傳、實作端不自行建構。測試端若要建構/比對 `BasicAuth`，用 `from aiohttp import BasicAuth`。
 - **scheme 限制（已查證）**：aiohttp 只支援 `http://`（與 socks5）proxy；`https://` proxy 會被忽略並警告。即使目標 URL 是 https，`http_proxy`/`https_proxy` 兩個設定值都應填 `http://` 形式的 proxy（aiohttp 會走 CONNECT 隧道）。本規格不對設定值做 scheme 驗證/轉換，沿用設定原值；此限制於 spec 與測試註記即可。
 
 **`estimator_king/crawler/async_pipeline.py`**
@@ -151,7 +152,7 @@ tests：
 - `tests/test_sitemap.py`（改 async via `asyncio.run`，mock async get；fake `get` 直接回傳 XML 字串）
 - `tests/test_pipeline.py`（`populate_queue_from_sitemap` 測試改 async；其 `FakeEnumerator.enumerate_products` 須改為 `async def`，且測試以 `asyncio.run(populate_queue_from_sitemap(...))` 呼叫，否則 `await` 同步回傳值會 `TypeError`）
 - `tests/test_crawl_cycle.py`（驗證 cycle 在 async sitemap 下正常；現有 `patch("...cycle.populate_queue_from_sitemap", return_value=0)` 須改為 awaitable mock——例如 `new=AsyncMock(return_value=0)` 或 `side_effect` 為 async 函式，比照同檔 `async_process_queue` 的 `fake_proc` 寫法，否則 `await 0` 會 `TypeError`）
-- `tests/test_async_http_client.py`（新增 proxy 測試；須擴充該檔 `_FakeSession.request`/`request_factory`，使其捕獲並暴露 `proxy`/`proxy_auth` 等 kwargs——現有 factory 只接 `(method, url)` 並把 `**kwargs` 吞掉，無法觀察 proxy 參數）
+- `tests/test_async_http_client.py`（新增 proxy 測試；須擴充該檔 `_FakeSession.request`/`request_factory`，使其捕獲並暴露 `proxy`/`proxy_auth` 等 kwargs——現有 factory 只接 `(method, url)` 並把 `**kwargs` 吞掉，無法觀察 proxy 參數。測試案例須含：scheme 選值、enabled 開關、及帳密拆解 `BasicAuth`，詳見 §5）
 - `tests/test_http_client.py`（**刪除**）
 - `tests/test_http_client_logging.py`（**刪除**）
 - 關閉行為測試（新增或擴充 `tests/test_scheduler.py` / runner 相關）：scheduler 被 cancel 後乾淨退出；第一次訊號觸發 cancel + close、第二次觸發強退路徑（強退以可注入的 exit 函式測試，避免測試真的呼叫 `os._exit`）。
@@ -162,7 +163,10 @@ tests：
   - `tests/test_sitemap.py`、`tests/test_pipeline.py`、`tests/test_crawl_cycle.py`：沿用 `asyncio.run(...)` 在同步 `def test_...` 內呼叫（比照 `tests/test_async_pipeline.py`、`tests/test_crawl_cycle.py`）。
   - `tests/test_async_http_client.py`、`tests/test_scheduler.py`：沿用該檔既有的 `@pytest.mark.asyncio` + `async def test_...`（兩檔現皆採此寫法）。
 - sitemap/pipeline 測試的 HTTP mock：以提供 `async def get(self, url) -> str` 的 fake 物件（或 `unittest.mock.AsyncMock` 設定 `return_value` 為 XML 字串）取代原本回傳 `requests.Response`（具 `.content`/`.raise_for_status`）的 `MagicMock`。**fake 的 `get` 直接回傳 XML 字串本身**，不再包裝任何具 `.content`/`.raise_for_status` 的物件（因 §3.1 已移除這兩者的使用）。沿用 `tests/fixtures/*.xml`（以字串讀入）。
-- proxy 測試：擴充 `tests/test_async_http_client.py` 既有的 `_FakeSession`/`request_factory` 使其捕獲 `proxy`/`proxy_auth` 等 kwargs（現有 factory 只收 `(method, url)` 並把 `**kwargs` 吞掉，無法觀察 proxy）。斷言在 `enabled` 且設定值非空時帶入正確的 proxy 參數、scheme 對應正確（http vs https）、且 `enabled: false` 時不帶 proxy。
+- proxy 測試：擴充 `tests/test_async_http_client.py` 既有的 `_FakeSession`/`request_factory` 使其捕獲 `proxy`/`proxy_auth` 等 kwargs（現有 factory 只收 `(method, url)` 並把 `**kwargs` 吞掉，無法觀察 proxy）。須涵蓋：
+  - **scheme 選值**：http 目標用 `http_proxy`、https 目標用 `https_proxy`。
+  - **enabled 開關**：`enabled: false` 時完全不帶 proxy（直連）；`enabled: true` 但選中值為空字串時也不帶 proxy。
+  - **帳密拆解**：設定值含 userinfo（如 `http://user:pass@host:8080`）時，捕獲到的 `proxy` 為已移除帳密的 stripped URL、`proxy_auth` 為 `BasicAuth("user", "pass")`（`from aiohttp import BasicAuth`）；設定值不含 userinfo 時 `proxy_auth` 為 `None`。
 - 4xx 行為測試：mock async get 對 sitemap URL 拋 `ClientError`，斷言 `enumerate_products` 包成 `SitemapError`，且 `run_crawl_cycle` 計入 per-store error 並 continue。
 - 關閉行為測試：以可注入的「強退函式」替代 `os._exit`，驗證第二次訊號走強退分支；驗證 `shutdown()` 會 cancel scheduler task 並 await、再 close bot。
 
