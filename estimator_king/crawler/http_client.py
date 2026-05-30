@@ -31,8 +31,12 @@ from tenacity import (
     wait_exponential,
 )
 
+import logging
+
 from .. import __version__
 from ..config_schema import CrawlerPolicy, ProxyConfig
+
+logger = logging.getLogger(__name__)
 
 
 class HTTPClientError(Exception):
@@ -318,9 +322,14 @@ class HTTPClient:
             "timeout",
             (float(self._policy.timeout_connect), float(self._policy.timeout_read)),
         )
+        start = time.monotonic()
         resp = self.session.request(method, url, timeout=timeout, **kwargs)  # pyright: ignore[reportAny]
 
         status = int(getattr(resp, "status_code", 0) or 0)
+        logger.debug(
+            "%s %s -> %s in %.0fms",
+            method, url, status, (time.monotonic() - start) * 1000.0,
+        )
         if status in (403, 430):
             self._circuit_breaker.record_waf_failure(domain)
             raise WAFBlockedError(url, status_code=status, response=resp)
