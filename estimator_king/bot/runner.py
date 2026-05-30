@@ -6,9 +6,10 @@ Extracted from the former ``estimator_king.bot.__main__`` so the unified
 
 import asyncio
 import logging
+import os
 import signal
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 import discord
 
@@ -20,6 +21,56 @@ logger = logging.getLogger(__name__)
 # Strong references to background tasks: asyncio only keeps a weak reference, so
 # an unreferenced create_task() result can be garbage-collected mid-run.
 _background_tasks: set["asyncio.Task[None]"] = set()
+
+
+def _force_exit(code: int) -> None:  # pragma: no cover - replaced via injection in tests
+    os._exit(code)
+
+
+_default_force_exit: Callable[[int], None] = _force_exit
+
+
+class _Shutdowner:
+    """Two-stage shutdown: first signal cancels the scheduler and closes the
+    bot gracefully; a second signal forces an immediate exit (escape hatch for
+    in-flight blocking work that cannot be cancelled cooperatively)."""
+
+    _scheduler_task: asyncio.Task[None]
+    _bot: discord.Client
+    _force_exit: Callable[[int], None]
+    _requested: bool
+
+    def __init__(
+        self,
+        scheduler_task: asyncio.Task[None],
+        bot: discord.Client,
+        *,
+        force_exit: Callable[[int], None] = _default_force_exit,
+    ) -> None:
+        self._scheduler_task = scheduler_task
+        self._bot = bot
+        self._force_exit = force_exit
+        self._requested = False
+
+    def handle_signal(self) -> None:
+        if self._requested:
+            logger.warning("Forced shutdown (second interrupt)")
+            self._force_exit(130)
+            return
+        self._requested = True
+        logger.info("Shutdown requested; press Ctrl+C again to force quit")
+        task = asyncio.create_task(self.shutdown())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+    async def shutdown(self) -> None:
+        logger.info("Shutting down bot...")
+        self._scheduler_task.cancel()
+        try:
+            await self._scheduler_task
+        except asyncio.CancelledError:
+            pass
+        await self._bot.close()
 
 
 def create_bot() -> discord.Client:
@@ -74,13 +125,10 @@ async def run_bot(config: AppConfig, *, guild_id: Optional[int]) -> None:
             logger.info("Synced commands globally")
         logger.info("Bot ready and commands synchronized")
 
-    async def shutdown() -> None:
-        logger.info("Shutting down bot...")
-        await bot.close()
-
+    shutdowner = _Shutdowner(scheduler_task, bot)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
+        loop.add_signal_handler(sig, shutdowner.handle_signal)
 
     assert config.discord_token is not None
     await bot.start(config.discord_token)
