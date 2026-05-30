@@ -6,8 +6,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from estimator_king.crawler.async_http_client import AsyncHTTPClient
 from estimator_king.crawler.async_pipeline import async_process_queue
-from estimator_king.crawler.http_client import HTTPClient
 from estimator_king.crawler.pipeline import enqueue_oldest_products, populate_queue_from_sitemap
 from estimator_king.crawler.sitemap import SitemapEnumerator
 from estimator_king.database.repository import ProductStateRepository
@@ -33,37 +33,38 @@ async def run_crawl_cycle(
                 "skipped": 0, "inactive": 0, "errors": 0}
 
     with ProductStateRepository(db_path) as repo:
-        http_client = HTTPClient(crawler_policy=config.crawler, proxy=config.proxy)
-        enumerator = SitemapEnumerator(http_client=http_client)
+        async with AsyncHTTPClient(config.crawler, proxy=config.proxy) as sitemap_client:
+            enumerator = SitemapEnumerator(http_client=sitemap_client)
 
-        for store in config.stores:
-            logger.info("Processing store %s", store.id)
-            try:
-                new_count = populate_queue_from_sitemap(store, repo, enumerator)
-                counters["discovered"] += new_count
-            except Exception:
-                logger.exception("Sitemap failed for %s", store.id)
-                counters["errors"] += 1
-                continue
+            for store in config.stores:
+                logger.info("Processing store %s", store.id)
+                try:
+                    new_count = await populate_queue_from_sitemap(store, repo, enumerator)
+                    counters["discovered"] += new_count
+                except Exception:
+                    logger.exception("Sitemap failed for %s", store.id)
+                    counters["errors"] += 1
+                    continue
 
-            if force_refetch:
-                for state in repo.list_active(store.id):
-                    repo.enqueue_url(store.id, state.product_url)
-            else:
-                remaining = max(0, config.crawler.max_products_per_run - new_count)
-                enqueue_oldest_products(store, repo, limit=remaining)
+                if force_refetch:
+                    for state in repo.list_active(store.id):
+                        repo.enqueue_url(store.id, state.product_url)
+                else:
+                    remaining = max(0, config.crawler.max_products_per_run - new_count)
+                    enqueue_oldest_products(store, repo, limit=remaining)
 
-            try:
-                result = await async_process_queue(
-                    store.id, store.base_url, config.crawler, repo, embedder, vector_store)
-                counters["fetched_ok"] += result.processed
-                counters["created"] += result.created
-                counters["updated"] += result.updated
-                counters["skipped"] += result.sync_skipped
-                counters["errors"] += result.failed
-            except Exception:
-                logger.exception("Queue processing failed for %s", store.id)
-                counters["errors"] += 1
+                try:
+                    result = await async_process_queue(
+                        store.id, store.base_url, config.crawler, repo, embedder, vector_store,
+                        proxy=config.proxy)
+                    counters["fetched_ok"] += result.processed
+                    counters["created"] += result.created
+                    counters["updated"] += result.updated
+                    counters["skipped"] += result.sync_skipped
+                    counters["errors"] += result.failed
+                except Exception:
+                    logger.exception("Queue processing failed for %s", store.id)
+                    counters["errors"] += 1
 
         try:
             inactive_result = mark_inactive_products(

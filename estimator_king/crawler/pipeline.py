@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def populate_queue_from_sitemap(
+async def populate_queue_from_sitemap(
     store: Store,
     repo: ProductStateRepository,
     enumerator: SitemapEnumerator,
@@ -35,7 +35,7 @@ def populate_queue_from_sitemap(
         Number of URLs newly enqueued.
     """
     # Step 1: enumerate product URLs from sitemap
-    sitemap_urls = enumerator.enumerate_products(store.base_url)
+    sitemap_urls = await enumerator.enumerate_products(store.base_url)
 
     # Step 2: empty sitemap → early return
     if not sitemap_urls:

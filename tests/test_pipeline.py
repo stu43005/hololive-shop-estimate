@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -48,7 +49,7 @@ class FakeEnumerator:
     def __init__(self, urls):
         self._urls = urls
 
-    def enumerate_products(self, base_url):
+    async def enumerate_products(self, base_url):
         return self._urls
 
 
@@ -56,7 +57,7 @@ def test_populate_enqueues_only_new_urls(repo):
     repo.upsert(_state(1, None))  # existing
     enum = FakeEnumerator(["https://x/products/1", "https://x/products/2"])
 
-    new_count = populate_queue_from_sitemap(_store(), repo, enum)
+    new_count = asyncio.run(populate_queue_from_sitemap(_store(), repo, enum))
 
     assert new_count == 1
     assert [e["product_url"] for e in repo.peek_all("hololive")] == ["https://x/products/2"]
