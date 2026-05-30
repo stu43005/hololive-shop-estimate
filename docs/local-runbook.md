@@ -9,11 +9,11 @@ For Kubernetes deployment, see [ops-runbook.md](ops-runbook.md).
 ## 1. Prerequisites
 
 | Requirement | Version | Notes |
-|-------------|---------|-------|
+| ----------- | ------- | ----- |
 | Python | 3.11+ | `python --version` to verify |
 | pip | latest | `pip install --upgrade pip` |
 | Git | any | For cloning the repo |
-| Dify instance | — | Running and accessible (see [dify-dataset-setup.md](dify-dataset-setup.md)) |
+| OpenAI API key | — | Or a local [ollama](https://ollama.com) instance for fully offline operation |
 | Discord bot token | — | From [Discord Developer Portal](https://discord.com/developers/applications) (bot only) |
 
 ---
@@ -35,10 +35,8 @@ pip install -r requirements.txt
 ### 2.2 Verify Installation
 
 ```bash
-python -m pytest -q
+.venv/bin/python -m pytest -q
 ```
-
-Expected: `237 passed, 5 failed` (5 pre-existing CLI test failures are known).
 
 ---
 
@@ -57,27 +55,33 @@ Then edit `.env` with your actual values. The file is already in `.gitignore` �
 ### 3.2 `.env` File Reference
 
 ```dotenv
-# ── Crawler (required for crawling) ──────────────────────────
-DIFY_BASE_URL=https://dify.long-cod.ts.net/v1
-DIFY_API_KEY=dataset-xxxxxxxxxxxxxxxxxxxxxxxx
-DIFY_DATASET_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-DATABASE_PATH=./estimator_king.db
+# ── Provider ──────────────────────────────────────────────────
+OPENAI_API_KEY=sk-...
+# OPENAI_BASE_URL=https://api.openai.com/v1   # override for ollama
+# EMBEDDING_MODEL=text-embedding-3-large
+# EMBEDDING_DIMENSIONS=1024
+# CHAT_MODEL=gpt-4o
+# CHAT_STRUCTURED_OUTPUT=true
 
-# ── Discord Bot (required for bot) ───────────────────────────
+# ── Storage ───────────────────────────────────────────────────
+DATABASE_PATH=./estimator_king.db
+CHROMA_PATH=./chroma
+
+# ── Discord Bot ───────────────────────────────────────────────
 DISCORD_BOT_TOKEN=MTIzNDU2Nzg5MDEyMzQ1Njc4OQ.XXXXXX.XXXXXXXX
-DIFY_WORKFLOW_API_KEY=app-xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 | Variable | Used By | Description |
-|----------|---------|-------------|
-| `DIFY_BASE_URL` | Crawler | Dify API endpoint (e.g. `https://dify.long-cod.ts.net/v1`) |
-| `DIFY_API_KEY` | Crawler | Dify dataset API key (`dataset-*` format) |
-| `DIFY_DATASET_ID` | Crawler | UUID of the target Dify Knowledge Base dataset |
-| `DATABASE_PATH` | Crawler | Path to SQLite database file (default: `./estimator_king.db`) |
+| -------- | ------- | ----------- |
+| `OPENAI_API_KEY` | Crawler + Bot | API key for the embedding and chat provider |
+| `OPENAI_BASE_URL` | Crawler + Bot | Override to `http://localhost:11434/v1` for ollama |
+| `EMBEDDING_MODEL` | Crawler | Model used to embed product descriptions (default `text-embedding-3-large`) |
+| `EMBEDDING_DIMENSIONS` | Crawler | Output vector dimensions (default `1024`) |
+| `CHAT_MODEL` | Bot | Chat model for `/estimate` (default `gpt-4o`) |
+| `CHAT_STRUCTURED_OUTPUT` | Bot | Set to `false` when the model does not support JSON schema |
+| `DATABASE_PATH` | Crawler | Path to SQLite database file (default `./estimator_king.db`) |
+| `CHROMA_PATH` | Crawler + Bot | ChromaDB persistence directory (default `./chroma`) |
 | `DISCORD_BOT_TOKEN` | Bot | Discord bot authentication token |
-| `DIFY_WORKFLOW_API_KEY` | Bot | Dify workflow API key (`app-*` format) |
-
-> **Note**: The bot's workflow base URL is hardcoded to `https://dify.long-cod.ts.net/v1` in `estimator_king/bot/workflow_client.py`. If your Dify instance is at a different address, edit `DEFAULT_BASE_URL` in that file.
 
 ### 3.3 Loading `.env` into the Shell
 
@@ -115,7 +119,7 @@ Variables load automatically when you `cd` into the project directory.
 set -a; source .env; set +a
 
 # Run crawler with default config
-python -m estimator_king --config stores_config.yaml
+.venv/bin/python -m estimator_king --config stores_config.yaml
 ```
 
 ### 4.2 CLI Options
@@ -124,16 +128,24 @@ python -m estimator_king --config stores_config.yaml
 python -m estimator_king [OPTIONS]
 
 Options:
-  --config PATH        Stores config YAML (default: stores_config.yaml)
-  --db PATH            SQLite database path (env: DATABASE_PATH, default: ./estimator_king.db)
-  --dify-base-url URL  Dify API base URL (env: DIFY_BASE_URL, required)
-  --dify-api-key KEY   Dify dataset API key (env: DIFY_API_KEY, required)
-  --dify-dataset-id ID Dify dataset UUID (env: DIFY_DATASET_ID, required)
+  --config PATH         Stores config YAML (default: stores_config.yaml)
+  --db PATH             SQLite database path (env: DATABASE_PATH, default: ./estimator_king.db)
+  --force-refetch       Re-fetch every product regardless of content hash
 ```
 
 CLI arguments override environment variables.
 
-### 4.3 Output
+### 4.3 Daily Budget Crawl
+
+The crawler respects a per-store `max_products_per_run` limit defined in `stores_config.yaml`. Each run fetches at most that many products per store, rotating through the catalog so every product is eventually refreshed. This keeps API and embedding costs predictable even for large stores.
+
+To trigger a full one-cycle backfill (re-fetch all products, regardless of the daily budget):
+
+```bash
+.venv/bin/python -m estimator_king --force-refetch
+```
+
+### 4.4 Output
 
 - **Logs**: Printed to `stderr` (structured format: `timestamp - LEVEL - message`)
 - **Result JSON**: Printed to `stdout` on completion
@@ -155,12 +167,15 @@ Example output (stdout):
 To capture the JSON result while still seeing logs:
 
 ```bash
-python -m estimator_king --config stores_config.yaml > result.json
+.venv/bin/python -m estimator_king --config stores_config.yaml > result.json
 ```
 
-### 4.4 Database Location
+### 4.5 Database and Vector Store Location
 
-The crawler creates/updates an SQLite database (WAL mode) at the path specified by `--db` or `DATABASE_PATH`. Default: `./estimator_king.db`.
+The crawler creates/updates:
+
+- An SQLite database (WAL mode) at the path specified by `--db` or `DATABASE_PATH`. Default: `./estimator_king.db`.
+- A ChromaDB collection at the directory specified by `CHROMA_PATH`. Default: `./chroma`.
 
 To inspect the database:
 
@@ -180,7 +195,7 @@ sqlite3 estimator_king.db "SELECT COUNT(*) FROM product_state;"
 set -a; source .env; set +a
 
 # Run bot
-python -m estimator_king.bot
+.venv/bin/python -m estimator_king.bot
 ```
 
 ### 5.2 CLI Options
@@ -196,7 +211,7 @@ Options:
 ### 5.3 Development vs Production Sync
 
 | Mode | Command | Propagation |
-|------|---------|-------------|
+| ---- | ------- | ----------- |
 | Development | `python -m estimator_king.bot --guild-id 123456789` | Instant (guild-specific) |
 | Production | `python -m estimator_king.bot` | Up to 1 hour (global) |
 
@@ -224,7 +239,7 @@ Press `Ctrl+C` in the terminal. The bot handles `SIGINT` gracefully.
 set -euo pipefail
 set -a; source "$(dirname "$0")/.env"; set +a
 
-python -m estimator_king --config stores_config.yaml "$@"
+.venv/bin/python -m estimator_king --config stores_config.yaml "$@"
 ```
 
 ### `run-bot.sh`
@@ -234,7 +249,7 @@ python -m estimator_king --config stores_config.yaml "$@"
 set -euo pipefail
 set -a; source "$(dirname "$0")/.env"; set +a
 
-python -m estimator_king.bot "$@"
+.venv/bin/python -m estimator_king.bot "$@"
 ```
 
 Make them executable:
@@ -249,14 +264,14 @@ chmod +x run-crawler.sh run-bot.sh
 
 ## 7. Smoke Tests & Verification
 
-### 7.1 Verify Dify Connectivity (Crawler)
+### 7.1 Verify Provider Connectivity
 
 ```bash
 set -a; source .env; set +a
 
 curl -s -o /dev/null -w "%{http_code}" \
-  "${DIFY_BASE_URL}/datasets" \
-  -H "Authorization: Bearer ${DIFY_API_KEY}"
+  "${OPENAI_BASE_URL:-https://api.openai.com}/v1/models" \
+  -H "Authorization: Bearer ${OPENAI_API_KEY}"
 ```
 
 **Expected**: `200`
@@ -266,7 +281,7 @@ curl -s -o /dev/null -w "%{http_code}" \
 Run the crawler and check the JSON output:
 
 ```bash
-python -m estimator_king --config stores_config.yaml 2>crawler.log | python -m json.tool
+.venv/bin/python -m estimator_king --config stores_config.yaml 2>crawler.log | python -m json.tool
 ```
 
 Verify:
@@ -289,16 +304,30 @@ curl -s -o /dev/null -w "%{http_code}" \
 ### 7.4 Unit Tests
 
 ```bash
-python -m pytest -q --tb=short
+.venv/bin/python -m pytest -q --tb=short
 ```
-
-**Expected**: 237 passed, 5 failed (5 pre-existing CLI test failures).
 
 ---
 
-## 8. Troubleshooting
+## 8. Re-index Procedure
 
-### Crawler: `--dify-api-key or DIFY_API_KEY environment variable required`
+Vectors from different embedding models or dimension settings are incompatible with each other.
+If you change `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS`, you must delete the ChromaDB directory
+and re-crawl all products from scratch:
+
+```bash
+rm -rf chroma/
+.venv/bin/python -m estimator_king --force-refetch
+```
+
+This will re-fetch every product and rebuild the vector index. Depending on the number of stores
+and products, this may take a while and consume embedding API quota.
+
+---
+
+## 9. Troubleshooting
+
+### Crawler: `OPENAI_API_KEY environment variable required`
 
 Environment variables are not loaded. Ensure you ran:
 
@@ -306,7 +335,7 @@ Environment variables are not loaded. Ensure you ran:
 set -a; source .env; set +a
 ```
 
-Verify with: `echo $DIFY_API_KEY`
+Verify with: `echo $OPENAI_API_KEY`
 
 ### Crawler: `Failed to enumerate sitemap for <store_id>`
 
@@ -322,10 +351,6 @@ This is normal when no products have changed since the last crawl. The crawler u
 
 The `DISCORD_BOT_TOKEN` environment variable is not set. Load `.env` before starting the bot.
 
-### Bot: `Missing DIFY_WORKFLOW_API_KEY`
-
-The bot reads `DIFY_WORKFLOW_API_KEY` from the environment at command invocation time. Ensure it's set in `.env` and loaded.
-
 ### Bot: Commands Not Appearing in Discord
 
 - **With `--guild-id`**: Commands sync instantly but only in that guild. Verify the guild ID is correct.
@@ -340,15 +365,20 @@ Another crawler instance may be running. Only one crawler process should access 
 ps aux | grep estimator_king
 ```
 
+### ChromaDB: `dimension mismatch` or `collection already exists with different metadata`
+
+The existing ChromaDB collection was created with a different embedding model or dimensions. Run the re-index procedure (Section 8).
+
 ---
 
-## 9. Comparison: Local vs Kubernetes
+## 10. Comparison: Local vs Kubernetes
 
 | Aspect | Local (this runbook) | Kubernetes ([ops-runbook.md](ops-runbook.md)) |
-|--------|---------------------|-----------------------------------------------|
+| ------ | -------------------- | --------------------------------------------- |
 | Secrets | `.env` file (gitignored) | K8s Secret (`estimator-king-secrets`) |
 | Config | `stores_config.yaml` in project root | ConfigMap (`estimator-king-stores-config`) |
-| Scheduling | Manual / cron | CronJob (weekly) |
+| Scheduling | Manual / cron | CronJob (daily) |
 | Bot lifecycle | Manual start/stop | Deployment with auto-restart |
 | Database | Local file (`./estimator_king.db`) | PVC (`estimator-king-state-pvc`) |
+| Vector store | Local dir (`./chroma`) | PVC (`estimator-king-state-pvc`) |
 | Logs | Terminal stdout/stderr | `kubectl logs` |

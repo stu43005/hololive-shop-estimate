@@ -12,7 +12,7 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
 import aiohttp

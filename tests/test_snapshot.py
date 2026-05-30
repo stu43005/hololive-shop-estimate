@@ -1,6 +1,5 @@
 """Tests for product snapshot canonicalization and hashing."""
 
-import pytest
 from estimator_king.crawler.snapshot import (
     ProductSnapshot,
     ProductVariant,

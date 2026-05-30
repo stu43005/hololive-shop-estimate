@@ -2,7 +2,7 @@
 
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -271,7 +271,7 @@ class TestSitemapEnumeratorIntegration:
         mock_client.get.side_effect = get_side_effect
 
         enumerator = SitemapEnumerator(http_client=mock_client)
-        urls = enumerator.enumerate_products("https://shop.example.com")
+        enumerator.enumerate_products("https://shop.example.com")
 
         assert any("products" in url for url in call_urls)
         assert not any("pages_1" in url for url in call_urls)

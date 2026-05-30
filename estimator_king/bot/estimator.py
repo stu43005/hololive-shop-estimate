@@ -1,5 +1,5 @@
 """Price estimation pipeline: retrieve references from the vector store and ask
-the chat model for structured estimates (replaces the Dify workflow)."""
+the chat model for structured estimates (replaces the previous external workflow)."""
 
 import logging
 from collections.abc import Sequence
