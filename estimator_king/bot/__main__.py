@@ -16,6 +16,10 @@ import discord
 from estimator_king.config_schema import load_config
 from estimator_king.bot.commands import setup_commands
 
+# Strong references to background tasks: asyncio only keeps a weak reference, so
+# an unreferenced create_task() result can be garbage-collected mid-run.
+_background_tasks: set["asyncio.Task[None]"] = set()
+
 
 def parse_args(args: Optional[list[str]] = None) -> argparse.Namespace:
     """Parse command-line arguments for bot configuration.
@@ -142,7 +146,9 @@ async def main(args: argparse.Namespace) -> None:
     tree = setup_commands(bot, config, estimator)
 
     scheduler = CrawlScheduler(config, config.database_path, embedder, vector_store)
-    asyncio.create_task(scheduler.run_forever())
+    scheduler_task = asyncio.create_task(scheduler.run_forever())
+    _background_tasks.add(scheduler_task)
+    scheduler_task.add_done_callback(_background_tasks.discard)
 
     # on_ready event: sync commands after bot connects
     @bot.event
