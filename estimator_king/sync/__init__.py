@@ -1,1 +1,1 @@
-"""Data synchronization module for Dify integration."""
+"""Product → vector-store synchronization."""
