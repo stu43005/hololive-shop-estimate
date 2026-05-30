@@ -2,6 +2,7 @@
 the chat model for structured estimates (replaces the previous external workflow)."""
 
 import logging
+import time
 from collections.abc import Sequence
 from typing import Any, Protocol
 
@@ -51,11 +52,21 @@ class Estimator:
         if not product_names:
             return EstimateBatch(estimates=[])
         logger.info("estimate request from %s for %d products", user_id, len(product_names))
+        start = time.monotonic()
+        total_chunks = (len(product_names) + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE
         all_estimates = []
-        for start in range(0, len(product_names), self.CHUNK_SIZE):
-            chunk = product_names[start : start + self.CHUNK_SIZE]
+        for start_idx in range(0, len(product_names), self.CHUNK_SIZE):
+            chunk = product_names[start_idx : start_idx + self.CHUNK_SIZE]
+            logger.debug(
+                "chunk %d/%d: %d products",
+                start_idx // self.CHUNK_SIZE + 1, total_chunks, len(chunk),
+            )
             batch = self._estimate_chunk(chunk)
             all_estimates.extend(batch.estimates)
+        logger.info(
+            "estimate done for %s: %d estimates in %.1fs",
+            user_id, len(all_estimates), time.monotonic() - start,
+        )
         return EstimateBatch(estimates=all_estimates)
 
     def _estimate_chunk(self, chunk: list[str]) -> EstimateBatch:
