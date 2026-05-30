@@ -18,6 +18,7 @@ class Store:
     id: str
     base_url: str
     sitemap_url: str
+    locale: str = "default"
 
     def validate(self):
         """Validate store configuration."""
@@ -27,6 +28,8 @@ class Store:
             raise ValueError(f"Store '{self.id}' must have a valid 'base_url'")
         if not self.sitemap_url or not isinstance(self.sitemap_url, str):
             raise ValueError(f"Store '{self.id}' must have a valid 'sitemap_url'")
+        if not self.locale or not isinstance(self.locale, str):
+            raise ValueError(f"Store '{self.id}' must have a valid 'locale'")
 
 
 @dataclass
@@ -222,6 +225,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             id=s["id"],
             base_url=s["base_url"],
             sitemap_url=s["sitemap_url"],
+            locale=s.get("locale", "default"),
         )
         for s in stores_data
     ]

@@ -5,10 +5,14 @@ stores:
   - id: hololive
     base_url: https://shop.hololivepro.com
     sitemap_url: https://shop.hololivepro.com/sitemap.xml
-    
+    # 只抓預設語系（無語系前綴）；排除 /en/ 等所有語系版本
+    locale: default
+
   - id: vspo
     base_url: https://store.vspo.jp
     sitemap_url: https://store.vspo.jp/sitemap.xml
+    # 只抓預設日文（無語系前綴）；排除 /en/、/en-al/、/ja-al/ 等所有語系版本
+    locale: default
 
 crawler:
   # Rate limiting (requests per second)

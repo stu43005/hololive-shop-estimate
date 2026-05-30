@@ -87,6 +87,50 @@ class TestStore:
         with pytest.raises(ValueError, match="must have a valid 'sitemap_url'"):
             store.validate()
 
+    def test_store_locale_defaults_to_default(self):
+        store = Store(
+            id="hololive",
+            base_url="https://shop.hololivepro.com",
+            sitemap_url="https://shop.hololivepro.com/sitemap.xml",
+        )
+        assert store.locale == "default"
+
+    def test_store_validation_invalid_locale(self):
+        store = Store(
+            id="test",
+            base_url="https://example.com",
+            sitemap_url="https://example.com/sitemap.xml",
+            locale="",
+        )
+        with pytest.raises(ValueError, match="must have a valid 'locale'"):
+            store.validate()
+
+
+def test_store_locale_default_matches_default_locale_constant():
+    from estimator_king.crawler.sitemap import DEFAULT_LOCALE
+
+    store = Store(id="x", base_url="https://x", sitemap_url="https://x/s.xml")
+    assert store.locale == DEFAULT_LOCALE
+
+
+@patch.dict(os.environ, {"OPENAI_API_KEY": "sk-x"}, clear=False)
+def test_load_config_reads_store_locale(tmp_path):
+    path = tmp_path / "stores.yaml"
+    path.write_text(
+        "stores:\n"
+        "  - id: vspo\n"
+        "    base_url: https://store.vspo.jp\n"
+        "    sitemap_url: https://store.vspo.jp/sitemap.xml\n"
+        "    locale: default\n"
+        "  - id: other\n"
+        "    base_url: https://x\n"
+        "    sitemap_url: https://x/sitemap.xml\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(str(path))
+    assert cfg.stores[0].locale == "default"   # explicit
+    assert cfg.stores[1].locale == "default"   # omitted → default
+
 
 class TestCrawlerPolicy:
     """Test CrawlerPolicy configuration."""
