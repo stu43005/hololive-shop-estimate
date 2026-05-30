@@ -15,6 +15,8 @@ from estimator_king.crawler.snapshot import (
 )
 from estimator_king.database.repository import ProductState, ProductStateRepository
 
+logger = logging.getLogger(__name__)
+
 
 class _Embedder(Protocol):
     def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
@@ -114,7 +116,7 @@ def sync_products(
                 else:
                     result.updated += 1
         except Exception:  # embedding/vector failure: fire-and-forget
-            logging.exception("Sync failed for %s", external_key)
+            logger.exception("Sync failed for %s", external_key)
             result.failed += 1
             result.failed_ids.append(external_key)
             # last_indexed_at stays at the previous value (not advanced)
