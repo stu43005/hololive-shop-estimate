@@ -51,27 +51,30 @@ class MissingEmbeddingKey(Exception):
 
 ```python
 from dataclasses import dataclass
+from typing import Optional
 
 @dataclass
 class Providers:
     embedder: EmbeddingProvider
-    chat: ChatProvider
     vector_store: VectorStore
+    chat: Optional[ChatProvider] = None   # 只有 with_chat=True 時建立
 
 
-def build_providers(config: AppConfig) -> Providers:
+def build_providers(config: AppConfig, *, with_chat: bool = False) -> Providers:
     provider_config = config.build_provider_config()
     if not provider_config.embedding_api_key:
         raise MissingEmbeddingKey()
     embedder = EmbeddingProvider(provider_config)
-    chat = ChatProvider(provider_config)
     vector_store = VectorStore(config.chroma_path)
-    return Providers(embedder=embedder, chat=chat, vector_store=vector_store)
+    chat = ChatProvider(provider_config) if with_chat else None
+    return Providers(embedder=embedder, vector_store=vector_store, chat=chat)
 ```
 
-- **三個 provider 一起建**（使用者裁定：都是 provider，crawl 沒用到 chat 也無妨）。
-- `ChatProvider(provider_config)` 對 crawl 安全：其建構只做 `OpenAI(api_key=config.chat_api_key, ...)`，而 `build_provider_config` 讓 `chat_api_key` 至少 fallback 到 `openai_api_key or ""`，空字串不會讓 OpenAI client 建構失敗（不發出網路請求、不驗證 key）。
+- **chat 仍由 `build_providers` 統一負責（唯一一處建 provider，DRY）**，但採 `with_chat` 旗標**條件式建立**：`crawl` 不需要 chat → `with_chat=False`（預設）→ 不建；`run` → `with_chat=True` → 建。
+- **為何條件式而非無條件建**（關鍵正確性，已實測 `openai==2.38.0`）：`ChatProvider(provider_config)` 建構會執行 `OpenAI(api_key=config.chat_api_key, ...)`，而 openai 2.38.0 在 `api_key` 為空字串時 **raise `OpenAIError("Missing credentials...")`**。`build_provider_config` 的 `chat_api_key = chat_api_key or openai_api_key or ""`：當操作者只設 `EMBEDDING_API_KEY`（未設 `OPENAI_API_KEY` / `CHAT_API_KEY`）時，embedding key 非空（通過驗證）但 `chat_api_key=""`。若無條件建 chat，`crawl` 會被此 `OpenAIError` 打斷而 exit 1（回歸——現況 crawl 根本不建 chat）。故 crawl 一律 `with_chat=False`，從根本避免建構 chat。
 - embedding key 驗證只在此一處；**不在此 `sys.exit`**，改 raise `MissingEmbeddingKey`，由呼叫端決定退出碼。
+
+> `runtime.py` 頂層 import 清單（消除 implementer 推測空間）：`import asyncio`、`import os`、`import signal`、`from dataclasses import dataclass`、`from typing import Callable, Optional`、`import discord`、`from estimator_king.config_schema import AppConfig`、`from estimator_king.llm.embeddings import EmbeddingProvider`、`from estimator_king.llm.chat import ChatProvider`、`from estimator_king.vectorstore.store import VectorStore`、`from estimator_king.crawler.scheduler import CrawlScheduler`、`from estimator_king.bot.runner import build_bot`。（`logging` 視需要。）
 
 ### 4.3 元件生命週期協調（從 bot/runner 上移）
 
@@ -81,7 +84,8 @@ def build_providers(config: AppConfig) -> Providers:
 
 ```python
 async def serve(config: AppConfig, *, guild_id: Optional[int]) -> None:
-    providers = build_providers(config)   # 可能 raise MissingEmbeddingKey
+    providers = build_providers(config, with_chat=True)   # 可能 raise MissingEmbeddingKey
+    assert providers.chat is not None   # with_chat=True 保證已建立（型別收窄）
 
     # crawl 元件（注入共用 vector_store）
     scheduler = CrawlScheduler(
@@ -171,7 +175,7 @@ def run_crawl(args) -> None:
     if args.db is not None:
         config.database_path = args.db
     try:
-        providers = build_providers(config)
+        providers = build_providers(config)   # with_chat 預設 False → 不建 chat
     except MissingEmbeddingKey:
         logger.error("OPENAI_API_KEY (or EMBEDDING_API_KEY) is required")
         sys.exit(2)
@@ -186,7 +190,7 @@ def run_crawl(args) -> None:
     sys.exit(0)
 ```
 
-- 只用 `providers.embedder` 與 `providers.vector_store`（`providers.chat` 建了但不使用，符合使用者裁定）。
+- 只用 `providers.embedder` 與 `providers.vector_store`；`providers.chat` 為 `None`（crawl 不需 chat、也避免缺 chat key 時建構失敗）。
 - exit code 維持現況：config 載入失敗 → 1；缺 embedding key → 2；cycle 例外 → 1；成功 → 0。
 
 ### 7.2 `run` 指令處理器改名並改走組合根
@@ -206,7 +210,7 @@ def run_service(args) -> None:
         sys.stderr.write("Error: --token required or set DISCORD_BOT_TOKEN / DISCORD_TOKEN\n")
         sys.exit(1)
     try:
-        asyncio.run(runtime.serve(config, guild_id=args.guild_id))
+        asyncio.run(serve(config, guild_id=args.guild_id))
     except MissingEmbeddingKey:
         sys.stderr.write("Error: OPENAI_API_KEY (or EMBEDDING_API_KEY) is required\n")
         sys.exit(1)
@@ -215,23 +219,32 @@ def run_service(args) -> None:
 ```
 
 - embedding key 缺失：`build_providers` 在 `serve` 內 raise，傳播出 `asyncio.run` → 此處 catch → exit 1（維持 run 現況）。
-- `_main()` 的分派改為 `args.command == "run"` → `run_service(args)`。
+- `_main()` 的分派改為 `args.command == "run"` → `run_service(args)`；`__main__` 不再有 `run_bot` 符號。
 
 ### 7.3 import 調整
 
-`__main__.py` 頂層改 import `from estimator_king import runtime`（取得 `runtime.serve`、`runtime.build_providers`、`runtime.MissingEmbeddingKey`）。`build_providers` / `MissingEmbeddingKey` 以 `runtime.X` 或具名 import 使用（測試 patch 點需一致，見 §8）。不再直接 import `EmbeddingProvider` / `VectorStore`（移入 runtime），但 `run_crawl_cycle`、`AppConfig`、`asyncio`、`json` 維持頂層 import。
+`__main__.py` 頂層**採具名 import**（唯一形式，使 mock patch 目標確定）：
+
+```python
+from estimator_king.runtime import serve, build_providers, MissingEmbeddingKey
+```
+
+因此測試一律 patch `estimator_king.__main__.serve` / `estimator_king.__main__.build_providers`（名稱被查找的位置在 `__main__`，與既有 `test_main_async.py` patch `estimator_king.__main__.EmbeddingProvider` 的風格一致）。`__main__.py` **不再** import `EmbeddingProvider` / `VectorStore`（移入 runtime），也不再 import `bot.runner`；`run_crawl_cycle`、`AppConfig`、`asyncio`、`json`、`logging` 維持頂層 import。
 
 ## 8. 測試
 
-- **新增 `tests/test_runtime.py`**：
-  - `build_providers` 回傳含 embedder / chat / vector_store 的 `Providers`；`VectorStore` / `EmbeddingProvider` / `ChatProvider` 各建構一次（patch 三者，斷言呼叫）。
-  - `build_providers` 在 `embedding_api_key` 為空時 raise `MissingEmbeddingKey`（不 sys.exit）。
-  - `serve` 把**同一個** `vector_store` 同時注入 `CrawlScheduler` 與 `build_bot`（patch `CrawlScheduler` 與 `build_bot`，斷言兩者收到的 vector_store 是同一物件；patch `build_providers` 回傳含 sentinel vector_store 的 Providers）。
-- **`tests/test_scheduler.py`**：import 由 `estimator_king.bot.scheduler` 改為 `estimator_king.crawler.scheduler`（行為測試不變）。
+- **新增 `tests/test_runtime.py`**（patch 目標皆為 `estimator_king.runtime.X`）：
+  - `build_providers(config)`（預設 `with_chat=False`）：回傳 `Providers`，`embedder` / `vector_store` 各建構一次，**`chat` 為 `None` 且 `ChatProvider` 完全不被建構**（patch `estimator_king.runtime.ChatProvider`，斷言 `assert_not_called()`）。
+  - `build_providers(config, with_chat=True)`：`ChatProvider` 建構一次、`Providers.chat` 非 None。
+  - `build_providers` 在 `embedding_api_key` 為空時 raise `MissingEmbeddingKey`（不 sys.exit；以 `pytest.raises` 斷言）。
+  - `serve` 把**同一個** `vector_store` 同時注入 `CrawlScheduler` 與 `build_bot`：patch `estimator_king.runtime.build_providers` 回傳含 sentinel `vector_store` 的 `Providers`（chat 為 sentinel）、patch `estimator_king.runtime.CrawlScheduler` 與 `estimator_king.runtime.build_bot`（後者回傳 `fake_bot`，其 `start` 為 `AsyncMock` 以便 `await bot.start(...)` 即時返回）、patch `estimator_king.runtime.asyncio.create_task` 與 `estimator_king.runtime.asyncio.get_running_loop`（避免真正建立背景 task / 註冊 signal）；以 `asyncio.run(serve(config_mock, guild_id=None))` 執行，斷言 `CrawlScheduler` 收到的位置參數 `vector_store`（第 4 個）與 `build_bot` 收到的 `vector_store=` 是**同一物件**（即 `providers.vector_store`）。`config_mock.discord_token` 設為非 None 以通過 `assert`。
+- **`tests/test_scheduler.py`**：import 由 `estimator_king.bot.scheduler` 改為 `estimator_king.crawler.scheduler`；4 處 patch `estimator_king.bot.scheduler.run_crawl_cycle` → `estimator_king.crawler.scheduler.run_crawl_cycle`（行為測試不變）。
+- **`tests/test_runner_shutdown.py`**：`_Shutdowner` / `_background_tasks` / `_force_exit` 已從 `bot/runner.py` 移到 `runtime.py`，故 import 由 `from estimator_king.bot import runner` 改為 `from estimator_king import runtime`，`runner._Shutdowner` / `runner._background_tasks` → `runtime._Shutdowner` / `runtime._background_tasks`（含 `force_exit=` 注入測試，行為斷言不變）。
 - **`tests/test_cli.py`**：
-  - `run` 路由測試：patch 點由 `estimator_king.__main__.bot_runner.run_bot` 改為 `estimator_king.__main__.runtime.serve`；驗證 `run_service` 套用 `--token` 覆寫、缺 token → exit 1、正確呼叫 `asyncio.run(runtime.serve(config, guild_id=...))`。
-  - crawl 測試：patch 點由 `estimator_king.__main__.{EmbeddingProvider,VectorStore}` 改為 patch `estimator_king.__main__.build_providers`（或 `runtime.build_providers`，與實際 import 形式一致），回傳含 mock embedder/vector_store 的 `Providers`；缺 key 改為 `build_providers` raise `MissingEmbeddingKey` → 斷言 exit 2。
-- **`tests/test_main_async.py`**：`run_crawl` 測試同步改為 patch `build_providers`（取代原本 patch `EmbeddingProvider`/`VectorStore`），維持 `run_crawl_cycle` 呼叫參數與 exit code 斷言；保留以 `new_callable=MagicMock` patch `run_crawl_cycle` 避免 unawaited coroutine 警告。
+  - 頂層 import 由 `from estimator_king.__main__ import parse_args, run_bot, run_crawl` 改為 `... parse_args, run_service, run_crawl`。
+  - `run` 路由測試：函式 `test_run_bot_*` 改測 `run_service`；patch 點由 `estimator_king.__main__.bot_runner.run_bot` 改為 `estimator_king.__main__.serve`（`new_callable=MagicMock`，避免 async coroutine 警告）；驗證 `--token` 覆寫、缺 token → exit 1、`mock_serve.assert_called_once_with(mock_cfg, guild_id=123)` 且 `mock_asyncio_run.assert_called_once_with(mock_serve.return_value)`。
+  - crawl 測試：patch 點由 `estimator_king.__main__.{EmbeddingProvider,VectorStore}` 改為 patch `estimator_king.__main__.build_providers`，回傳 `Providers(embedder=mock, vector_store=mock, chat=None)`；缺 key 改為 `build_providers` `side_effect=MissingEmbeddingKey()` → 斷言 exit 2。
+- **`tests/test_main_async.py`**：`run_crawl` 測試由 patch `estimator_king.__main__.{EmbeddingProvider,VectorStore}` 改為 patch `estimator_king.__main__.build_providers`（回傳 `Providers(embedder=mock, vector_store=mock, chat=None)`）；維持 `run_crawl_cycle` 呼叫參數（`args[0]=config, args[1]=db_path, args[2]=embedder, args[3]=vector_store`）與 exit code 斷言；保留以 `new_callable=MagicMock` patch `run_crawl_cycle`。`test_run_crawl_no_dify_client_constructed` 並斷言 `not hasattr(m, "run_bot")`（守護改名）。
 - 既有 bot 指令/estimator 測試（test_bot_commands、test_estimator）不受影響（Estimator 仍由 `build_bot` 建）。
 
 ## 9. 驗收條件
@@ -242,7 +255,9 @@ def run_service(args) -> None:
 4. `runtime.serve` 把同一個 `VectorStore` 實例同時供給 bot（Estimator）與 scheduler（驗證單一 ChromaDB）。
 5. 外部行為不變：`run` 啟動 bot + 程序內排程（含 on_ready sync、兩段式 graceful shutdown）；`crawl` 一次性爬取，stdout 純 JSON，exit code 0/1/2 一致；`run` 缺 token/缺 key 各 exit 1。
 6. `python -m estimator_king`（無子命令）、`run`/`crawl` 子命令、`estimator_king.bot` 不可用等既有行為不變。
-7. `basedpyright estimator_king/` 0 errors；`pytest -q` 全綠（含新增 test_runtime、改寫的 test_cli/test_main_async/test_scheduler）。
+7. `_main()` dispatch：`run` → `run_service`、`crawl` → `run_crawl`；`estimator_king.__main__` 不再有 `run_bot` 符號（由 `test_run_crawl_no_dify_client_constructed` 的 `not hasattr(m, "run_bot")` 守護）。
+8. `build_providers(config)`（預設）不建構 `ChatProvider`；`providers.chat` 為 `None`；只有 `with_chat=True`（`serve`）才建 chat。
+9. `basedpyright estimator_king/` 0 errors；`pytest -q` 全綠（含新增 test_runtime、改寫的 test_cli/test_main_async/test_scheduler/test_runner_shutdown）。
 
 ## 10. 不在範圍
 
