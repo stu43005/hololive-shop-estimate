@@ -119,13 +119,13 @@ Variables load automatically when you `cd` into the project directory.
 set -a; source .env; set +a
 
 # Run crawler with default config
-.venv/bin/python -m estimator_king --config stores_config.yaml
+.venv/bin/python -m estimator_king crawl --config stores_config.yaml
 ```
 
 ### 4.2 CLI Options
 
 ```
-python -m estimator_king [OPTIONS]
+python -m estimator_king crawl [OPTIONS]
 
 Options:
   --config PATH         Stores config YAML (default: stores_config.yaml)
@@ -142,12 +142,12 @@ The crawler respects a per-store `max_products_per_run` limit defined in `stores
 To trigger a full one-cycle backfill (re-fetch all products, regardless of the daily budget):
 
 ```bash
-.venv/bin/python -m estimator_king --force-refetch
+.venv/bin/python -m estimator_king crawl --force-refetch
 ```
 
 ### 4.4 Output
 
-- **Logs**: Printed to `stderr` (structured format: `timestamp - LEVEL - message`)
+- **Logs**: Printed to `stderr` (structured format: `timestamp [LEVEL] message`)
 - **Result JSON**: Printed to `stdout` on completion
 
 Example output (stdout):
@@ -167,7 +167,7 @@ Example output (stdout):
 To capture the JSON result while still seeing logs:
 
 ```bash
-.venv/bin/python -m estimator_king --config stores_config.yaml > result.json
+.venv/bin/python -m estimator_king crawl --config stores_config.yaml > result.json
 ```
 
 ### 4.5 Database and Vector Store Location
@@ -195,13 +195,13 @@ sqlite3 estimator_king.db "SELECT COUNT(*) FROM product_state;"
 set -a; source .env; set +a
 
 # Run bot
-.venv/bin/python -m estimator_king.bot
+.venv/bin/python -m estimator_king run
 ```
 
 ### 5.2 CLI Options
 
 ```
-python -m estimator_king.bot [OPTIONS]
+python -m estimator_king run [OPTIONS]
 
 Options:
   --token TOKEN      Discord bot token (env: DISCORD_BOT_TOKEN, required)
@@ -212,8 +212,8 @@ Options:
 
 | Mode | Command | Propagation |
 | ---- | ------- | ----------- |
-| Development | `python -m estimator_king.bot --guild-id 123456789` | Instant (guild-specific) |
-| Production | `python -m estimator_king.bot` | Up to 1 hour (global) |
+| Development | `python -m estimator_king run --guild-id 123456789` | Instant (guild-specific) |
+| Production | `python -m estimator_king run` | Up to 1 hour (global) |
 
 Use `--guild-id` during development for instant slash command updates. Omit it in production for global availability.
 
@@ -239,7 +239,7 @@ Press `Ctrl+C` in the terminal. The bot handles `SIGINT` gracefully.
 set -euo pipefail
 set -a; source "$(dirname "$0")/.env"; set +a
 
-.venv/bin/python -m estimator_king --config stores_config.yaml "$@"
+.venv/bin/python -m estimator_king crawl --config stores_config.yaml "$@"
 ```
 
 ### `run-bot.sh`
@@ -249,7 +249,7 @@ set -a; source "$(dirname "$0")/.env"; set +a
 set -euo pipefail
 set -a; source "$(dirname "$0")/.env"; set +a
 
-.venv/bin/python -m estimator_king.bot "$@"
+.venv/bin/python -m estimator_king run "$@"
 ```
 
 Make them executable:
@@ -281,7 +281,7 @@ curl -s -o /dev/null -w "%{http_code}" \
 Run the crawler and check the JSON output:
 
 ```bash
-.venv/bin/python -m estimator_king --config stores_config.yaml 2>crawler.log | python -m json.tool
+.venv/bin/python -m estimator_king crawl --config stores_config.yaml 2>crawler.log | python -m json.tool
 ```
 
 Verify:
@@ -317,7 +317,7 @@ and re-crawl all products from scratch:
 
 ```bash
 rm -rf chroma/
-.venv/bin/python -m estimator_king --force-refetch
+.venv/bin/python -m estimator_king crawl --force-refetch
 ```
 
 This will re-fetch every product and rebuild the vector index. Depending on the number of stores

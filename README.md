@@ -77,7 +77,7 @@ CHAT_STRUCTURED_OUTPUT=false
 >
 > ```bash
 > rm -rf chroma/
-> python -m estimator_king --force-refetch
+> python -m estimator_king crawl --force-refetch
 > ```
 
 ## Daily Crawl Budget
