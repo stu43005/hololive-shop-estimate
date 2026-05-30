@@ -27,7 +27,7 @@
 This is one atomic signature refactor across `engine.py`, `async_pipeline.py`, and `cycle.py` (splitting would break compilation). It includes all affected test updates and the integration regression that proves the fix.
 
 **Files:**
-- Modify: `estimator_king/sync/engine.py` (signature lines 77-89, loop body)
+- Modify: `estimator_king/sync/engine.py` (signature + loop preamble lines 77-90, loop body)
 - Modify: `estimator_king/crawler/async_pipeline.py` (signature lines 43-52, call lines 72-75)
 - Modify: `estimator_king/crawler/cycle.py` (call lines 56-59)
 - Test: `tests/test_sync_engine.py`, `tests/test_sync_engine_logging.py`, `tests/test_async_pipeline.py`, `tests/test_async_pipeline_logging.py`, `tests/test_integration_async_pipeline.py`
