@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import time
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ from tenacity import (
 
 from .. import __version__
 from ..config_schema import CrawlerPolicy
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncHTTPClientError(Exception):
@@ -282,8 +285,13 @@ class AsyncHTTPClient:
                 sock_read=float(self._policy.timeout_read),
             )
             session = await self._get_session()
+            start = time.monotonic()
             async with session.request("GET", url, timeout=timeout) as resp:
                 status = int(getattr(resp, "status", 0) or 0)
+                logger.debug(
+                    "GET %s -> %s in %.0fms",
+                    url, status, (time.monotonic() - start) * 1000.0,
+                )
                 if status in (403, 430):
                     await self._circuit_breaker.record_waf_failure(domain)
                     raise WAFBlockedError(url, status_code=status)
