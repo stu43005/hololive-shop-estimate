@@ -5,6 +5,7 @@ import pytest
 
 from estimator_king.config_schema import CrawlerPolicy, ProxyConfig
 from estimator_king.crawler.async_pipeline import async_process_queue
+from estimator_king.crawler.async_http_client import ClientError
 from estimator_king.crawler.shopify import ShopifyHTTPError
 from estimator_king.crawler.snapshot import ProductSnapshot, ProductVariant
 from estimator_king.database.repository import ProductStateRepository
@@ -95,3 +96,51 @@ def test_proxy_forwarded_to_async_http_client(repo):
             FakeEmbedder(), FakeVectorStore(), proxy=proxy_cfg))
 
     assert captured["proxy"] is proxy_cfg
+
+
+def test_client_error_404_deletes_queue_entry_for_new_product(repo):
+    repo.enqueue_url("hololive", "https://x/products/gone")
+
+    def boom(url, client):
+        raise ClientError(url, status_code=404)
+
+    with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=boom):
+        result = asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
+                                                 FakeEmbedder(), FakeVectorStore()))
+
+    assert result.failed == 1
+    assert repo.peek_all("hololive") == []  # definitively gone: dropped, not retried
+
+
+def test_client_error_410_deletes_queue_and_increments_when_row_exists(repo):
+    # First, a successful run creates the product row.
+    repo.enqueue_url("hololive", "https://x/products/1")
+    with patch("estimator_king.crawler.async_pipeline.fetch_product", return_value=_snap(1)):
+        asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
+                                        FakeEmbedder(), FakeVectorStore()))
+    repo.enqueue_url("hololive", "https://x/products/1")  # re-queue for the failing run
+
+    def boom(url, client):
+        raise ClientError(url, status_code=410)
+
+    with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=boom):
+        result = asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
+                                                 FakeEmbedder(), FakeVectorStore()))
+
+    assert result.failed == 1
+    assert repo.peek_all("hololive") == []  # dropped
+    assert repo.get_by_external_key("hololive:1").consecutive_failures == 1
+
+
+def test_client_error_400_keeps_queue_entry(repo):
+    repo.enqueue_url("hololive", "https://x/products/1")
+
+    def boom(url, client):
+        raise ClientError(url, status_code=400)
+
+    with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=boom):
+        result = asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
+                                                 FakeEmbedder(), FakeVectorStore()))
+
+    assert result.failed == 1
+    assert repo.peek_all("hololive") != []  # only 404/410 are definitive; 400 is retried

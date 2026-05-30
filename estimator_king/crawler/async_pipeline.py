@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, cast
 
-from estimator_king.crawler.async_http_client import AsyncHTTPClient
+from estimator_king.crawler.async_http_client import AsyncHTTPClient, ClientError
 from estimator_king.crawler.shopify import fetch_product
 from estimator_king.sync.engine import sync_products
 
@@ -83,14 +83,17 @@ async def async_process_queue(
                             "store=%s progress: %d/%d processed",
                             store_id, result.processed, len(entries),
                         )
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error processing %s (url=%s)", entry_id, product_url)
                 existing = state_repo.get_by_product_url(store_id, product_url)
                 if existing is not None:
                     state_repo.increment_consecutive_failures(existing.external_key)
+                if isinstance(exc, ClientError) and exc.status_code in (404, 410):
+                    # Definitively gone (HTTP 404/410): drop from queue so it is
+                    # not re-fetched every cycle. Transient errors keep retrying.
+                    state_repo.delete_queue_entry(entry_id)
                 async with lock:
                     result.failed += 1
-                # queue entry intentionally kept for retry
 
         sem = asyncio.Semaphore(policy.concurrency_per_domain)
 
