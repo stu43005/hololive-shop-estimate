@@ -6,9 +6,7 @@ from discord.ui import Modal, TextInput
 
 from estimator_king.config_schema import AppConfig
 from estimator_king.bot.estimator import Estimator
-from estimator_king.llm.chat import EstimateBatch, EstimationError, ChatProvider
-from estimator_king.llm.embeddings import EmbeddingProvider
-from estimator_king.vectorstore.store import VectorStore
+from estimator_king.llm.chat import EstimateBatch, EstimationError
 
 # Constants for input validation
 MAX_PRODUCTS = 10
@@ -128,9 +126,9 @@ class ProductInputModal(Modal, title="Enter Product Names"):
         placeholder="Example:\nHololive T-Shirt\nFigure Set\nLimited Edition Merch",
     )
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, estimator: Estimator) -> None:
         super().__init__()
-        self._config = config
+        self._estimator = estimator
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         """Handle modal submission with validation and processing.
@@ -161,12 +159,8 @@ class ProductInputModal(Modal, title="Enter Product Names"):
         await interaction.response.defer(thinking=True)
 
         try:
-            embedder = EmbeddingProvider(self._config.build_provider_config())
-            chat = ChatProvider(self._config.build_provider_config())
-            store = VectorStore(self._config.chroma_path)
-            estimator = Estimator(embedder, chat, store)
             user_id = f"discord-{interaction.user.id}"
-            batch = estimator.estimate_products(product_list, user_id)
+            batch = self._estimator.estimate_products(product_list, user_id)
             for embed in format_estimates(batch):
                 await interaction.followup.send(embed=embed)
         except EstimationError as e:
@@ -175,7 +169,7 @@ class ProductInputModal(Modal, title="Enter Product Names"):
             await interaction.followup.send(f"❌ Unexpected error: {e}")
 
 
-def setup_commands(bot: discord.Client, config: AppConfig) -> app_commands.CommandTree:
+def setup_commands(bot: discord.Client, config: AppConfig, estimator: Estimator) -> app_commands.CommandTree:
     """Register slash commands with the bot.
 
     Creates and registers the /estimate command for collecting product names
@@ -201,6 +195,6 @@ def setup_commands(bot: discord.Client, config: AppConfig) -> app_commands.Comma
         Args:
             interaction: Discord interaction object from slash command invocation
         """
-        await interaction.response.send_modal(ProductInputModal(config))
+        await interaction.response.send_modal(ProductInputModal(estimator))
 
     return tree

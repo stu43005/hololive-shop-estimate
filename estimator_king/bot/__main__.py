@@ -122,9 +122,27 @@ async def main(args: argparse.Namespace) -> None:
         sys.stderr.write("Error: --token required or set DISCORD_BOT_TOKEN / DISCORD_TOKEN\n")
         sys.exit(1)
 
-    # Create bot and register commands (pass config for workflow API access)
+    from estimator_king.llm.embeddings import EmbeddingProvider
+    from estimator_king.llm.chat import ChatProvider
+    from estimator_king.vectorstore.store import VectorStore
+    from estimator_king.bot.estimator import Estimator
+    from estimator_king.bot.scheduler import CrawlScheduler
+
+    provider_config = config.build_provider_config()
+    if not provider_config.embedding_api_key:
+        sys.stderr.write("Error: OPENAI_API_KEY (or EMBEDDING_API_KEY) is required\n")
+        sys.exit(1)
+
+    embedder = EmbeddingProvider(provider_config)
+    chat = ChatProvider(provider_config)
+    vector_store = VectorStore(config.chroma_path)
+    estimator = Estimator(embedder, chat, vector_store)
+
     bot = create_bot()
-    tree = setup_commands(bot, config)
+    tree = setup_commands(bot, config, estimator)
+
+    scheduler = CrawlScheduler(config, config.database_path, embedder, vector_store)
+    asyncio.create_task(scheduler.run_forever())
 
     # on_ready event: sync commands after bot connects
     @bot.event

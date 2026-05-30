@@ -30,3 +30,19 @@ def test_format_estimates_empty_batch():
     embeds = format_estimates(EstimateBatch(estimates=[]))
     assert len(embeds) == 1
     assert "0 products" in embeds[0].title
+
+
+def test_modal_uses_injected_estimator():
+    import asyncio
+    from estimator_king.bot.commands import ProductInputModal
+
+    class FakeEstimator:
+        def estimate_products(self, names, user_id):
+            from estimator_king.llm.chat import EstimateBatch
+            return EstimateBatch(estimates=[])
+
+    async def _make_modal():
+        return ProductInputModal(FakeEstimator())
+
+    modal = asyncio.run(_make_modal())
+    assert modal._estimator is not None
