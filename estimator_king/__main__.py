@@ -112,13 +112,27 @@ def run_bot(args: argparse.Namespace) -> None:
         logger.info("Bot stopped by user")
 
 
+def _quiet_third_party_loggers(level: int) -> None:
+    """Suppress httpx's per-request INFO line unless DEBUG is requested.
+
+    httpx (used by the OpenAI SDK underneath) logs one INFO line per request
+    ("HTTP Request: ..."). Outbound requests are recorded only at DEBUG by our
+    own embedding/chat logs, so keep httpx quiet at INFO and above; let it
+    through when the operator opts into DEBUG.
+    """
+    if level > logging.DEBUG:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
 def _main() -> None:
     args = parse_args()
+    level = getattr(logging, args.log_level)
     logging.basicConfig(
-        level=getattr(logging, args.log_level),
+        level=level,
         format=_LOG_FORMAT,
         stream=sys.stderr,
     )
+    _quiet_third_party_loggers(level)
     if args.command == "crawl":
         run_crawl(args)
     elif args.command == "run":
