@@ -15,6 +15,8 @@ import discord
 from estimator_king.config_schema import AppConfig
 from estimator_king.bot.commands import setup_commands
 
+logger = logging.getLogger(__name__)
+
 # Strong references to background tasks: asyncio only keeps a weak reference, so
 # an unreferenced create_task() result can be garbage-collected mid-run.
 _background_tasks: set["asyncio.Task[None]"] = set()
@@ -61,19 +63,19 @@ async def run_bot(config: AppConfig, *, guild_id: Optional[int]) -> None:
     @bot.event
     async def on_ready() -> None:
         assert bot.user is not None
-        logging.info(f"Logged in as {bot.user}")
+        logger.info(f"Logged in as {bot.user}")
         if guild_id:
             guild = discord.Object(id=guild_id)
             tree.copy_global_to(guild=guild)
             await tree.sync(guild=guild)
-            logging.info(f"Synced commands to guild {guild_id}")
+            logger.info(f"Synced commands to guild {guild_id}")
         else:
             await tree.sync()
-            logging.info("Synced commands globally")
-        logging.info("Bot ready and commands synchronized")
+            logger.info("Synced commands globally")
+        logger.info("Bot ready and commands synchronized")
 
     async def shutdown() -> None:
-        logging.info("Shutting down bot...")
+        logger.info("Shutting down bot...")
         await bot.close()
 
     loop = asyncio.get_running_loop()
