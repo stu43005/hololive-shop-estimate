@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from estimator_king.config_schema import CrawlerPolicy
+from estimator_king.config_schema import CrawlerPolicy, ProxyConfig
 from estimator_king.crawler.async_http_client import (
     AsyncDomainRateLimiter,
     AsyncHTTPClient,
@@ -44,8 +44,10 @@ class _FakeSession:
     def __init__(self, request_factory):
         self._request_factory = request_factory
         self.closed = False
+        self.last_kwargs: dict[str, object] = {}
 
     def request(self, method: str, url: str, timeout=None, **kwargs):  # pyright: ignore[reportUnusedParameter]
+        self.last_kwargs = kwargs
         return self._request_factory(method, url)
 
     async def close(self) -> None:
@@ -189,3 +191,131 @@ async def test_async_context_manager_closes_session(monkeypatch):
         assert await client.get("https://example.com/") == "ok"
 
     assert fake_session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_proxy_selected_by_target_scheme(monkeypatch):
+    policy = CrawlerPolicy(
+        rate_limit_rps=1000.0, jitter_max=0.0, concurrency_per_domain=1, max_retries=1
+    )
+    fake_session = _FakeSession(
+        lambda method, url: _FakeRequestContextManager(_FakeResponse(200, "ok"))
+    )
+    monkeypatch.setattr(
+        "estimator_king.crawler.async_http_client.aiohttp.ClientSession",
+        lambda *args, **kwargs: fake_session,
+    )
+    proxy = ProxyConfig(enabled=True, http_proxy="http://hp:8080", https_proxy="http://sp:8080")
+    client = AsyncHTTPClient(policy, proxy=proxy)
+
+    await client.get("http://plain.example/x")
+    assert str(fake_session.last_kwargs["proxy"]) == "http://hp:8080"
+    assert fake_session.last_kwargs.get("proxy_auth") is None
+
+    await client.get("https://secure.example/x")
+    assert str(fake_session.last_kwargs["proxy"]) == "http://sp:8080"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_proxy_disabled_sends_no_proxy(monkeypatch):
+    policy = CrawlerPolicy(
+        rate_limit_rps=1000.0, jitter_max=0.0, concurrency_per_domain=1, max_retries=1
+    )
+    fake_session = _FakeSession(
+        lambda method, url: _FakeRequestContextManager(_FakeResponse(200, "ok"))
+    )
+    monkeypatch.setattr(
+        "estimator_king.crawler.async_http_client.aiohttp.ClientSession",
+        lambda *args, **kwargs: fake_session,
+    )
+    proxy = ProxyConfig(enabled=False, http_proxy="http://hp:8080")
+    client = AsyncHTTPClient(policy, proxy=proxy)
+
+    await client.get("http://plain.example/x")
+    assert "proxy" not in fake_session.last_kwargs
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_proxy_enabled_but_selected_value_empty_sends_no_proxy(monkeypatch):
+    policy = CrawlerPolicy(
+        rate_limit_rps=1000.0, jitter_max=0.0, concurrency_per_domain=1, max_retries=1
+    )
+    fake_session = _FakeSession(
+        lambda method, url: _FakeRequestContextManager(_FakeResponse(200, "ok"))
+    )
+    monkeypatch.setattr(
+        "estimator_king.crawler.async_http_client.aiohttp.ClientSession",
+        lambda *args, **kwargs: fake_session,
+    )
+    # enabled, but https_proxy is empty and target is https -> no proxy
+    proxy = ProxyConfig(enabled=True, http_proxy="http://hp:8080", https_proxy="")
+    client = AsyncHTTPClient(policy, proxy=proxy)
+
+    await client.get("https://secure.example/x")
+    assert "proxy" not in fake_session.last_kwargs
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_proxy_credentials_split_into_basic_auth(monkeypatch):
+    from aiohttp import BasicAuth
+
+    policy = CrawlerPolicy(
+        rate_limit_rps=1000.0, jitter_max=0.0, concurrency_per_domain=1, max_retries=1
+    )
+    fake_session = _FakeSession(
+        lambda method, url: _FakeRequestContextManager(_FakeResponse(200, "ok"))
+    )
+    monkeypatch.setattr(
+        "estimator_king.crawler.async_http_client.aiohttp.ClientSession",
+        lambda *args, **kwargs: fake_session,
+    )
+    proxy = ProxyConfig(enabled=True, http_proxy="http://user:pass@hp:8080")
+    client = AsyncHTTPClient(policy, proxy=proxy)
+
+    await client.get("http://plain.example/x")
+    assert str(fake_session.last_kwargs["proxy"]) == "http://hp:8080"
+    assert fake_session.last_kwargs["proxy_auth"] == BasicAuth("user", "pass")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_header_honored_on_429(monkeypatch):
+    policy = CrawlerPolicy(
+        rate_limit_rps=1000.0, jitter_max=0.0, concurrency_per_domain=1, max_retries=3
+    )
+    calls = {"n": 0}
+
+    def request_factory(method: str, url: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeRequestContextManager(
+                _FakeResponse(429, "slow down", headers={"Retry-After": "2"})
+            )
+        return _FakeRequestContextManager(_FakeResponse(200, "ok"))
+
+    fake_session = _FakeSession(request_factory)
+    monkeypatch.setattr(
+        "estimator_king.crawler.async_http_client.aiohttp.ClientSession",
+        lambda *args, **kwargs: fake_session,
+    )
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    client = AsyncHTTPClient(policy, sleep_fn=fake_sleep)
+
+    body = await client.get("https://example.com/")
+    await client.close()
+
+    assert body == "ok"
+    assert calls["n"] == 2
+    assert 2.0 in sleeps  # Retry-After header value honored by tenacity wait

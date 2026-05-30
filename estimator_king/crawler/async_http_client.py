@@ -13,19 +13,21 @@ import logging
 import random
 import time
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
 import aiohttp
+from aiohttp.helpers import strip_auth_from_url
 from tenacity import (
     retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
+from yarl import URL
 
 from .. import __version__
-from ..config_schema import CrawlerPolicy
+from ..config_schema import CrawlerPolicy, ProxyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +212,7 @@ class AsyncHTTPClient:
         self,
         policy: CrawlerPolicy,
         *,
+        proxy: ProxyConfig | None = None,
         circuit_breaker_failure_threshold: int = 3,
         circuit_breaker_open_timeout_seconds: float = 60.0,
         sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -217,6 +220,7 @@ class AsyncHTTPClient:
         uniform_fn: Callable[[float, float], float] = random.uniform,
     ):
         self._policy = policy
+        self._proxy: ProxyConfig = proxy or ProxyConfig()
         self._session: aiohttp.ClientSession | None = None
         self._session_lock = asyncio.Lock()
         self._domain_semaphores: dict[str, asyncio.Semaphore] = {}
@@ -270,6 +274,13 @@ class AsyncHTTPClient:
             asyncio.Semaphore(int(self._policy.concurrency_per_domain)),
         )
 
+    def _select_proxy(self, url: str) -> str | None:
+        if not self._proxy.enabled:
+            return None
+        scheme = urlsplit(url).scheme
+        value = self._proxy.https_proxy if scheme == "https" else self._proxy.http_proxy
+        return value or None
+
     async def get(self, url: str) -> str:
         return await self._request_with_retry(url)
 
@@ -285,8 +296,15 @@ class AsyncHTTPClient:
                 sock_read=float(self._policy.timeout_read),
             )
             session = await self._get_session()
+            request_kwargs: dict[str, Any] = {"timeout": timeout}
+            proxy_value = self._select_proxy(url)
+            if proxy_value is not None:
+                stripped, proxy_auth = strip_auth_from_url(URL(proxy_value))
+                request_kwargs["proxy"] = stripped
+                if proxy_auth is not None:
+                    request_kwargs["proxy_auth"] = proxy_auth
             start = time.monotonic()
-            async with session.request("GET", url, timeout=timeout) as resp:
+            async with session.request("GET", url, **request_kwargs) as resp:
                 status = int(getattr(resp, "status", 0) or 0)
                 logger.debug(
                     "GET %s -> %s in %.0fms",
