@@ -8,9 +8,11 @@ import pytest
 
 from estimator_king.crawler.async_http_client import AsyncHTTPClientError, ClientError
 from estimator_king.crawler.sitemap import (
+    DEFAULT_LOCALE,
     SitemapEnumerator,
     SitemapError,
     SitemapParseError,
+    locale_of_url,
 )
 
 
@@ -262,3 +264,28 @@ class TestSitemapEnumeratorRealFixtures:
 
         assert sorted(urls) == sorted(expected_urls)
         assert all("/en/" not in url for url in urls)
+
+
+class TestLocaleOfUrl:
+    def test_default_product_url(self):
+        assert locale_of_url("https://shop.example.com/products/x") == DEFAULT_LOCALE
+
+    def test_default_sitemap_loc(self):
+        assert locale_of_url("https://shop.example.com/sitemap_products_1.xml") == DEFAULT_LOCALE
+
+    def test_default_sitemap_loc_with_query(self):
+        assert locale_of_url(
+            "https://shop.example.com/sitemap_products_1.xml?from=1&to=2"
+        ) == DEFAULT_LOCALE
+
+    def test_en_product_url(self):
+        assert locale_of_url("https://shop.example.com/en/products/x") == "en"
+
+    def test_ja_al_product_url(self):
+        assert locale_of_url("https://store.vspo.jp/ja-al/products/x") == "ja-al"
+
+    def test_en_dz_sitemap_loc(self):
+        assert locale_of_url("https://store.vspo.jp/en-dz/sitemap_products_1.xml") == "en-dz"
+
+    def test_uppercase_segment_normalized_to_lower(self):
+        assert locale_of_url("https://shop.example.com/EN/products/x") == "en"

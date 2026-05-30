@@ -3,13 +3,31 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from estimator_king.crawler.async_http_client import AsyncHTTPClient, AsyncHTTPClientError
 
 
 # XML Namespace for sitemaps (standard)
 SITEMAP_NS = {"sitemap": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+
+DEFAULT_LOCALE = "default"
+
+
+def locale_of_url(url: str) -> str:
+    """Return the locale segment of a Shopify store URL, or DEFAULT_LOCALE.
+
+    Multi-locale Shopify stores prefix localized paths with a locale segment,
+    e.g. ``/en/products/x`` or ``/ja-al/sitemap_products_1.xml``. Default-locale
+    paths start directly with a structural segment (``products`` or
+    ``sitemap_...``). The first path segment is therefore the locale unless it is
+    one of those structural segments. The result is lowercased.
+    """
+    path = urlparse(url).path.lstrip("/")
+    first = path.split("/", 1)[0].lower()
+    if first == "products" or first.startswith("sitemap"):
+        return DEFAULT_LOCALE
+    return first
 
 
 class SitemapError(Exception):
