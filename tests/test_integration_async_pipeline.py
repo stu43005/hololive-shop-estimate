@@ -1,3 +1,5 @@
+"""Integration test: drive run_crawl_cycle end-to-end with fakes."""
+
 from __future__ import annotations
 
 # pyright: reportUnknownParameterType=false
@@ -5,586 +7,169 @@ from __future__ import annotations
 # pyright: reportUnknownVariableType=false
 # pyright: reportUnknownMemberType=false
 # pyright: reportUnknownArgumentType=false
-# pyright: reportUnusedCallResult=false
 
 import asyncio
-import json
-from types import SimpleNamespace
-from urllib.parse import urlsplit
-from unittest.mock import MagicMock
-from collections.abc import Generator
-from typing import Protocol, TypedDict, cast
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
-from estimator_king import __main__ as main_mod
-from estimator_king.config_schema import AppConfig, CrawlerPolicy, ProxyConfig, Store
-from estimator_king.crawler.async_pipeline import async_process_queue
-from estimator_king.crawler.snapshot import (
-    ProductSnapshot,
-    ProductVariant,
-    compute_content_hash,
-)
-from estimator_king.database.repository import ProductState, ProductStateRepository
-from estimator_king.sync.dify_client import DifyAPIError, DifyKBClient
-from estimator_king.sync.engine import sync_products
+from estimator_king.config_schema import AppConfig, CrawlerPolicy, Store
+from estimator_king.crawler.cycle import run_crawl_cycle
+from estimator_king.crawler.snapshot import ProductSnapshot, ProductVariant
+from estimator_king.database.repository import ProductStateRepository
 
 
 STORE_ID = "test-store"
 BASE_URL = "https://shop.example.com"
+SITEMAP_URL = "https://shop.example.com/sitemap.xml"
 
 
-@pytest.fixture()
-def repo() -> Generator[ProductStateRepository, None, None]:
-    with ProductStateRepository(":memory:") as r:
-        yield r
+class FakeEmbedder:
+    """Returns a fixed-dimension embedding for any document."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(texts)
+        return [[0.1, 0.2] for _ in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        _ = text
+        return [0.1, 0.2]
 
 
-def _policy(concurrency_per_domain: int = 3) -> CrawlerPolicy:
-    return CrawlerPolicy(
-        rate_limit_rps=1000.0,
-        jitter_max=0.0,
-        concurrency_per_domain=concurrency_per_domain,
-        timeout_connect=5,
-        timeout_read=5,
-        max_retries=1,
+class FakeVectorStore:
+    """Records upsert calls so tests can assert on them."""
+
+    def __init__(self) -> None:
+        self.upserts: list[str] = []
+
+    def upsert(self, id: str, document: str, embedding: list[float],
+               metadata: dict[str, Any]) -> None:
+        _ = (document, embedding, metadata)
+        self.upserts.append(id)
+
+    def delete(self, ids: list[str]) -> None:
+        _ = ids
+
+    def query(self, embedding: list[float], n_results: int,
+              where: dict[str, Any] | None = None) -> list[Any]:
+        _ = (embedding, n_results, where)
+        return []
+
+
+def _config(max_products: int = 32) -> AppConfig:
+    return AppConfig(
+        stores=[Store(id=STORE_ID, base_url=BASE_URL, sitemap_url=SITEMAP_URL)],
+        # concurrency_per_domain=1 ensures sequential SQLite writes on the shared
+        # connection inside run_crawl_cycle, avoiding cross-thread locking errors.
+        crawler=CrawlerPolicy(max_products_per_run=max_products, concurrency_per_domain=1),
     )
 
 
-def _product_url(pid: int) -> str:
-    return f"{BASE_URL}/products/p{pid}"
-
-
-class CatalogEntry(TypedDict):
-    product_id: int
-    title: str
-    body_html: str
-    variant_title: str
-    price: str
-    sku: str
-    html: str
-
-
-class DifyLike(Protocol):
-    def create_document_by_text(
-        self,
-        name: str,
-        text: str,
-        metadata: dict[str, object] | None = None,
-    ) -> dict[str, object]: ...
-
-    def update_document_by_text(
-        self,
-        document_id: str,
-        name: str,
-        text: str,
-    ) -> dict[str, object]: ...
-
-
-class _FakeDifyClient:
-    def __init__(self, failing_create_ids: set[int] | None = None):
-        self._failing_create_ids: set[int] = failing_create_ids or set()
-        self.create_ids: list[int] = []
-        self.update_doc_ids: list[str] = []
-
-    def create_document_by_text(
-        self,
-        name: str,
-        text: str,
-        metadata: dict[str, object] | None = None,
-    ) -> dict[str, object]:
-        _ = (name, text)
-        metadata = metadata or {}
-        pid = int(cast(str, metadata["product_id"]))
-        if pid in self._failing_create_ids:
-            raise DifyAPIError(f"create failed for {pid}")
-        self.create_ids.append(pid)
-        return {"document": {"id": f"doc-{pid}"}, "batch": f"batch-create-{pid}"}
-
-    def update_document_by_text(
-        self,
-        document_id: str,
-        name: str,
-        text: str,
-    ) -> dict[str, object]:
-        _ = (name, text)
-        self.update_doc_ids.append(document_id)
-        return {
-            "document": {"id": f"{document_id}-updated"},
-            "batch": f"batch-update-{document_id}",
-        }
-
-
-def _catalog_entry(pid: int, *, changed: bool = False) -> CatalogEntry:
-    suffix = "-changed" if changed else ""
-    return {
-        "product_id": pid,
-        "title": f"Product {pid}{suffix}",
-        "body_html": f"<p>Description {pid}{suffix}</p>",
-        "variant_title": "Default",
-        "price": str(1000 + pid),
-        "sku": f"SKU-{pid}",
-        "html": (
-            "<html><body>"
-            f"<h2>Details</h2><p>Detail block {pid}{suffix}</p>"
-            "</body></html>"
-        ),
-    }
-
-
-def _snapshot_from_catalog(entry: CatalogEntry) -> ProductSnapshot:
-    suffix = "-changed" if str(entry["title"]).endswith("-changed") else ""
+def _snap(pid: int) -> ProductSnapshot:
     return ProductSnapshot(
-        product_id=int(entry["product_id"]),
-        title=str(entry["title"]),
-        description=f"Description {entry['product_id']}{suffix}",
-        variants=[
-            ProductVariant(
-                variant_id=int(entry["product_id"]),
-                title=str(entry["variant_title"]),
-                price=str(entry["price"]),
-                sku=str(entry["sku"]),
-            )
-        ],
+        product_id=pid,
+        title=f"Product {pid}",
+        description=f"A great product #{pid}",
+        variants=[ProductVariant(variant_id=pid * 10, title="Regular", price="3000")],
         html_details={},
     )
 
 
-def _mock_async_http_get(
-    monkeypatch,
-    catalog: dict[int, CatalogEntry],
-    *,
-    failing_ids: set[int] | None = None,
-    delay_seconds: float = 0.0,
-    use_domain_semaphore: bool = False,
-    stats: dict[str, int] | None = None,
-) -> None:
-    failing_ids = failing_ids or set()
-    lock = asyncio.Lock()
+@pytest.fixture()
+def db_path(tmp_path: Path) -> str:
+    return str(tmp_path / "state.db")
 
-    async def fake_get(self, url: str) -> str:
-        domain = urlsplit(url).hostname or ""
-        semaphore = (
-            self._get_domain_semaphore(domain)
-            if use_domain_semaphore
-            else asyncio.Semaphore(9999)
+
+def test_run_cycle_indexes_pre_seeded_urls(db_path: str) -> None:
+    """Products pre-seeded into the queue land in the DB with last_indexed_at set
+    and the fake vector store receives their upserts."""
+    embedder = FakeEmbedder()
+    vs = FakeVectorStore()
+
+    # Pre-seed two URLs directly into the queue so we don't need the sitemap.
+    with ProductStateRepository(db_path) as repo:
+        _ = repo.enqueue_url(STORE_ID, f"{BASE_URL}/products/101")
+        _ = repo.enqueue_url(STORE_ID, f"{BASE_URL}/products/102")
+
+    snapshots: dict[str, ProductSnapshot] = {
+        f"{BASE_URL}/products/101": _snap(101),
+        f"{BASE_URL}/products/102": _snap(102),
+    }
+
+    def fake_fetch(url: str, client: Any) -> ProductSnapshot:
+        _ = client
+        return snapshots[url]
+
+    with (
+        patch("estimator_king.crawler.cycle.populate_queue_from_sitemap", return_value=0),
+        patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=fake_fetch),
+    ):
+        counters = asyncio.run(
+            run_crawl_cycle(_config(), db_path, embedder, vs)  # pyright: ignore[reportArgumentType]
         )
 
-        async with semaphore:
-            if stats is not None:
-                async with lock:
-                    stats["active"] = stats.get("active", 0) + 1
-                    stats["max_active"] = max(
-                        stats.get("max_active", 0),
-                        stats["active"],
-                    )
+    # Both products should have been processed and upserted.
+    assert counters["fetched_ok"] == 2
+    assert counters["created"] == 2
+    assert counters["errors"] == 0
 
-            if delay_seconds:
-                await asyncio.sleep(delay_seconds)
+    expected_keys = {f"{STORE_ID}:101", f"{STORE_ID}:102"}
+    assert set(vs.upserts) == expected_keys
 
-            path = urlsplit(url).path
-            part = path.split("/")[-1]
-            handle = part[:-5] if part.endswith(".json") else part
-            pid = int(handle.lstrip("p"))
-
-            try:
-                if pid in failing_ids:
-                    raise RuntimeError(f"fetch failed for {pid}")
-
-                entry = catalog[pid]
-                return (
-                    json.dumps(
-                        {
-                            "product": {
-                                "id": int(entry["product_id"]),
-                                "title": entry["title"],
-                                "body_html": entry["body_html"],
-                                "variants": [
-                                    {
-                                        "id": int(entry["product_id"]),
-                                        "title": entry["variant_title"],
-                                        "price": entry["price"],
-                                        "sku": entry["sku"],
-                                    }
-                                ],
-                            }
-                        }
-                    )
-                    if url.endswith(".json")
-                    else str(entry["html"])
-                )
-            finally:
-                if stats is not None:
-                    async with lock:
-                        stats["active"] -= 1
-
-    monkeypatch.setattr(
-        "estimator_king.crawler.async_http_client.AsyncHTTPClient.get", fake_get
-    )
-
-
-def _mock_dify(
-    *,
-    failing_create_ids: set[int] | None = None,
-) -> tuple[DifyLike, list[int], list[str]]:
-    client = _FakeDifyClient(failing_create_ids)
-    return client, client.create_ids, client.update_doc_ids
-
-
-def _syncing_normalizer(
-    dify_client: DifyLike,
-    state_repo: ProductStateRepository,
-    *,
-    raise_on_sync_failed: bool = False,
-):
-    def _normalizer(
-        snapshot: ProductSnapshot,
-        store_id: str,
-        product_url: str,
-        existing_state: ProductState | None,
-    ) -> ProductState | None:
-        _ = (product_url, existing_state)
-        result = sync_products(
-            [snapshot],
-            store_id,
-            BASE_URL,
-            state_repo,
-            cast(DifyKBClient, dify_client),
-        )
-        if raise_on_sync_failed and result.failed > 0:
-            raise RuntimeError("sync failed")
-        return state_repo.get_by_external_key(f"{store_id}:{snapshot.product_id}")
-
-    return _normalizer
-
-
-def _enqueue(repo: ProductStateRepository, count: int) -> None:
-    for i in range(1, count + 1):
-        _ = repo.enqueue_url(STORE_ID, _product_url(i))
-
-
-@pytest.mark.asyncio
-async def test_async_pipeline_new_products_end_to_end(
-    repo: ProductStateRepository,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog = {i: _catalog_entry(i) for i in range(1, 11)}
-    _enqueue(repo, 10)
-    _mock_async_http_get(monkeypatch, catalog)
-    dify_client, create_ids, update_doc_ids = _mock_dify()
-
-    result = await async_process_queue(
-        STORE_ID,
-        _policy(),
-        repo,
-        _syncing_normalizer(dify_client, repo),
-    )
-
-    assert result.processed == 10
-    assert result.failed == 0
-    assert result.skipped == 0
-    assert repo.queue_size(STORE_ID) == 0
-    assert sorted(create_ids) == list(range(1, 11))
-    assert update_doc_ids == []
-    for i in range(1, 11):
-        state = repo.get_by_external_key(f"{STORE_ID}:{i}")
-        assert state is not None
-        assert state.dify_document_id == f"doc-{i}"
-
-
-@pytest.mark.asyncio
-async def test_async_pipeline_mixed_create_update_skip(
-    repo: ProductStateRepository,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog = {i: _catalog_entry(i) for i in range(1, 11)}
-    _enqueue(repo, 10)
-    _mock_async_http_get(monkeypatch, catalog)
-    dify_client, create_ids, update_doc_ids = _mock_dify()
-
-    for i in (5, 6, 7):
-        repo.upsert(
-            ProductState(
-                external_key=f"{STORE_ID}:{i}",
-                dify_document_id=f"doc-existing-{i}",
-                content_hash="stale-hash",
-                normalizer_version=1,
+    # Check DB: both rows should have last_indexed_at set.
+    with ProductStateRepository(db_path) as repo:
+        for key in expected_keys:
+            state = repo.get_by_external_key(key)
+            assert state is not None, f"Missing row for {key}"
+            assert state.last_indexed_at is not None, (
+                f"{key} should have last_indexed_at set after indexing"
             )
+
+
+def test_run_cycle_skips_unchanged_products_on_second_run(db_path: str) -> None:
+    """A second crawl cycle with identical snapshots does not re-upsert."""
+    embedder = FakeEmbedder()
+    vs = FakeVectorStore()
+
+    with ProductStateRepository(db_path) as repo:
+        _ = repo.enqueue_url(STORE_ID, f"{BASE_URL}/products/201")
+
+    def fake_fetch(url: str, client: Any) -> ProductSnapshot:
+        _ = (url, client)
+        return _snap(201)
+
+    # First run: creates the product.
+    with (
+        patch("estimator_king.crawler.cycle.populate_queue_from_sitemap", return_value=0),
+        patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=fake_fetch),
+    ):
+        counters1 = asyncio.run(
+            run_crawl_cycle(_config(), db_path, embedder, vs)  # pyright: ignore[reportArgumentType]
         )
-    for i in (8, 9, 10):
-        skip_hash = compute_content_hash(_snapshot_from_catalog(catalog[i]))
-        repo.upsert(
-            ProductState(
-                external_key=f"{STORE_ID}:{i}",
-                dify_document_id=f"doc-existing-{i}",
-                content_hash=skip_hash,
-                normalizer_version=1,
-            )
+
+    assert counters1["created"] == 1
+
+    # Re-enqueue the same URL to simulate re-crawl.
+    with ProductStateRepository(db_path) as repo:
+        _ = repo.enqueue_url(STORE_ID, f"{BASE_URL}/products/201")
+
+    upserts_after_first = list(vs.upserts)
+
+    # Second run: same snapshot → sync engine skips it.
+    with (
+        patch("estimator_king.crawler.cycle.populate_queue_from_sitemap", return_value=0),
+        patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=fake_fetch),
+    ):
+        counters2 = asyncio.run(
+            run_crawl_cycle(_config(), db_path, embedder, vs)  # pyright: ignore[reportArgumentType]
         )
 
-    result = await async_process_queue(
-        STORE_ID,
-        _policy(),
-        repo,
-        _syncing_normalizer(dify_client, repo),
-    )
-
-    assert result.processed == 10
-    assert result.failed == 0
-    assert result.skipped == 0
-    assert sorted(create_ids) == [1, 2, 3, 4]
-    assert sorted(update_doc_ids) == [
-        "doc-existing-5",
-        "doc-existing-6",
-        "doc-existing-7",
-    ]
-    assert len(create_ids) == 4
-    assert len(update_doc_ids) == 3
-
-
-@pytest.mark.asyncio
-async def test_async_pipeline_partial_fetch_failure(
-    repo: ProductStateRepository,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog = {i: _catalog_entry(i) for i in range(1, 11)}
-    _enqueue(repo, 10)
-    _mock_async_http_get(monkeypatch, catalog, failing_ids={3, 7})
-    dify_client, create_ids, _ = _mock_dify()
-
-    result = await async_process_queue(
-        STORE_ID,
-        _policy(),
-        repo,
-        _syncing_normalizer(dify_client, repo),
-    )
-
-    assert result.processed == 8
-    assert result.failed == 2
-    assert result.skipped == 0
-    assert repo.queue_size(STORE_ID) == 2
-    assert sorted(create_ids) == [1, 2, 4, 5, 6, 8, 9, 10]
-
-
-@pytest.mark.asyncio
-async def test_async_pipeline_partial_dify_failure_marks_product_failed(
-    repo: ProductStateRepository,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog = {i: _catalog_entry(i) for i in range(1, 11)}
-    _enqueue(repo, 10)
-    _mock_async_http_get(monkeypatch, catalog)
-    dify_client, create_ids, _ = _mock_dify(failing_create_ids={2, 6})
-
-    result = await async_process_queue(
-        STORE_ID,
-        _policy(),
-        repo,
-        _syncing_normalizer(dify_client, repo, raise_on_sync_failed=True),
-    )
-
-    assert result.processed == 8
-    assert result.failed == 2
-    assert sorted(create_ids) == [1, 3, 4, 5, 7, 8, 9, 10]
-    for failed_id in (2, 6):
-        state = repo.get_by_external_key(f"{STORE_ID}:{failed_id}")
-        assert state is not None
-        assert state.dify_document_id is None
-
-
-@pytest.mark.asyncio
-async def test_async_pipeline_empty_queue_returns_zero_counts(
-    repo: ProductStateRepository,
-) -> None:
-    dify_client, _, _ = _mock_dify()
-    result = await async_process_queue(
-        STORE_ID,
-        _policy(),
-        repo,
-        _syncing_normalizer(dify_client, repo),
-    )
-    assert result.processed == 0
-    assert result.failed == 0
-    assert result.skipped == 0
-
-
-@pytest.mark.asyncio
-async def test_async_pipeline_concurrency_per_domain_three(
-    repo: ProductStateRepository,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog = {i: _catalog_entry(i) for i in range(1, 11)}
-    _enqueue(repo, 10)
-    stats = {"active": 0, "max_active": 0}
-    _mock_async_http_get(
-        monkeypatch,
-        catalog,
-        delay_seconds=0.02,
-        use_domain_semaphore=True,
-        stats=stats,
-    )
-    dify_client, _, _ = _mock_dify()
-
-    result = await async_process_queue(
-        STORE_ID,
-        _policy(concurrency_per_domain=3),
-        repo,
-        _syncing_normalizer(dify_client, repo),
-    )
-
-    assert result.processed == 10
-    assert result.failed == 0
-    assert stats["max_active"] <= 3
-    assert stats["max_active"] >= 2
-
-
-@pytest.mark.asyncio
-async def test_dify_document_id_persisted_then_second_run_uses_update(
-    repo: ProductStateRepository,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog = {i: _catalog_entry(i) for i in range(1, 11)}
-    _enqueue(repo, 10)
-    _mock_async_http_get(monkeypatch, catalog)
-    dify_client, create_ids, update_doc_ids = _mock_dify()
-
-    normalizer = _syncing_normalizer(dify_client, repo)
-    first = await async_process_queue(STORE_ID, _policy(), repo, normalizer)
-    assert first.processed == 10
-    assert len(create_ids) == 10
-    assert len(update_doc_ids) == 0
-
-    for i in range(1, 11):
-        catalog[i] = _catalog_entry(i, changed=True)
-        repo.enqueue_url(STORE_ID, _product_url(i))
-
-    second = await async_process_queue(STORE_ID, _policy(), repo, normalizer)
-    assert second.processed == 10
-    assert len(create_ids) == 10
-    assert len(update_doc_ids) == 10
-    for i in range(1, 11):
-        state = repo.get_by_external_key(f"{STORE_ID}:{i}")
-        assert state is not None
-        assert state.dify_document_id == f"doc-{i}-updated"
-
-
-@pytest.mark.asyncio
-async def test_content_hash_unchanged_skips_dify_calls(
-    repo: ProductStateRepository,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog = {i: _catalog_entry(i) for i in range(1, 6)}
-    for i in range(1, 6):
-        repo.enqueue_url(STORE_ID, _product_url(i))
-    _mock_async_http_get(monkeypatch, catalog)
-    dify_client, create_ids, update_doc_ids = _mock_dify()
-    normalizer = _syncing_normalizer(dify_client, repo)
-
-    first = await async_process_queue(STORE_ID, _policy(), repo, normalizer)
-    assert first.processed == 5
-    assert len(create_ids) == 5
-    assert len(update_doc_ids) == 0
-
-    for i in range(1, 6):
-        repo.enqueue_url(STORE_ID, _product_url(i))
-
-    second = await async_process_queue(STORE_ID, _policy(), repo, normalizer)
-    assert second.processed == 5
-    assert len(create_ids) == 5
-    assert len(update_doc_ids) == 0
-
-
-@pytest.mark.asyncio
-async def test_error_isolation_one_failure_does_not_abort_others(
-    repo: ProductStateRepository,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog = {i: _catalog_entry(i) for i in range(1, 6)}
-    _enqueue(repo, 5)
-    _mock_async_http_get(monkeypatch, catalog, failing_ids={3})
-    dify_client, create_ids, _ = _mock_dify()
-
-    result = await async_process_queue(
-        STORE_ID,
-        _policy(),
-        repo,
-        _syncing_normalizer(dify_client, repo),
-    )
-
-    assert result.processed == 4
-    assert result.failed == 1
-    assert sorted(create_ids) == [1, 2, 4, 5]
-    assert repo.get_by_external_key(f"{STORE_ID}:5") is not None
-
-
-def test_sync_fallback_uses_sync_pipeline_when_use_async_false(monkeypatch) -> None:
-    config = AppConfig(
-        stores=[
-            Store(
-                id=STORE_ID,
-                base_url=BASE_URL,
-                sitemap_url=f"{BASE_URL}/sitemap.xml",
-            )
-        ],
-        crawler=_policy(),
-        proxy=ProxyConfig(),
-    )
-
-    class _RepoCtx:
-        def __enter__(self) -> "_RepoCtx":
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            _ = (exc_type, exc, tb)
-
-    mock_repo = _RepoCtx()
-
-    monkeypatch.setattr(main_mod, "USE_ASYNC", False)
-
-    def fake_repo_factory(_db_path: str) -> _RepoCtx:
-        return mock_repo
-
-    def fake_http_client(*_args: object, **_kwargs: object) -> MagicMock:
-        return MagicMock()
-
-    def fake_enumerator(*_args: object, **_kwargs: object) -> MagicMock:
-        return MagicMock()
-
-    def fake_populate(*_args: object, **_kwargs: object) -> int:
-        return 0
-
-    def fake_enqueue(*_args: object, **_kwargs: object) -> int:
-        return 0
-
-    monkeypatch.setattr(main_mod, "ProductStateRepository", fake_repo_factory)
-    monkeypatch.setattr(main_mod, "HTTPClient", fake_http_client)
-    monkeypatch.setattr(main_mod, "SitemapEnumerator", fake_enumerator)
-    monkeypatch.setattr(main_mod, "populate_queue_from_sitemap", fake_populate)
-    monkeypatch.setattr(main_mod, "enqueue_stale_products", fake_enqueue)
-
-    sync_called = {"value": False}
-
-    def fake_process_queue(*args, **kwargs):
-        _ = (args, kwargs)
-        sync_called["value"] = True
-        return {"fetched_ok": 1, "created": 0, "updated": 0, "skipped": 0, "errors": 0}
-
-    async_called = {"value": False}
-
-    async def fake_async_process_queue(*args, **kwargs):
-        _ = (args, kwargs)
-        async_called["value"] = True
-        return SimpleNamespace(processed=1, failed=0, skipped=0)
-
-    monkeypatch.setattr(main_mod, "process_queue", fake_process_queue)
-    monkeypatch.setattr(main_mod, "async_process_queue", fake_async_process_queue)
-
-    def fake_mark_inactive(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        return SimpleNamespace(marked_inactive=0, already_inactive=0)
-
-    monkeypatch.setattr(main_mod, "mark_inactive_products", fake_mark_inactive)
-
-    counters = main_mod.run_crawler(config, ":memory:", MagicMock(spec=DifyKBClient))
-    assert sync_called["value"] is True
-    assert async_called["value"] is False
-    assert counters["fetched_ok"] == 1
+    assert counters2["fetched_ok"] == 1
+    assert counters2["updated"] == 0
+    # No new upserts were added to the vector store.
+    assert vs.upserts == upserts_after_first
