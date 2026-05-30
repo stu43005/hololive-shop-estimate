@@ -62,6 +62,10 @@ def populate_queue_from_sitemap(
         if product.product_url not in sitemap_url_set:
             repo.increment_sitemap_miss(product.external_key)
 
+    logger.info(
+        "store=%s sitemap: %d total, %d new enqueued",
+        store.id, len(sitemap_urls), enqueued,
+    )
     return enqueued
 
 
