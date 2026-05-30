@@ -161,6 +161,23 @@ def build_bot(
 
 ## 7. `estimator_king/__main__.py` 調整
 
+### 7.0 `parse_args`：`--db` 移到共用 parent（`run` 與 `crawl` 皆可用）
+
+現況 `--db` 只掛在 `crawl` 子命令，但 `run` 的程序內排程器透過 `config.database_path` 寫入 SQLite，同樣需要可覆寫 DB 路徑。把 `--db` 從 `p_crawl` **移到 `common` parent parser**（與 `--config` / `--log-level` 並列），使 `run` 與 `crawl` 都接受 `--db`：
+
+```python
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--config", default="stores_config.yaml",
+                        help="Path to stores configuration YAML (default: stores_config.yaml)")
+    common.add_argument("--db", default=None,
+                        help="Override database path from config")
+    common.add_argument("--log-level", default="INFO",
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                        help="Set logging level (default: INFO)")
+```
+
+`p_crawl` 不再各自定義 `--db`（改由 common 提供）；`p_run` 因 `parents=[common]` 自動取得 `--db`。`crawl` 的 `--db` 行為不變（仍由 `run_crawl` 套用覆寫）。
+
 ### 7.1 `crawl` 指令改用共用 `build_providers`
 
 `run_crawl(args)` 改為：
@@ -204,6 +221,8 @@ def run_service(args) -> None:
     except Exception as e:
         sys.stderr.write(f"Error: Failed to load config: {e}\n")
         sys.exit(1)
+    if args.db is not None:
+        config.database_path = args.db
     if args.token is not None:
         config.discord_token = args.token
     if not config.discord_token:
@@ -243,6 +262,7 @@ from estimator_king.runtime import serve, build_providers, MissingEmbeddingKey
 - **`tests/test_cli.py`**：
   - 頂層 import 由 `from estimator_king.__main__ import parse_args, run_bot, run_crawl` 改為 `... parse_args, run_service, run_crawl`。
   - `run` 路由測試：函式 `test_run_bot_*` 改測 `run_service`；patch 點由 `estimator_king.__main__.bot_runner.run_bot` 改為 `estimator_king.__main__.serve`（`new_callable=MagicMock`，避免 async coroutine 警告）；驗證 `--token` 覆寫、缺 token → exit 1、`mock_serve.assert_called_once_with(mock_cfg, guild_id=123)` 且 `mock_asyncio_run.assert_called_once_with(mock_serve.return_value)`。
+  - `--db` 測試：`parse_args(["run", "--db", "/x"]).db == "/x"`（run 子命令接受 `--db`）；新增 `run_service` 在 `args.db` 非 None 時把 `config.database_path` 覆寫為該值（patch `AppConfig.from_yaml` 回傳 mock config、patch `serve`/`asyncio.run`，斷言 `mock_cfg.database_path == "/x"`）。
   - crawl 測試：patch 點由 `estimator_king.__main__.{EmbeddingProvider,VectorStore}` 改為 patch `estimator_king.__main__.build_providers`，回傳 `Providers(embedder=mock, vector_store=mock, chat=None)`；缺 key 改為 `build_providers` `side_effect=MissingEmbeddingKey()` → 斷言 exit 2。
 - **`tests/test_main_async.py`**：`run_crawl` 測試由 patch `estimator_king.__main__.{EmbeddingProvider,VectorStore}` 改為 patch `estimator_king.__main__.build_providers`（回傳 `Providers(embedder=mock, vector_store=mock, chat=None)`）；維持 `run_crawl_cycle` 呼叫參數（`args[0]=config, args[1]=db_path, args[2]=embedder, args[3]=vector_store`）與 exit code 斷言；保留以 `new_callable=MagicMock` patch `run_crawl_cycle`。`test_run_crawl_no_dify_client_constructed` 並斷言 `not hasattr(m, "run_bot")`（守護改名）。
 - 既有 bot 指令/estimator 測試（test_bot_commands、test_estimator）不受影響（Estimator 仍由 `build_bot` 建）。
@@ -254,7 +274,7 @@ from estimator_king.runtime import serve, build_providers, MissingEmbeddingKey
 3. `runtime.build_providers` 是 embedder/chat/vector_store + embedding key 驗證的**唯一**來源；`run_crawl` 與 `serve` 都呼叫它，無重複的 provider 建立程式碼。
 4. `runtime.serve` 把同一個 `VectorStore` 實例同時供給 bot（Estimator）與 scheduler（驗證單一 ChromaDB）。
 5. 外部行為不變：`run` 啟動 bot + 程序內排程（含 on_ready sync、兩段式 graceful shutdown）；`crawl` 一次性爬取，stdout 純 JSON，exit code 0/1/2 一致；`run` 缺 token/缺 key 各 exit 1。
-6. `python -m estimator_king`（無子命令）、`run`/`crawl` 子命令、`estimator_king.bot` 不可用等既有行為不變。
+6. `python -m estimator_king`（無子命令）、`run`/`crawl` 子命令、`estimator_king.bot` 不可用等既有行為不變。`run` 與 `crawl` 皆接受 `--db`（移到共用 parent），`run_service` 在 `--db` 給定時覆寫 `config.database_path`（供排程器使用）；`crawl` 的 `--db` 行為不變。
 7. `_main()` dispatch：`run` → `run_service`、`crawl` → `run_crawl`；`estimator_king.__main__` 不再有 `run_bot` 符號（由 `test_run_crawl_no_dify_client_constructed` 的 `not hasattr(m, "run_bot")` 守護）。
 8. `build_providers(config)`（預設）不建構 `ChatProvider`；`providers.chat` 為 `None`；只有 `with_chat=True`（`serve`）才建 chat。
 9. `basedpyright estimator_king/` 0 errors；`pytest -q` 全綠（含新增 test_runtime、改寫的 test_cli/test_main_async/test_scheduler/test_runner_shutdown）。
@@ -263,6 +283,6 @@ from estimator_king.runtime import serve, build_providers, MissingEmbeddingKey
 
 - 不改 `run_crawl_cycle`、`CrawlScheduler` 的爬取邏輯（只搬位置）。
 - 不改 `Estimator`、Discord command、`EmbeddingProvider` / `ChatProvider` / `VectorStore` 的實作。
-- 不改 CLI 介面（子命令、旗標、exit code 全保留）。
+- 不改 CLI 介面，**唯一例外**：`--db` 由 `crawl` 專屬移到共用 parent，使 `run` 也接受 `--db`（子命令、其餘旗標、exit code 全保留）。
 - 不改 Dockerfile / 部署 / 文件的入口點呼叫（`run` / `crawl` 子命令不變）。
 - 不改既有日誌格式與 httpx 抑制邏輯。
