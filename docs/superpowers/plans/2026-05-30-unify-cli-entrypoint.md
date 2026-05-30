@@ -1039,6 +1039,20 @@ The in-process crawl cycle logs to the same bot logs (there is no separate crawl
 
 5c. 欄位定義表（L152-154）：三處 `(Crawler only)` → `(crawl phase only)`。
 
+5d. 「Common message patterns」清單中的最後一項（L161）——`crawler` 字眼且與重構後事實不符——取代。把：
+
+```
+- `Crawler completed: <JSON_SUMMARY>`: Final report for the entire run.
+```
+
+改為：
+
+```
+- `Crawl cycle complete: <JSON_SUMMARY>`: Final report for the entire crawl cycle (logged by the in-process scheduler under `run`).
+```
+
+（與 [scheduler.py:36](../../../estimator_king/bot/scheduler.py) 的 `Crawl cycle complete` log 字串一致，並消除 Step 11 grep 會卡住的 `Crawler completed` 殘留。）
+
 - [ ] **Step 6: §5 Recovery（L175-183）**
 
 - 標題 `### Crawler Failure` → `### Crawl Cycle Failure`
@@ -1163,8 +1177,13 @@ Expected：`no-subcmd exit=2`（argparse 缺必填子命令）；其餘三個 `e
 
 - [ ] **Step 4: 確認 `python -m estimator_king.bot` 已不可用**
 
-Run: `.venv/bin/python -m estimator_king.bot 2>&1 | head -3; echo "exit=${PIPESTATUS[0]}"`
-Expected: 非 0 結束（找不到 `__main__`，類似 `No module named estimator_king.bot.__main__`）。
+避免 pipeline 吃掉退出碼（本環境 Bash tool 實際為 zsh，`PIPESTATUS` 不適用）——直接以 `$?` 取結束碼：
+
+```bash
+.venv/bin/python -m estimator_king.bot >/tmp/bot_run.out 2>&1; echo "exit=$?"; head -3 /tmp/bot_run.out
+```
+
+Expected：`exit=1`，且輸出含 `No module named estimator_king.bot.__main__`（Task 3 刪除 `bot/__main__.py` 後即如此）。
 
 - [ ] **Step 5: 最終 commit（如有未提交的驗證副產物則無，純驗證可略過）**
 
