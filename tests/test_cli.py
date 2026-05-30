@@ -1,12 +1,13 @@
 """Unit tests for CLI argument parser and orchestration (run/crawl subcommands)."""
 
+import json
 import subprocess
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from estimator_king.__main__ import parse_args
+from estimator_king.__main__ import parse_args, run_bot, run_crawl
 
 
 # ---------------------------------------------------------------------------
@@ -127,9 +128,6 @@ def _make_cfg(*, embedding_api_key="sk-test"):
 
 
 def test_run_crawl_success_prints_json_and_exits_0(capsys):
-    import json
-    from estimator_king.__main__ import run_crawl
-
     mock_cfg = _make_cfg()
     counters = {"discovered": 5, "fetched_ok": 5, "created": 2,
                 "updated": 1, "skipped": 2, "inactive": 0, "errors": 0}
@@ -145,8 +143,6 @@ def test_run_crawl_success_prints_json_and_exits_0(capsys):
 
 
 def test_run_crawl_missing_embedding_key_exits_2():
-    from estimator_king.__main__ import run_crawl
-
     mock_cfg = _make_cfg(embedding_api_key="")
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg):
         with pytest.raises(SystemExit) as exc:
@@ -155,8 +151,6 @@ def test_run_crawl_missing_embedding_key_exits_2():
 
 
 def test_run_crawl_config_load_failure_exits_1():
-    from estimator_king.__main__ import run_crawl
-
     with patch("estimator_king.__main__.AppConfig.from_yaml",
                side_effect=FileNotFoundError("Config not found")):
         with pytest.raises(SystemExit) as exc:
@@ -170,29 +164,20 @@ def test_run_crawl_config_load_failure_exits_1():
 
 def test_run_bot_routes_to_bot_runner_with_token_override():
     """run_bot() applies --token override and dispatches to bot_runner.run_bot."""
-    import inspect
-    from estimator_king.__main__ import run_bot
-
     mock_cfg = MagicMock()
     mock_cfg.discord_token = "cfg-token"
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
-         patch("estimator_king.__main__.bot_runner.run_bot") as mock_run_bot, \
+         patch("estimator_king.__main__.bot_runner.run_bot", new_callable=MagicMock) as mock_run_bot, \
          patch("estimator_king.__main__.asyncio.run") as mock_asyncio_run:
         run_bot(MagicMock(config="stores.yaml", token="cli-token", guild_id=123))
 
     assert mock_cfg.discord_token == "cli-token"
     mock_run_bot.assert_called_once_with(mock_cfg, guild_id=123)
-    # bot_runner.run_bot is async, so calling it returns a coroutine (not .return_value).
-    # Verify asyncio.run was called once with a coroutine produced by bot_runner.run_bot.
-    mock_asyncio_run.assert_called_once()
-    actual_arg = mock_asyncio_run.call_args.args[0]
-    assert inspect.iscoroutine(actual_arg), f"Expected a coroutine, got {type(actual_arg)}"
+    mock_asyncio_run.assert_called_once_with(mock_run_bot.return_value)
 
 
 def test_run_bot_exits_1_when_token_missing():
     """run_bot() exits 1 when no token is provided and config has none."""
-    from estimator_king.__main__ import run_bot
-
     mock_cfg = MagicMock()
     mock_cfg.discord_token = None
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg):

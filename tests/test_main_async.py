@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from estimator_king.__main__ import run_crawl
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,8 +38,6 @@ def _make_cfg(*, embedding_api_key: str = "sk-test", db: str = "./estimator_king
 
 def test_run_crawl_builds_embedding_provider_and_vector_store():
     """run_crawl() constructs EmbeddingProvider(provider_config) and VectorStore(chroma_path)."""
-    from estimator_king.__main__ import run_crawl
-
     mock_cfg = _make_cfg()
     counters = {"discovered": 0, "fetched_ok": 0, "created": 0,
                 "updated": 0, "skipped": 0, "inactive": 0, "errors": 0}
@@ -56,8 +56,6 @@ def test_run_crawl_builds_embedding_provider_and_vector_store():
 
 def test_run_crawl_passes_embedder_and_vector_store_to_cycle():
     """run_crawl() passes the embedder and vector store to run_crawl_cycle(...)."""
-    from estimator_king.__main__ import run_crawl
-
     mock_cfg = _make_cfg()
     counters = {"discovered": 1, "fetched_ok": 1, "created": 0,
                 "updated": 0, "skipped": 1, "inactive": 0, "errors": 0}
@@ -85,8 +83,6 @@ def test_run_crawl_passes_embedder_and_vector_store_to_cycle():
 
 def test_run_crawl_passes_force_refetch_to_cycle():
     """run_crawl() passes force_refetch=True to run_crawl_cycle when --force-refetch given."""
-    from estimator_king.__main__ import run_crawl
-
     mock_cfg = _make_cfg()
     counters = {"discovered": 0, "fetched_ok": 0, "created": 0,
                 "updated": 0, "skipped": 0, "inactive": 0, "errors": 0}
@@ -104,8 +100,6 @@ def test_run_crawl_passes_force_refetch_to_cycle():
 
 def test_run_crawl_uses_db_path_from_config():
     """run_crawl() passes config.database_path to run_crawl_cycle."""
-    from estimator_king.__main__ import run_crawl
-
     mock_cfg = _make_cfg(db="/configured/path.db")
     counters = {"discovered": 0, "fetched_ok": 0, "created": 0,
                 "updated": 0, "skipped": 0, "inactive": 0, "errors": 0}
@@ -123,8 +117,6 @@ def test_run_crawl_uses_db_path_from_config():
 
 def test_run_crawl_applies_db_override_before_cycle():
     """run_crawl() overrides config.database_path with --db value before calling cycle."""
-    from estimator_king.__main__ import run_crawl
-
     mock_cfg = _make_cfg(db="./original.db")
     counters = {"discovered": 0, "fetched_ok": 0, "created": 0,
                 "updated": 0, "skipped": 0, "inactive": 0, "errors": 0}
@@ -142,8 +134,6 @@ def test_run_crawl_applies_db_override_before_cycle():
 
 def test_run_crawl_prints_json_counters(capsys):
     """run_crawl() prints JSON counters from run_crawl_cycle to stdout."""
-    from estimator_king.__main__ import run_crawl
-
     mock_cfg = _make_cfg()
     counters = {"discovered": 10, "fetched_ok": 9, "created": 3,
                 "updated": 2, "skipped": 4, "inactive": 1, "errors": 1}
@@ -162,8 +152,6 @@ def test_run_crawl_prints_json_counters(capsys):
 
 def test_run_crawl_exits_2_when_embedding_key_missing():
     """run_crawl() exits 2 when embedding_api_key is falsy (None or empty string)."""
-    from estimator_king.__main__ import run_crawl
-
     for empty_key in (None, ""):
         mock_cfg = _make_cfg(embedding_api_key=empty_key)
         with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg):
@@ -174,8 +162,6 @@ def test_run_crawl_exits_2_when_embedding_key_missing():
 
 def test_run_crawl_exits_1_on_cycle_exception():
     """run_crawl() exits 1 when asyncio.run(run_crawl_cycle(...)) raises."""
-    from estimator_king.__main__ import run_crawl
-
     mock_cfg = _make_cfg()
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.EmbeddingProvider"), \
