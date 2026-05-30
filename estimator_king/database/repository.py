@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,7 @@ class ProductStateRepository:
         self._db_path: str = db_path
         self._timeout_seconds: float = timeout_seconds
         self._conn: sqlite3.Connection | None = None
+        self._lock: threading.RLock = threading.RLock()
 
     def __enter__(self) -> "ProductStateRepository":
         self.open()
@@ -52,36 +54,38 @@ class ProductStateRepository:
         self.close()
 
     def open(self) -> None:
-        if self._conn is not None:
-            return
+        with self._lock:
+            if self._conn is not None:
+                return
 
-        use_uri: bool = self._db_path.startswith("file:")
-        if self._db_path != ":memory:" and not use_uri:
-            Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+            use_uri: bool = self._db_path.startswith("file:")
+            if self._db_path != ":memory:" and not use_uri:
+                Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        conn = sqlite3.connect(
-            self._db_path,
-            uri=use_uri,
-            timeout=self._timeout_seconds,
-            isolation_level=None,
-            detect_types=sqlite3.PARSE_DECLTYPES,
-            check_same_thread=False,
-        )
-        conn.row_factory = sqlite3.Row
-        try:
-            self._apply_pragmas(conn)
-            self._ensure_schema(conn)
-        except Exception:
-            conn.close()
-            raise
+            conn = sqlite3.connect(
+                self._db_path,
+                uri=use_uri,
+                timeout=self._timeout_seconds,
+                isolation_level=None,
+                detect_types=sqlite3.PARSE_DECLTYPES,
+                check_same_thread=False,
+            )
+            conn.row_factory = sqlite3.Row
+            try:
+                self._apply_pragmas(conn)
+                self._ensure_schema(conn)
+            except Exception:
+                conn.close()
+                raise
 
-        self._conn = conn
+            self._conn = conn
 
     def close(self) -> None:
-        if self._conn is None:
-            return
-        self._conn.close()
-        self._conn = None
+        with self._lock:
+            if self._conn is None:
+                return
+            self._conn.close()
+            self._conn = None
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -90,234 +94,251 @@ class ProductStateRepository:
         return self._conn
 
     def get_by_external_key(self, external_key: str) -> ProductState | None:
-        row = self.connection.execute(
-            "SELECT * FROM products WHERE external_key = ?",
-            (external_key,),
-        ).fetchone()
-        if row is None:
-            return None
-        return _row_to_state(cast(sqlite3.Row, row))
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM products WHERE external_key = ?",
+                (external_key,),
+            ).fetchone()
+            if row is None:
+                return None
+            return _row_to_state(cast(sqlite3.Row, row))
 
     def upsert(self, state: ProductState) -> ProductState:
-        now = _utc_now()
-        existing = self.get_by_external_key(state.external_key)
-        created_at = existing.created_at if existing and existing.created_at else now
-        state = state.with_updated_timestamps(created_at=created_at, updated_at=now)
-        _ = self.connection.execute(
-            """
-            INSERT INTO products (
-                external_key, store_id, product_id, product_url,
-                content_hash, normalizer_version,
-                last_seen_in_sitemap_at, last_fetch_success_at, last_indexed_at,
-                created_at, updated_at,
-                consecutive_failures, consecutive_sitemap_misses,
-                inactive, inactive_reason, inactive_since
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(external_key) DO UPDATE SET
-                store_id=excluded.store_id,
-                product_id=excluded.product_id,
-                product_url=COALESCE(excluded.product_url, products.product_url),
-                content_hash=excluded.content_hash,
-                normalizer_version=excluded.normalizer_version,
-                last_seen_in_sitemap_at=COALESCE(excluded.last_seen_in_sitemap_at, products.last_seen_in_sitemap_at),
-                last_fetch_success_at=COALESCE(excluded.last_fetch_success_at, products.last_fetch_success_at),
-                last_indexed_at=COALESCE(excluded.last_indexed_at, products.last_indexed_at),
-                updated_at=excluded.updated_at,
-                consecutive_failures=excluded.consecutive_failures,
-                consecutive_sitemap_misses=excluded.consecutive_sitemap_misses,
-                inactive=excluded.inactive,
-                inactive_reason=excluded.inactive_reason,
-                inactive_since=excluded.inactive_since
-            """,
-            (
-                state.external_key, state.store_id, state.product_id, state.product_url,
-                state.content_hash, state.normalizer_version,
-                _dt_to_iso(state.last_seen_in_sitemap_at),
-                _dt_to_iso(state.last_fetch_success_at),
-                _dt_to_iso(state.last_indexed_at),
-                _dt_to_iso(state.created_at), _dt_to_iso(state.updated_at),
-                int(state.consecutive_failures), int(state.consecutive_sitemap_misses),
-                1 if state.inactive else 0, state.inactive_reason,
-                _dt_to_iso(state.inactive_since),
-            ),
-        )
-        refreshed = self.get_by_external_key(state.external_key)
-        if refreshed is None:
-            raise RuntimeError("upsert failed to persist record")
-        return refreshed
+        with self._lock:
+            now = _utc_now()
+            existing = self.get_by_external_key(state.external_key)
+            created_at = existing.created_at if existing and existing.created_at else now
+            state = state.with_updated_timestamps(created_at=created_at, updated_at=now)
+            _ = self.connection.execute(
+                """
+                INSERT INTO products (
+                    external_key, store_id, product_id, product_url,
+                    content_hash, normalizer_version,
+                    last_seen_in_sitemap_at, last_fetch_success_at, last_indexed_at,
+                    created_at, updated_at,
+                    consecutive_failures, consecutive_sitemap_misses,
+                    inactive, inactive_reason, inactive_since
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(external_key) DO UPDATE SET
+                    store_id=excluded.store_id,
+                    product_id=excluded.product_id,
+                    product_url=COALESCE(excluded.product_url, products.product_url),
+                    content_hash=excluded.content_hash,
+                    normalizer_version=excluded.normalizer_version,
+                    last_seen_in_sitemap_at=COALESCE(excluded.last_seen_in_sitemap_at, products.last_seen_in_sitemap_at),
+                    last_fetch_success_at=COALESCE(excluded.last_fetch_success_at, products.last_fetch_success_at),
+                    last_indexed_at=COALESCE(excluded.last_indexed_at, products.last_indexed_at),
+                    updated_at=excluded.updated_at,
+                    consecutive_failures=excluded.consecutive_failures,
+                    consecutive_sitemap_misses=excluded.consecutive_sitemap_misses,
+                    inactive=excluded.inactive,
+                    inactive_reason=excluded.inactive_reason,
+                    inactive_since=excluded.inactive_since
+                """,
+                (
+                    state.external_key, state.store_id, state.product_id, state.product_url,
+                    state.content_hash, state.normalizer_version,
+                    _dt_to_iso(state.last_seen_in_sitemap_at),
+                    _dt_to_iso(state.last_fetch_success_at),
+                    _dt_to_iso(state.last_indexed_at),
+                    _dt_to_iso(state.created_at), _dt_to_iso(state.updated_at),
+                    int(state.consecutive_failures), int(state.consecutive_sitemap_misses),
+                    1 if state.inactive else 0, state.inactive_reason,
+                    _dt_to_iso(state.inactive_since),
+                ),
+            )
+            refreshed = self.get_by_external_key(state.external_key)
+            if refreshed is None:
+                raise RuntimeError("upsert failed to persist record")
+            return refreshed
 
     def mark_inactive(self, external_key: str, reason: str) -> None:
-        now = _utc_now()
-        _ = self.connection.execute(
-            """
-            UPDATE products
-            SET inactive = 1,
-                inactive_reason = ?,
-                inactive_since = ?,
-                updated_at = ?
-            WHERE external_key = ?
-            """,
-            (reason, _dt_to_iso(now), _dt_to_iso(now), external_key),
-        )
+        with self._lock:
+            now = _utc_now()
+            _ = self.connection.execute(
+                """
+                UPDATE products
+                SET inactive = 1,
+                    inactive_reason = ?,
+                    inactive_since = ?,
+                    updated_at = ?
+                WHERE external_key = ?
+                """,
+                (reason, _dt_to_iso(now), _dt_to_iso(now), external_key),
+            )
 
     def get_all_active(self) -> list[ProductState]:
-        rows = self.connection.execute(
-            "SELECT * FROM products WHERE inactive = 0 ORDER BY external_key"
-        ).fetchall()
-        return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT * FROM products WHERE inactive = 0 ORDER BY external_key"
+            ).fetchall()
+            return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
 
     def list_active(self, store_id: str) -> list[ProductState]:
         """Return all active products for a given store."""
-        rows = self.connection.execute(
-            "SELECT * FROM products WHERE store_id = ? AND inactive = 0 ORDER BY external_key",
-            (store_id,),
-        ).fetchall()
-        return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT * FROM products WHERE store_id = ? AND inactive = 0 ORDER BY external_key",
+                (store_id,),
+            ).fetchall()
+            return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
 
     def get_oldest_active_products(self, store_id: str, limit: int) -> list[ProductState]:
         if limit <= 0:
             return []
-        rows = self.connection.execute(
-            """
-            SELECT * FROM products
-            WHERE store_id = ? AND inactive = 0
-            ORDER BY last_fetch_success_at ASC
-            LIMIT ?
-            """,
-            (store_id, limit),
-        ).fetchall()
-        return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM products
+                WHERE store_id = ? AND inactive = 0
+                ORDER BY last_fetch_success_at ASC
+                LIMIT ?
+                """,
+                (store_id, limit),
+            ).fetchall()
+            return [_row_to_state(cast(sqlite3.Row, r)) for r in rows]
 
     # ── crawl_queue helpers ──────────────────────────────────────────
 
     def enqueue_url(self, store_id: str, product_url: str) -> bool:
         """Insert a URL into the crawl queue. Returns True if new, False if duplicate."""
-        cur = self.connection.execute(
-            "INSERT OR IGNORE INTO crawl_queue (store_id, product_url) VALUES (?, ?)",
-            (store_id, product_url),
-        )
-        return cur.rowcount == 1
+        with self._lock:
+            cur = self.connection.execute(
+                "INSERT OR IGNORE INTO crawl_queue (store_id, product_url) VALUES (?, ?)",
+                (store_id, product_url),
+            )
+            return cur.rowcount == 1
 
     def peek_next(self, store_id: str | None = None) -> tuple[int, str, str] | None:
         """Return (id, store_id, product_url) for the oldest queue entry, or None."""
-        if store_id is not None:
-            row = self.connection.execute(
-                "SELECT id, store_id, product_url FROM crawl_queue"
-                " WHERE store_id = ? ORDER BY id ASC LIMIT 1",
-                (store_id,),
-            ).fetchone()
-        else:
-            row = self.connection.execute(
-                "SELECT id, store_id, product_url FROM crawl_queue"
-                " ORDER BY id ASC LIMIT 1"
-            ).fetchone()
-        if row is None:
-            return None
-        return (int(row["id"]), str(row["store_id"]), str(row["product_url"]))
+        with self._lock:
+            if store_id is not None:
+                row = self.connection.execute(
+                    "SELECT id, store_id, product_url FROM crawl_queue"
+                    " WHERE store_id = ? ORDER BY id ASC LIMIT 1",
+                    (store_id,),
+                ).fetchone()
+            else:
+                row = self.connection.execute(
+                    "SELECT id, store_id, product_url FROM crawl_queue"
+                    " ORDER BY id ASC LIMIT 1"
+                ).fetchone()
+            if row is None:
+                return None
+            return (int(row["id"]), str(row["store_id"]), str(row["product_url"]))
 
     def peek_all(self, store_id: str) -> list[dict[str, int | str]]:
-        rows = self.connection.execute(
-            "SELECT id, store_id, product_url FROM crawl_queue WHERE store_id = ? ORDER BY id ASC",
-            (store_id,),
-        ).fetchall()
-        return [
-            {
-                "id": int(row["id"]),
-                "store_id": str(row["store_id"]),
-                "product_url": str(row["product_url"]),
-            }
-            for row in rows
-        ]
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT id, store_id, product_url FROM crawl_queue WHERE store_id = ? ORDER BY id ASC",
+                (store_id,),
+            ).fetchall()
+            return [
+                {
+                    "id": int(row["id"]),
+                    "store_id": str(row["store_id"]),
+                    "product_url": str(row["product_url"]),
+                }
+                for row in rows
+            ]
 
     def delete_queue_entry(self, entry_id: int) -> None:
         """Delete a single queue entry by id."""
-        _ = self.connection.execute(
-            "DELETE FROM crawl_queue WHERE id = ?",
-            (entry_id,),
-        )
+        with self._lock:
+            _ = self.connection.execute(
+                "DELETE FROM crawl_queue WHERE id = ?",
+                (entry_id,),
+            )
 
     def queue_size(self, store_id: str | None = None) -> int:
         """Return the number of entries in the crawl queue."""
-        if store_id is not None:
-            row = self.connection.execute(
-                "SELECT COUNT(*) FROM crawl_queue WHERE store_id = ?",
-                (store_id,),
-            ).fetchone()
-        else:
-            row = self.connection.execute("SELECT COUNT(*) FROM crawl_queue").fetchone()
-        return int(row[0]) if row else 0
+        with self._lock:
+            if store_id is not None:
+                row = self.connection.execute(
+                    "SELECT COUNT(*) FROM crawl_queue WHERE store_id = ?",
+                    (store_id,),
+                ).fetchone()
+            else:
+                row = self.connection.execute("SELECT COUNT(*) FROM crawl_queue").fetchone()
+            return int(row[0]) if row else 0
 
     def clear_queue(self, store_id: str | None = None) -> int:
         """Delete all entries from the crawl queue. Returns rows deleted."""
-        if store_id is not None:
-            cur = self.connection.execute(
-                "DELETE FROM crawl_queue WHERE store_id = ?",
-                (store_id,),
-            )
-        else:
-            cur = self.connection.execute("DELETE FROM crawl_queue")
-        return cur.rowcount
+        with self._lock:
+            if store_id is not None:
+                cur = self.connection.execute(
+                    "DELETE FROM crawl_queue WHERE store_id = ?",
+                    (store_id,),
+                )
+            else:
+                cur = self.connection.execute("DELETE FROM crawl_queue")
+            return cur.rowcount
 
     def get_by_product_url(
         self, store_id: str, product_url: str
     ) -> ProductState | None:
-        row = self.connection.execute(
-            "SELECT * FROM products WHERE store_id = ? AND product_url = ?",
-            (store_id, product_url),
-        ).fetchone()
-        if row is None:
-            return None
-        return _row_to_state(cast(sqlite3.Row, row))
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM products WHERE store_id = ? AND product_url = ?",
+                (store_id, product_url),
+            ).fetchone()
+            if row is None:
+                return None
+            return _row_to_state(cast(sqlite3.Row, row))
 
     def increment_consecutive_failures(self, external_key: str) -> None:
-        now = _utc_now()
-        _ = self.connection.execute(
-            """
-            UPDATE products
-            SET consecutive_failures = consecutive_failures + 1,
-                updated_at = ?
-            WHERE external_key = ?
-            """,
-            (_dt_to_iso(now), external_key),
-        )
+        with self._lock:
+            now = _utc_now()
+            _ = self.connection.execute(
+                """
+                UPDATE products
+                SET consecutive_failures = consecutive_failures + 1,
+                    updated_at = ?
+                WHERE external_key = ?
+                """,
+                (_dt_to_iso(now), external_key),
+            )
 
     def reset_consecutive_failures(self, external_key: str) -> None:
-        now = _utc_now()
-        _ = self.connection.execute(
-            """
-            UPDATE products
-            SET consecutive_failures = 0,
-                last_fetch_success_at = ?,
-                updated_at = ?
-            WHERE external_key = ?
-            """,
-            (_dt_to_iso(now), _dt_to_iso(now), external_key),
-        )
+        with self._lock:
+            now = _utc_now()
+            _ = self.connection.execute(
+                """
+                UPDATE products
+                SET consecutive_failures = 0,
+                    last_fetch_success_at = ?,
+                    updated_at = ?
+                WHERE external_key = ?
+                """,
+                (_dt_to_iso(now), _dt_to_iso(now), external_key),
+            )
 
     def record_sitemap_seen(self, external_key: str) -> None:
-        now = _utc_now()
-        _ = self.connection.execute(
-            """
-            UPDATE products
-            SET last_seen_in_sitemap_at = ?,
-                consecutive_sitemap_misses = 0,
-                updated_at = ?
-            WHERE external_key = ?
-            """,
-            (_dt_to_iso(now), _dt_to_iso(now), external_key),
-        )
+        with self._lock:
+            now = _utc_now()
+            _ = self.connection.execute(
+                """
+                UPDATE products
+                SET last_seen_in_sitemap_at = ?,
+                    consecutive_sitemap_misses = 0,
+                    updated_at = ?
+                WHERE external_key = ?
+                """,
+                (_dt_to_iso(now), _dt_to_iso(now), external_key),
+            )
 
     def increment_sitemap_miss(self, external_key: str) -> None:
-        now = _utc_now()
-        _ = self.connection.execute(
-            """
-            UPDATE products
-            SET consecutive_sitemap_misses = consecutive_sitemap_misses + 1,
-                updated_at = ?
-            WHERE external_key = ?
-            """,
-            (_dt_to_iso(now), external_key),
-        )
+        with self._lock:
+            now = _utc_now()
+            _ = self.connection.execute(
+                """
+                UPDATE products
+                SET consecutive_sitemap_misses = consecutive_sitemap_misses + 1,
+                    updated_at = ?
+                WHERE external_key = ?
+                """,
+                (_dt_to_iso(now), external_key),
+            )
 
     def _apply_pragmas(self, conn: sqlite3.Connection) -> None:
         _ = conn.execute("PRAGMA journal_mode=WAL")

@@ -64,9 +64,9 @@ class FakeVectorStore:
 def _config(max_products: int = 32) -> AppConfig:
     return AppConfig(
         stores=[Store(id=STORE_ID, base_url=BASE_URL, sitemap_url=SITEMAP_URL)],
-        # concurrency_per_domain=1 ensures sequential SQLite writes on the shared
-        # connection inside run_crawl_cycle, avoiding cross-thread locking errors.
-        crawler=CrawlerPolicy(max_products_per_run=max_products, concurrency_per_domain=1),
+        # concurrency_per_domain=3 exercises the real default concurrent path now
+        # that the repository serializes DB access with an RLock.
+        crawler=CrawlerPolicy(max_products_per_run=max_products, concurrency_per_domain=3),
     )
 
 
