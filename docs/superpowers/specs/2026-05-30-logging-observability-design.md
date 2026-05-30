@@ -80,10 +80,12 @@ LLM 呼叫（embedding、chat）。只記 url/status/耗時，**不記錄 header
 下列模組目前直接呼叫 `logging.xxx`（掛在 root logger，格式化後 name 為 `root`），
 須改為在模組頂層建立 `logger = logging.getLogger(__name__)` 並改用 `logger.xxx`：
 
-- `estimator_king/__main__.py`：`logging.error(...)`、`logging.info(...)` →
-  `logger.error/info`（name 變為 `estimator_king.__main__`）。
-- `estimator_king/bot/runner.py`：所有 `logging.info(...)` →
-  `logger.info`（name 變為 `estimator_king.bot.runner`，歸 BOT）。
+- `estimator_king/__main__.py`：共 4 處須改——`logging.error(...)` 3 處（第 62、
+  69、79 行）與 `logging.info(...)` 1 處（第 108 行）→ 全部改為 `logger.error/info`
+  （name 變為 `estimator_king.__main__`）。
+- `estimator_king/bot/runner.py`：所有 `logging.info(...)`（含 `on_ready`、
+  `shutdown` 內共 5 處）→ `logger.info`（name 變為 `estimator_king.bot.runner`，
+  歸 BOT）。
 - `estimator_king/sync/engine.py`：`logging.exception(...)`（第 117 行）→
   `logger.exception`（name 變為 `estimator_king.sync.engine`）。
 - `estimator_king/crawler/html_extractor.py`：第 159 行的區域 `import logging` 與
@@ -146,8 +148,10 @@ LLM 呼叫（embedding、chat）。只記 url/status/耗時，**不記錄 header
   完成後輸出一筆 DEBUG。
 - 訊息格式：`"chat request: model=%s structured=%s -> %.0fms"`，參數為
   `self._config.chat_model`、`self._config.chat_structured_output`、耗時毫秒。
-- 即使下游拋出 `EstimationError`，仍應記錄已耗時間：將計時與 DEBUG 包在
-  `try/finally` 中，於 `finally` 輸出 DEBUG（確保失敗請求也被記錄）。
+- 即使下游拋出 `EstimationError`，仍應記錄已耗時間：`estimate()` 目前無 try 區塊，
+  須新增一個 `try/finally` 包住既有的分派呼叫（`if self._config.chat_structured_output:
+  return self._estimate_structured(messages)` / `return self._estimate_json_object(messages)`），
+  於 `finally` 輸出 DEBUG（finally 不吞例外，例外照常往上傳遞，行為不變）。
 
 需新增 `import logging`、`import time` 與模組 logger
 `logger = logging.getLogger(__name__)`（目前此檔無 logger 與這兩個 import）。
