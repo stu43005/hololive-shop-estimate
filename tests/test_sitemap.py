@@ -339,11 +339,7 @@ class TestSitemapEnumeratorLocaleFiltering:
         client = FakeAsyncClient(_multilocale_router)
         enumerator = SitemapEnumerator(http_client=client)
         asyncio.run(enumerator.enumerate_products("https://shop.example.com"))
-        assert any(
-            u.endswith("/sitemap_products_1.xml") and "/en/" not in u
-            and "/ja-al/" not in u and "/en-dz/" not in u
-            for u in client.call_urls
-        )
+        assert "https://shop.example.com/sitemap_products_1.xml" in client.call_urls
         assert not any("/en/sitemap_products" in u for u in client.call_urls)
         assert not any("/ja-al/sitemap_products" in u for u in client.call_urls)
         assert not any("/en-dz/sitemap_products" in u for u in client.call_urls)
