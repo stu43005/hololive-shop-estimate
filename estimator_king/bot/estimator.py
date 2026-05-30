@@ -2,7 +2,8 @@
 the chat model for structured estimates (replaces the Dify workflow)."""
 
 import logging
-from typing import Protocol
+from collections.abc import Sequence
+from typing import Any, Protocol
 
 from estimator_king.llm.chat import EstimateBatch
 
@@ -28,12 +29,12 @@ class _Chat(Protocol):
 
 
 class _Hit(Protocol):
-    metadata: dict[str, object]
+    metadata: dict[str, Any]
 
 
 class _VectorStore(Protocol):
     def query(self, embedding: list[float], n_results: int,
-              where: dict[str, object] | None = None) -> list[_Hit]: ...
+              where: dict[str, Any] | None = None) -> Sequence[_Hit]: ...
 
 
 class Estimator:
