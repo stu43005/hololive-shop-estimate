@@ -80,7 +80,8 @@ worker pool 取消行為：cancel `gather(*workers)` 只需拆 `concurrency` 個
   html_text = await client.get(canonical_url)
   return await asyncio.to_thread(_build_snapshot, json_text, html_text, canonical_url)
   ```
-- **新增同步函式 `_build_snapshot(json_text: str, html_text: str, canonical_url: str) -> ProductSnapshot`**，把現有的同步解析整合進去：`json.loads(json_text)` → `_parse_product_json` → `extract_html_details(html_text)` → `_build_snapshot_from_product_json(...)` → `compute_content_hash` → 回傳 `ProductSnapshotWithHash`。此函式在 `asyncio.to_thread` 中執行，保持 CPU-bound 解析 off-loop（與原本「整個 fetch 在 thread」的 off-loop 行為一致）。
+- **新增同步函式 `_build_snapshot(json_text: str, html_text: str, canonical_url: str) -> ProductSnapshot`**（新的外層 wrapper，與既有、保留不變的 `_build_snapshot_from_product_json` 是不同函式，勿混淆），把現有的同步解析整合進去：`json.loads(json_text)` → `_parse_product_json` → `extract_html_details(html_text)` → `_build_snapshot_from_product_json(...)` → `compute_content_hash` → 回傳 `ProductSnapshotWithHash`。此函式在 `asyncio.to_thread` 中執行，保持 CPU-bound 解析 off-loop（與原本「整個 fetch 在 thread」的 off-loop 行為一致）。
+- `fetch_product` 與 `_build_snapshot` 的回傳型別註解維持 `-> ProductSnapshot`（實際回傳其子類 `ProductSnapshotWithHash`，與現況一致——這是刻意，勿「修正」成 `ProductSnapshotWithHash`）。
 - **移除**：同步 `_HTTPResponse`、`_HTTPGetter` Protocol、`_raise_for_status` 函式。HTTP 狀態錯誤改由 `AsyncHTTPClient.get` 內部處理（4xx → `ClientError`、5xx → `ServerError`、403/430 → `WAFBlockedError`、429 → 重試）；這些例外從 `await client.get` 直接傳出。
 - **移除 `ShopifyHTTPError`**（其唯一 production 觸發點 `_raise_for_status` 被移除後即成孤兒；4xx 改由 `ClientError` 表示）。保留 `ShopifyProductError`、`ShopifyJSONError`（`_parse_product_json`／`_build_snapshot` 仍會 raise `ShopifyJSONError`）。
 - shopify.py 需新增 `import asyncio`（給 `asyncio.to_thread`）。
@@ -107,7 +108,10 @@ production：
 - `estimator_king/crawler/shopify.py`（`fetch_product` 改 async + `_build_snapshot`；移除 `_HTTPResponse`/`_HTTPGetter`/`_raise_for_status`/`ShopifyHTTPError`；加 `_AsyncGetter` Protocol、`import asyncio`）
 
 tests：
-- `tests/test_shopify.py`（所有 `fetch_product` 測試改 async：`asyncio.run` + async fake client 回 `str`；HTTP-error 測試由斷言 `ShopifyHTTPError` 改為斷言 `AsyncHTTPClient` 的 `ClientError`；移除 `ShopifyHTTPError` import）
+- `tests/test_shopify.py`（所有 `fetch_product` 測試改 async：`asyncio.run` + async fake client 回 `str`）：
+  - **移除** `_Resp` 類別、`from unittest.mock import Mock`，`_mk_client` 改為建構 async fake client（`async def get(self, url) -> str`，依 URL 後綴回 json/html 字串）。
+  - 兩個 HTTP-error 測試（現 `test_fetch_product_http_error_raises_shopify_http_error` 參數化 `[404, 500]`、`test_fetch_product_html_http_error_raises_shopify_http_error` 用 `html_status=500`）改為：fake `get` 對失敗的 URL `raise` **對應狀態的 `AsyncHTTPClient` 例外**——**404 → `ClientError`、500 → `ServerError`**（非一律 `ClientError`；`from estimator_king.crawler.async_http_client import ClientError, ServerError`），並各自斷言對應例外型別。`fetch_product` 直接把該例外從 `await client.get` 傳出（fake 直接 raise，不涉及真實重試）。建議把參數化改為 `[(404, ClientError), (500, ServerError)]`。
+  - 移除 `ShopifyHTTPError` import；malformed-json / 缺 product 物件等測試維持斷言 `ShopifyJSONError`。
 - `tests/test_async_pipeline.py`（`fetch_product` 變 async → `patch(..., return_value=_snap)` 自動 AsyncMock；`side_effect=boom` 的 `boom` 仍可 raise；其 `raise ShopifyHTTPError(...)` 改為 raise 一個仍存在的例外——例如 `ClientError(url, status_code=500)` 或一般 `Exception`，並移除 `ShopifyHTTPError` import；新增 worker-pool 行為測試見 §5）
 - `tests/test_async_pipeline_logging.py`（`patch(fetch_product)` 自動 AsyncMock；確認 logging 斷言仍成立）
 - `tests/test_integration_async_pipeline.py`（`patch(fetch_product, side_effect=fake_fetch)`：`fake_fetch(url, client)` 為同步函式回傳 snapshot，AsyncMock 會把同步回傳值當成 await 結果，相容；確認三個整合測試仍綠）
@@ -115,10 +119,10 @@ tests：
 ## 5. 測試策略
 
 - **沿用本專案既有 async 測試慣例**（依目標檔）：`test_shopify.py`、`test_async_pipeline.py`、`test_integration_async_pipeline.py` 用 `asyncio.run(...)` 在同步 `def test_...` 內呼叫（比照 `test_async_pipeline.py` 現況）。
-- **test_shopify.py 的 async fake client**：以 `async def get(self, url) -> str` 的 fake 物件取代現有回傳具 `.status_code`/`.text` 物件的同步 fake；依 URL 後綴回傳 json 字串或 html 字串。HTTP-error 測試讓 fake `get` 對指定 URL `raise ClientError(url, status_code=...)`（`from estimator_king.crawler.async_http_client import ClientError`），斷言 `fetch_product` 直接傳出該 `ClientError`。malformed-json / 缺 product 物件等測試維持斷言 `ShopifyJSONError`（在 `_build_snapshot` 內 raise、經 to_thread await 傳出）。
-- **worker pool 行為測試**（新增於 `test_async_pipeline.py`）：
-  - 多筆 entries（例如 5 筆）+ `concurrency_per_domain=2`，patch `fetch_product`/`sync_products`，斷言全部 entries 都被處理（`result.processed == 5`、queue 排空）。
-  - 並行上限：以可觀測的併發計數（patch 的 fetch 在進入時 +1、離開時 -1，記錄 max），斷言同時併發數不超過 `concurrency_per_domain`。
+- **test_shopify.py 的 async fake client**：以 `async def get(self, url) -> str` 的 fake 物件取代現有回傳具 `.status_code`/`.text` 物件的同步 fake；依 URL 後綴回傳 json 字串或 html 字串。HTTP-error 測試讓 fake `get` 對指定 URL `raise` 對應狀態的例外（**404 → `ClientError`、500 → `ServerError`**；`from estimator_king.crawler.async_http_client import ClientError, ServerError`），斷言 `fetch_product` 直接傳出對應例外型別。malformed-json / 缺 product 物件等測試維持斷言 `ShopifyJSONError`（在 `_build_snapshot` 內 raise、經 to_thread await 傳出）。
+- **worker pool 行為測試**（新增於 `test_async_pipeline.py`，驗證的是 **worker-pool 的並行上限**，非 `AsyncHTTPClient` 內部 semaphore——測試會 patch 掉 `fetch_product`，故真實 client semaphore 不參與）：
+  - 多筆 entries（例如 5 筆）+ **明確建構 `CrawlerPolicy(concurrency_per_domain=2)`**（注意預設為 3，必須顯式指定 2 才能與 5 筆區分），patch `fetch_product`/`sync_products`，斷言全部 entries 都被處理（`result.processed == 5`、queue 排空）。
+  - 並行上限：以可觀測的併發計數（patch 的 fetch 在進入時 +1、離開時 -1，記錄 max），斷言同時併發數不超過 `concurrency_per_domain`（=2）。
 - **既有 async_pipeline 測試**：確認 `patch(async_pipeline.fetch_product, return_value=_snap)` 在 fetch_product 變 async 後自動成為 AsyncMock（`await` 回傳 `_snap`），且 `side_effect` 版本相容。
 - 全套件須維持全綠（先前 242 passed 基準；本次新增/改寫測試後數字會變動，但不得有 failure）。
 
