@@ -15,6 +15,7 @@ class ProviderConfig:
     embedding_base_url: str | None = None
     embedding_model: str = "text-embedding-3-large"
     embedding_dimensions: int | None = 1024
+    embedding_max_tokens: int = 8192
     embedding_query_prefix: str = ""
     embedding_doc_prefix: str = ""
 

@@ -9,6 +9,7 @@ pyyaml
 chromadb
 openai
 pydantic
+tiktoken
 pytest
 pytest-cov
 pytest-asyncio

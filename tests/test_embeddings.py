@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import tiktoken
+
 from estimator_king.llm.config import ProviderConfig
 from estimator_king.llm.embeddings import EmbeddingProvider
 
@@ -8,6 +10,36 @@ def _fake_response(vectors):
     resp = MagicMock()
     resp.data = [MagicMock(embedding=v) for v in vectors]
     return resp
+
+
+@patch("estimator_king.llm.embeddings.OpenAI")
+def test_embed_truncates_input_to_max_tokens(mock_openai):
+    client = mock_openai.return_value
+    client.embeddings.create.return_value = _fake_response([[0.0]])
+    cfg = ProviderConfig(
+        embedding_api_key="k", chat_api_key="k",
+        embedding_dimensions=None, embedding_max_tokens=5,
+    )
+
+    EmbeddingProvider(cfg).embed_query("word " * 1000)
+
+    sent = client.embeddings.create.call_args.kwargs["input"][0]
+    enc = tiktoken.encoding_for_model(cfg.embedding_model)
+    assert len(enc.encode(sent)) <= 5
+
+
+@patch("estimator_king.llm.embeddings.OpenAI")
+def test_embed_does_not_truncate_short_input(mock_openai):
+    client = mock_openai.return_value
+    client.embeddings.create.return_value = _fake_response([[0.0]])
+    cfg = ProviderConfig(
+        embedding_api_key="k", chat_api_key="k",
+        embedding_dimensions=None, embedding_max_tokens=8192,
+    )
+
+    EmbeddingProvider(cfg).embed_query("short text")
+
+    assert client.embeddings.create.call_args.kwargs["input"] == ["short text"]
 
 
 @patch("estimator_king.llm.embeddings.OpenAI")
