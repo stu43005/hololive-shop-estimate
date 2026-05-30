@@ -26,7 +26,7 @@ def test_sync_failure_logs_under_module_logger(caplog):
     with ProductStateRepository(":memory:") as repo:
         with caplog.at_level(logging.ERROR):
             result = sync_products(
-                [_snap()], "hololive", "https://x", repo,
+                [("https://x/products/p1", _snap())], "hololive", repo,
                 BoomEmbedder(), FakeVectorStore(),
             )
 

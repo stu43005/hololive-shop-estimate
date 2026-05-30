@@ -55,7 +55,7 @@ async def run_crawl_cycle(
 
                 try:
                     result = await async_process_queue(
-                        store.id, store.base_url, config.crawler, repo, embedder, vector_store,
+                        store.id, config.crawler, repo, embedder, vector_store,
                         proxy=config.proxy)
                     counters["fetched_ok"] += result.processed
                     counters["created"] += result.created

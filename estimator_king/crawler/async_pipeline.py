@@ -42,7 +42,6 @@ class _AsyncToSyncHTTPAdapter:
 
 async def async_process_queue(
     store_id: str,
-    store_base_url: str,
     policy: CrawlerPolicy,
     state_repo: ProductStateRepository,
     embedder: EmbeddingProvider,
@@ -70,7 +69,7 @@ async def async_process_queue(
             try:
                 snapshot = await asyncio.to_thread(fetch_with_adapter, product_url, adapter)
                 sync_result = await asyncio.to_thread(
-                    sync_products, [snapshot], store_id, store_base_url,
+                    sync_products, [(product_url, snapshot)], store_id,
                     state_repo, embedder, vector_store,
                 )
                 state_repo.delete_queue_entry(entry_id)

@@ -44,7 +44,7 @@ def test_success_indexes_and_clears_queue(repo):
 
     with patch("estimator_king.crawler.async_pipeline.fetch_product", return_value=_snap(1)):
         result = asyncio.run(async_process_queue(
-            "hololive", "https://x", policy, repo, FakeEmbedder(), vs))
+            "hololive", policy, repo, FakeEmbedder(), vs))
 
     assert result.processed == 1
     assert vs.upserts == ["hololive:1"]
@@ -57,7 +57,7 @@ def test_fetch_failure_increments_failures_and_keeps_queue(repo):
     # Pre-existing product row so the failure can be recorded against it.
     repo.enqueue_url("hololive", "https://x/products/1")
     with patch("estimator_king.crawler.async_pipeline.fetch_product", return_value=_snap(1)):
-        asyncio.run(async_process_queue("hololive", "https://x", CrawlerPolicy(), repo,
+        asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
                                         FakeEmbedder(), FakeVectorStore()))
     repo.enqueue_url("hololive", "https://x/products/1")  # re-queue for the failing run
 
@@ -65,7 +65,7 @@ def test_fetch_failure_increments_failures_and_keeps_queue(repo):
         raise ShopifyHTTPError(url, status_code=500)
 
     with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=boom):
-        result = asyncio.run(async_process_queue("hololive", "https://x", CrawlerPolicy(), repo,
+        result = asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
                                                  FakeEmbedder(), FakeVectorStore()))
 
     assert result.failed == 1
@@ -91,7 +91,7 @@ def test_proxy_forwarded_to_async_http_client(repo):
     with patch("estimator_king.crawler.async_pipeline.AsyncHTTPClient", _FakeClient), \
          patch("estimator_king.crawler.async_pipeline.fetch_product", return_value=_snap(1)):
         asyncio.run(async_process_queue(
-            "hololive", "https://x", CrawlerPolicy(), repo,
+            "hololive", CrawlerPolicy(), repo,
             FakeEmbedder(), FakeVectorStore(), proxy=proxy_cfg))
 
     assert captured["proxy"] is proxy_cfg

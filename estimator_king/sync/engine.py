@@ -75,18 +75,16 @@ def _format_product_document(
 
 
 def sync_products(
-    snapshots: Iterable[ProductSnapshot],
+    items: Iterable[tuple[str, ProductSnapshot]],
     store_id: str,
-    base_url: str,
     repository: ProductStateRepository,
     embedder: _Embedder,
     vector_store: _VectorStore,
 ) -> SyncResult:
     result = SyncResult()
-    for snapshot in snapshots:
+    for product_url, snapshot in items:
         now = datetime.now(tz=timezone.utc)
         external_key = f"{store_id}:{snapshot.product_id}"
-        product_url = f"{base_url}/products/{snapshot.product_id}"
         content_hash = compute_content_hash(snapshot)
         state = repository.get_by_external_key(external_key)
 

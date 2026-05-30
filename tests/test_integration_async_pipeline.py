@@ -86,19 +86,24 @@ def db_path(tmp_path: Path) -> str:
 
 
 def test_run_cycle_indexes_pre_seeded_urls(db_path: str) -> None:
-    """Products pre-seeded into the queue land in the DB with last_indexed_at set
-    and the fake vector store receives their upserts."""
+    """Pre-seeded handle URLs land in the DB; the stored product_url is the
+    fetched handle URL, NOT a numeric one fabricated from product_id."""
     embedder = FakeEmbedder()
     vs = FakeVectorStore()
 
-    # Pre-seed two URLs directly into the queue so we don't need the sitemap.
+    handle_url_a = f"{BASE_URL}/products/voice-pack-001"
+    handle_url_b = f"{BASE_URL}/products/voice-pack-002"
+    pid_a = 8087824892124
+    pid_b = 8087824892125
+
+    # Pre-seed two handle URLs directly into the queue so we don't need the sitemap.
     with ProductStateRepository(db_path) as repo:
-        _ = repo.enqueue_url(STORE_ID, f"{BASE_URL}/products/101")
-        _ = repo.enqueue_url(STORE_ID, f"{BASE_URL}/products/102")
+        _ = repo.enqueue_url(STORE_ID, handle_url_a)
+        _ = repo.enqueue_url(STORE_ID, handle_url_b)
 
     snapshots: dict[str, ProductSnapshot] = {
-        f"{BASE_URL}/products/101": _snap(101),
-        f"{BASE_URL}/products/102": _snap(102),
+        handle_url_a: _snap(pid_a),
+        handle_url_b: _snap(pid_b),
     }
 
     def fake_fetch(url: str, client: Any) -> ProductSnapshot:
@@ -118,17 +123,16 @@ def test_run_cycle_indexes_pre_seeded_urls(db_path: str) -> None:
     assert counters["created"] == 2
     assert counters["errors"] == 0
 
-    expected_keys = {f"{STORE_ID}:101", f"{STORE_ID}:102"}
+    expected_keys = {f"{STORE_ID}:{pid_a}", f"{STORE_ID}:{pid_b}"}
     assert set(vs.upserts) == expected_keys
 
-    # Check DB: both rows should have last_indexed_at set.
+    # Stored URL must be the fetched handle URL, not a fabricated numeric one.
     with ProductStateRepository(db_path) as repo:
-        for key in expected_keys:
-            state = repo.get_by_external_key(key)
-            assert state is not None, f"Missing row for {key}"
-            assert state.last_indexed_at is not None, (
-                f"{key} should have last_indexed_at set after indexing"
-            )
+        state_a = repo.get_by_external_key(f"{STORE_ID}:{pid_a}")
+        assert state_a is not None
+        assert state_a.last_indexed_at is not None
+        assert state_a.product_url == handle_url_a
+        assert state_a.product_url != f"{BASE_URL}/products/{pid_a}"
 
 
 def test_run_cycle_skips_unchanged_products_on_second_run(db_path: str) -> None:

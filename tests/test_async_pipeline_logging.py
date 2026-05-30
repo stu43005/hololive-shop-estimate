@@ -52,7 +52,7 @@ def test_queue_start_heartbeat_and_done_logged(repo, caplog):
             side_effect=fake_fetch,
         ):
             result = asyncio.run(async_process_queue(
-                "hololive", "https://x", CrawlerPolicy(), repo,
+                "hololive", CrawlerPolicy(), repo,
                 FakeEmbedder(), FakeVectorStore()))
 
     assert result.processed == n
