@@ -94,7 +94,7 @@ Shopify storefront 的 `/products/<x>` 與 `/products/<x>.json` 只認 handle，
 - 提供可匯入的函式（例如 `migrate(db_path: str) -> tuple[int, int]`，回傳 `(queue_deleted, rows_reset)`）以利測試，並附 `__main__` 進入點。
 - 動作（單一 transaction）：
   1. `DELETE FROM crawl_queue`（清空全部卡死佇列；佇列為暫時性，每輪由 sitemap + budget 重建）。
-  2. `UPDATE products SET consecutive_failures = 0, consecutive_sitemap_misses = 0, updated_at = <now> WHERE consecutive_failures > 0 OR consecutive_sitemap_misses > 0`（清除被 bug 灌大的計數器；`WHERE` 使重置筆數可量測、冪等，且不更動無辜 row 的 `updated_at`）。
+  2. `UPDATE products SET consecutive_failures = 0, consecutive_sitemap_misses = 0, updated_at = <now> WHERE consecutive_failures > 0 OR consecutive_sitemap_misses > 0`（清除被 bug 灌大的計數器；`WHERE` 使重置筆數可量測、冪等，且不更動無辜 row 的 `updated_at`）。`updated_at` 須以 ISO-8601 UTC 字串寫入，格式與 `repository.py` 的 `_dt_to_iso` 一致（例如 `strftime('%Y-%m-%dT%H:%M:%SZ','now')`），勿用 SQLite 預設的 `datetime('now')`（缺 `T`/`Z`，與既有格式不符）。
      - **為何此重置為必要前置**：現況 `consecutive_sitemap_misses` 最大已達 3，門檻 `inactive_sitemap_miss_threshold = 4`，而 `mark_inactive_products`（`estimator_king/sync/inactive.py:65`）用 `>=` 比較。若不重置，修正後第一輪 `populate_queue_from_sitemap` 仍會對舊數字 URL row 執行 `increment_sitemap_miss`（DB 仍是數字 URL、handle URL 對不上 → 走 miss 分支），使其 3→4 並滿足 `4 >= 4` → 同輪 inactive sweep 即把健康商品誤標下架。重置歸零後第一輪僅 0→1，安全。
   3. 印出刪除筆數與重置筆數。
 - **冪等**：再次執行刪除 0 筆、重置 0 筆。
@@ -118,11 +118,21 @@ Shopify storefront 的 `/products/<x>` 與 `/products/<x>.json` 只認 handle，
 - 全面更新為 tuple 簽名 `sync_products([(url, snapshot)], store_id, repo, embedder, vector_store)`（移除 `base_url` 引數）。
 - **新增回歸測試**：以 handle URL（如 `https://shop.hololivepro.com/products/some-handle`）與帶數字 `product_id` 的 snapshot 呼叫 `sync_products`，斷言寫入 DB 的 `product_url` 等於該 handle URL，**而非** `.../products/<numeric_id>`。
 
-### `tests/test_async_pipeline.py`、`tests/test_async_pipeline_logging.py`、`tests/test_integration_async_pipeline.py`
+### `tests/test_async_pipeline.py`、`tests/test_async_pipeline_logging.py`
 
-- 更新 `async_process_queue(...)` 呼叫，移除 `store_base_url` 引數。
+- 更新 `async_process_queue(...)` 呼叫，移除 `store_base_url` 引數（此兩檔直接呼叫 `async_process_queue`）。
 - **新增測試**：`fetch_product` 拋 `ClientError(url, status_code=404)` 時，`delete_queue_entry` 被呼叫（佇列項目移除）且 `increment_consecutive_failures` 被呼叫（若有對應 row）；`result.failed` +1。
 - **新增測試**：`fetch_product` 拋 `ServerError` 或一般 `Exception` 時，`delete_queue_entry` **未**被呼叫（佇列項目保留重試），`result.failed` +1。
+
+### `tests/test_integration_async_pipeline.py`
+
+- 此檔透過 `run_crawl_cycle` 端到端測試，**不直接呼叫 `async_process_queue`**，故無「移除 `store_base_url` 引數」的修改。
+- **修正既有 `test_run_cycle_indexes_pre_seeded_urls` 使其能驗證 bug fix**：目前 seed 的 queue URL 為 `{BASE_URL}/products/101` 且 `_snap(101)`（product_id=101），在舊捏造程式碼下 `f"{base_url}/products/{product_id}"` 恰等於 seed URL，故 fix 前後皆通過、**無法區分 handle vs 數字 URL**。改為 seed 一筆 handle 式 URL（如 `{BASE_URL}/products/some-handle`）對應**不同**的數字 `product_id`（如 8087824892124），fake fetch 以該 handle URL 為 key 回傳帶該數字 product_id 的 snapshot，並新增斷言 `repo.get_by_external_key(f"{STORE_ID}:8087824892124").product_url == f"{BASE_URL}/products/some-handle"`（**而非** `.../products/8087824892124`）。
+- 其餘整合測試（如 `test_run_cycle_skips_unchanged_products_on_second_run`）僅需配合 `run_crawl_cycle` 簽名（已不含 `store_base_url`，本就由 cycle 內部處理）即可，無額外改動。
+
+### `tests/test_crawl_cycle.py`
+
+- 此檔 patch `async_process_queue` 為變參數 mock（`fake_proc(*a, **k)`）且不斷言其引數，簽名移除 `store_base_url` 後不會 break，**無須更新**。
 
 ### `tests/test_migrate_fix_product_urls.py`（新增）
 
