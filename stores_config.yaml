@@ -29,8 +29,12 @@ crawler:
   # Maximum retry attempts for failed requests
   max_retries: 3
 
-  # Default fetch interval for stores (hours)
-  default_fetch_interval_hours: 24.0
+  # Per-store fetch budget per scheduled run: new products are always fetched,
+  # and the remainder of the budget is spent on the oldest existing products
+  max_products_per_run: 32
+
+  # How often the in-process scheduler runs a full crawl cycle (hours)
+  crawl_schedule_hours: 24.0
 
   # Number of consecutive failures before marking store inactive
   inactive_failure_threshold: 3
