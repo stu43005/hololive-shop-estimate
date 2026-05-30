@@ -22,18 +22,26 @@ from estimator_king.database.repository import ProductStateRepository
 def migrate(db_path: str) -> tuple[int, int]:
     """Purge crawl_queue and zero out inflated counters.
 
-    Returns (queue_rows_deleted, product_rows_reset). Idempotent.
+    Returns (queue_rows_deleted, product_rows_reset). Idempotent. The DELETE and
+    UPDATE run in a single transaction so an interruption cannot leave the queue
+    purged while counters stay inflated.
     """
     with ProductStateRepository(db_path) as repo:
         conn = repo.connection
-        queue_deleted = conn.execute("DELETE FROM crawl_queue").rowcount
-        rows_reset = conn.execute(
-            "UPDATE products "
-            "SET consecutive_failures = 0, "
-            "    consecutive_sitemap_misses = 0, "
-            "    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
-            "WHERE consecutive_failures > 0 OR consecutive_sitemap_misses > 0"
-        ).rowcount
+        conn.execute("BEGIN")
+        try:
+            queue_deleted = conn.execute("DELETE FROM crawl_queue").rowcount
+            rows_reset = conn.execute(
+                "UPDATE products "
+                "SET consecutive_failures = 0, "
+                "    consecutive_sitemap_misses = 0, "
+                "    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+                "WHERE consecutive_failures > 0 OR consecutive_sitemap_misses > 0"
+            ).rowcount
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     return queue_deleted, rows_reset
 
 
