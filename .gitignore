@@ -44,6 +44,9 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 
+# ChromaDB vector store (runtime data; default CHROMA_PATH=./chroma)
+chroma/
+
 # Sisyphus working state (internal tooling)
 .sisyphus/
 
