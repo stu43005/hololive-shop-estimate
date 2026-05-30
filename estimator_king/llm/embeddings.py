@@ -1,9 +1,14 @@
 """Embedding provider over the OpenAI-compatible embeddings API."""
 
+import logging
+import time
+
 import tiktoken
 from openai import OpenAI
 
 from estimator_king.llm.config import ProviderConfig
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingProvider:
@@ -68,6 +73,7 @@ class EmbeddingProvider:
 
     def _embed(self, inputs: list[str]) -> list[list[float]]:
         inputs = [self._truncate(text) for text in inputs]
+        start = time.monotonic()
         if self._config.embedding_dimensions is not None:
             response = self._client.embeddings.create(
                 model=self._config.embedding_model,
@@ -79,4 +85,9 @@ class EmbeddingProvider:
                 model=self._config.embedding_model,
                 input=inputs,
             )
+        logger.debug(
+            "embedding request: %d inputs model=%s -> %.0fms",
+            len(inputs), self._config.embedding_model,
+            (time.monotonic() - start) * 1000.0,
+        )
         return [item.embedding for item in response.data]
