@@ -10,8 +10,8 @@
 
 **驗證工具指令（全程沿用）：**
 - 單一測試：`.venv/bin/python -m pytest <path>::<test> -v -p no:cov`
-- 型別檢查：`.venv/bin/python -m pyright <file>`
-- Lint：`.venv/bin/ruff check <file>`
+- 型別檢查：`.venv/bin/basedpyright <file>`
+- Lint：`uvx ruff check <file>`
 
 > 註：`pytest.ini` 預設 `addopts` 帶 `--cov`，逐測試執行時加 `-p no:cov` 可避免覆蓋率雜訊；最終驗證（Task 13）會跑完整含 cov 的測試。
 
@@ -122,7 +122,7 @@ Expected: PASS（2 passed）
 
 - [ ] **Step 5: 型別與 lint**
 
-Run: `.venv/bin/python -m pyright estimator_king/__main__.py tests/test_main_logging.py && .venv/bin/ruff check estimator_king/__main__.py tests/test_main_logging.py`
+Run: `.venv/bin/basedpyright estimator_king/__main__.py tests/test_main_logging.py && uvx ruff check estimator_king/__main__.py tests/test_main_logging.py`
 Expected: 0 errors
 
 - [ ] **Step 6: Commit**
@@ -192,7 +192,7 @@ Expected: PASS（1 passed）
 
 - [ ] **Step 5: 型別與 lint**
 
-Run: `.venv/bin/python -m pyright estimator_king/bot/runner.py tests/test_runner_logging.py && .venv/bin/ruff check estimator_king/bot/runner.py tests/test_runner_logging.py`
+Run: `.venv/bin/basedpyright estimator_king/bot/runner.py tests/test_runner_logging.py && uvx ruff check estimator_king/bot/runner.py tests/test_runner_logging.py`
 Expected: 0 errors
 
 - [ ] **Step 6: Commit**
@@ -282,7 +282,7 @@ Expected: PASS（1 passed）
 
 - [ ] **Step 5: 型別與 lint**
 
-Run: `.venv/bin/python -m pyright estimator_king/sync/engine.py tests/test_sync_engine_logging.py && .venv/bin/ruff check estimator_king/sync/engine.py tests/test_sync_engine_logging.py`
+Run: `.venv/bin/basedpyright estimator_king/sync/engine.py tests/test_sync_engine_logging.py && uvx ruff check estimator_king/sync/engine.py tests/test_sync_engine_logging.py`
 Expected: 0 errors
 
 - [ ] **Step 6: Commit**
@@ -359,7 +359,7 @@ Expected: PASS（1 passed）
 
 - [ ] **Step 5: 型別與 lint**
 
-Run: `.venv/bin/python -m pyright estimator_king/crawler/html_extractor.py tests/test_html_extractor_logging.py && .venv/bin/ruff check estimator_king/crawler/html_extractor.py tests/test_html_extractor_logging.py`
+Run: `.venv/bin/basedpyright estimator_king/crawler/html_extractor.py tests/test_html_extractor_logging.py && uvx ruff check estimator_king/crawler/html_extractor.py tests/test_html_extractor_logging.py`
 Expected: 0 errors（ruff 應確認已無區域重複 import）
 
 - [ ] **Step 6: Commit**
@@ -511,7 +511,7 @@ Expected: PASS（2 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_async_http_client.py -v -p no:cov && .venv/bin/python -m pyright estimator_king/crawler/async_http_client.py tests/test_async_http_client_logging.py && .venv/bin/ruff check estimator_king/crawler/async_http_client.py tests/test_async_http_client_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_async_http_client.py -v -p no:cov && .venv/bin/basedpyright estimator_king/crawler/async_http_client.py tests/test_async_http_client_logging.py && uvx ruff check estimator_king/crawler/async_http_client.py tests/test_async_http_client_logging.py`
 Expected: 既有 async http client 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -628,7 +628,7 @@ Expected: PASS（1 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_http_client.py -v -p no:cov && .venv/bin/python -m pyright estimator_king/crawler/http_client.py tests/test_http_client_logging.py && .venv/bin/ruff check estimator_king/crawler/http_client.py tests/test_http_client_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_http_client.py -v -p no:cov && .venv/bin/basedpyright estimator_king/crawler/http_client.py tests/test_http_client_logging.py && uvx ruff check estimator_king/crawler/http_client.py tests/test_http_client_logging.py`
 Expected: 既有 http client 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -738,7 +738,7 @@ Expected: PASS（1 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_embeddings.py -v -p no:cov && .venv/bin/python -m pyright estimator_king/llm/embeddings.py tests/test_embeddings_logging.py && .venv/bin/ruff check estimator_king/llm/embeddings.py tests/test_embeddings_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_embeddings.py -v -p no:cov && .venv/bin/basedpyright estimator_king/llm/embeddings.py tests/test_embeddings_logging.py && uvx ruff check estimator_king/llm/embeddings.py tests/test_embeddings_logging.py`
 Expected: 既有 embeddings 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -869,7 +869,7 @@ Expected: PASS（2 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_chat_provider.py -v -p no:cov && .venv/bin/python -m pyright estimator_king/llm/chat.py tests/test_chat_provider_logging.py && .venv/bin/ruff check estimator_king/llm/chat.py tests/test_chat_provider_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_chat_provider.py -v -p no:cov && .venv/bin/basedpyright estimator_king/llm/chat.py tests/test_chat_provider_logging.py && uvx ruff check estimator_king/llm/chat.py tests/test_chat_provider_logging.py`
 Expected: 既有 chat provider 測試全 PASS（含 refusal/invalid-json 例外仍正常傳遞）；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -975,7 +975,7 @@ Expected: PASS（2 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_pipeline.py -v -p no:cov && .venv/bin/python -m pyright estimator_king/crawler/pipeline.py tests/test_pipeline_logging.py && .venv/bin/ruff check estimator_king/crawler/pipeline.py tests/test_pipeline_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_pipeline.py -v -p no:cov && .venv/bin/basedpyright estimator_king/crawler/pipeline.py tests/test_pipeline_logging.py && uvx ruff check estimator_king/crawler/pipeline.py tests/test_pipeline_logging.py`
 Expected: 既有 pipeline 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -1130,7 +1130,7 @@ Expected: PASS（1 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_async_pipeline.py tests/test_integration_async_pipeline.py -v -p no:cov && .venv/bin/python -m pyright estimator_king/crawler/async_pipeline.py tests/test_async_pipeline_logging.py && .venv/bin/ruff check estimator_king/crawler/async_pipeline.py tests/test_async_pipeline_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_async_pipeline.py tests/test_integration_async_pipeline.py -v -p no:cov && .venv/bin/basedpyright estimator_king/crawler/async_pipeline.py tests/test_async_pipeline_logging.py && uvx ruff check estimator_king/crawler/async_pipeline.py tests/test_async_pipeline_logging.py`
 Expected: 既有 async pipeline 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -1244,7 +1244,7 @@ Expected: PASS（1 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_estimator.py -v -p no:cov && .venv/bin/python -m pyright estimator_king/bot/estimator.py tests/test_estimator_logging.py && .venv/bin/ruff check estimator_king/bot/estimator.py tests/test_estimator_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_estimator.py -v -p no:cov && .venv/bin/basedpyright estimator_king/bot/estimator.py tests/test_estimator_logging.py && uvx ruff check estimator_king/bot/estimator.py tests/test_estimator_logging.py`
 Expected: 既有 estimator 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -1302,11 +1302,17 @@ def test_too_many_products_logs_warning(monkeypatch, caplog):
         "estimator_king.bot.commands.parse_product_lines",
         lambda text: ["p"] * 11,
     )
-    modal = ProductInputModal(OkEstimator())
-    interaction = _interaction()
 
-    with caplog.at_level(logging.DEBUG, logger="estimator_king.bot.commands"):
-        asyncio.run(modal.on_submit(interaction))
+    # discord.py 在 Modal 建構時呼叫 asyncio.get_running_loop()，故 modal 必須
+    # 在 running loop 內建構，否則建構就拋 RuntimeError: no running event loop。
+    async def _run():
+        modal = ProductInputModal(OkEstimator())
+        interaction = _interaction()
+        with caplog.at_level(logging.DEBUG, logger="estimator_king.bot.commands"):
+            await modal.on_submit(interaction)
+        return interaction
+
+    interaction = asyncio.run(_run())
 
     recs = [r for r in caplog.records if r.name == "estimator_king.bot.commands"]
     assert any(
@@ -1320,11 +1326,15 @@ def test_estimation_error_logs_error(monkeypatch, caplog):
         "estimator_king.bot.commands.parse_product_lines",
         lambda text: ["p"],
     )
-    modal = ProductInputModal(BoomEstimator())
-    interaction = _interaction()
 
-    with caplog.at_level(logging.DEBUG, logger="estimator_king.bot.commands"):
-        asyncio.run(modal.on_submit(interaction))
+    async def _run():
+        modal = ProductInputModal(BoomEstimator())
+        interaction = _interaction()
+        with caplog.at_level(logging.DEBUG, logger="estimator_king.bot.commands"):
+            await modal.on_submit(interaction)
+        return interaction
+
+    interaction = asyncio.run(_run())
 
     recs = [r for r in caplog.records if r.name == "estimator_king.bot.commands"]
     assert any(
@@ -1402,7 +1412,7 @@ Expected: PASS（2 passed）
 
 - [ ] **Step 5: 回歸 + 型別 + lint**
 
-Run: `.venv/bin/python -m pytest tests/test_bot_commands.py -v -p no:cov && .venv/bin/python -m pyright estimator_king/bot/commands.py tests/test_bot_commands_logging.py && .venv/bin/ruff check estimator_king/bot/commands.py tests/test_bot_commands_logging.py`
+Run: `.venv/bin/python -m pytest tests/test_bot_commands.py -v -p no:cov && .venv/bin/basedpyright estimator_king/bot/commands.py tests/test_bot_commands_logging.py && uvx ruff check estimator_king/bot/commands.py tests/test_bot_commands_logging.py`
 Expected: 既有 bot commands 測試全 PASS；型別/lint 0 errors
 
 - [ ] **Step 6: Commit**
@@ -1425,12 +1435,12 @@ Expected: 全部 PASS（既有測試 + 12 個新測試檔），無 ERROR/FAIL
 
 - [ ] **Step 2: 全專案型別檢查**
 
-Run: `.venv/bin/python -m pyright`
+Run: `.venv/bin/basedpyright`
 Expected: 0 errors（沿用 `pyrightconfig.json` 設定）
 
 - [ ] **Step 3: 全專案 lint**
 
-Run: `.venv/bin/ruff check`
+Run: `uvx ruff check`
 Expected: All checks passed
 
 - [ ] **Step 4: 手動煙霧驗證（DEBUG 等級觀察 log 區分）**
