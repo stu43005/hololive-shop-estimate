@@ -35,7 +35,7 @@ async def populate_queue_from_sitemap(
         Number of URLs newly enqueued.
     """
     # Step 1: enumerate product URLs from sitemap
-    sitemap_urls = await enumerator.enumerate_products(store.base_url)
+    sitemap_urls = await enumerator.enumerate_products(store.base_url, store.locale)
 
     # Step 2: empty sitemap → early return
     if not sitemap_urls:

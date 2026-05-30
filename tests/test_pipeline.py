@@ -48,9 +48,21 @@ def test_enqueue_oldest_products_limit_zero_is_noop(repo):
 class FakeEnumerator:
     def __init__(self, urls):
         self._urls = urls
+        self.received_locale = None
 
-    async def enumerate_products(self, base_url):
+    async def enumerate_products(self, base_url, locale="default"):
+        self.received_locale = locale
         return self._urls
+
+
+def test_populate_passes_store_locale_to_enumerator(repo):
+    store = Store(id="hololive", base_url="https://x",
+                  sitemap_url="https://x/sitemap.xml", locale="en")
+    enum = FakeEnumerator(["https://x/en/products/1"])
+
+    asyncio.run(populate_queue_from_sitemap(store, repo, enum))
+
+    assert enum.received_locale == "en"
 
 
 def test_populate_enqueues_only_new_urls(repo):

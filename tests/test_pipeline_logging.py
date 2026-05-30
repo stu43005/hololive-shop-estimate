@@ -22,7 +22,7 @@ class FakeEnumerator:
     def __init__(self, urls):
         self._urls = urls
 
-    async def enumerate_products(self, base_url):
+    async def enumerate_products(self, base_url, locale="default"):
         return self._urls
 
 
