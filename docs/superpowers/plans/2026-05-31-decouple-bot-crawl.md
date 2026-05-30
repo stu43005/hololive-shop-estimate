@@ -23,7 +23,7 @@
 **Files:**
 - Move: `estimator_king/bot/scheduler.py` → `estimator_king/crawler/scheduler.py`
 - Modify: `estimator_king/bot/runner.py`（lazy import 路徑）
-- Modify: `tests/test_scheduler.py`（import + 3 處 monkeypatch 目標）
+- Modify: `tests/test_scheduler.py`（import + 4 處 monkeypatch 目標）
 
 - [ ] **Step 1: git mv 搬移檔案**
 
@@ -54,7 +54,7 @@ from estimator_king.bot.scheduler import CrawlScheduler
 ```python
 from estimator_king.crawler.scheduler import CrawlScheduler
 ```
-並把 3 處 monkeypatch 目標（原 `"estimator_king.bot.scheduler.run_crawl_cycle"`）改為 `"estimator_king.crawler.scheduler.run_crawl_cycle"`（出現在 `test_run_once_calls_cycle`、`test_run_once_is_reentrancy_guarded`、`test_run_once_swallows_cycle_errors`、`test_run_forever_propagates_cancellation` 共 4 處——逐一以 `replace_all` 或各別替換）。
+並把 **4 處** monkeypatch 目標（原 `"estimator_king.bot.scheduler.run_crawl_cycle"`）改為 `"estimator_king.crawler.scheduler.run_crawl_cycle"`（出現在 `test_run_once_calls_cycle`、`test_run_once_is_reentrancy_guarded`、`test_run_once_swallows_cycle_errors`、`test_run_forever_propagates_cancellation`）。四處字串完全相同，以 `replace_all` 一次替換最乾淨。
 
 - [ ] **Step 4: 驗證**
 
@@ -481,6 +481,7 @@ git commit -m "refactor(cli): crawl command builds providers via runtime.build_p
 - Modify: `tests/test_runner_shutdown.py`（import 改 runtime）
 - Modify: `tests/test_cli.py`（run-routing 測試）
 - Modify: `tests/test_runtime.py`（追加 serve 測試）
+- Modify: `tests/test_main_async.py`（補 `not hasattr(m, "run_bot")` 守護）
 
 - [ ] **Step 1: 整檔取代 estimator_king/bot/runner.py**
 
@@ -555,7 +556,17 @@ def build_bot(
 
 先 Read `estimator_king/runtime.py`。
 
-2a. 把頂層 import 區塊（目前為 dataclass/Optional/AppConfig/EmbeddingProvider/ChatProvider/VectorStore）替換為含生命週期所需的完整 import：
+2a. 把 Task 2 建立的頂層 import 區塊（確切 old_string）：
+```python
+from dataclasses import dataclass
+from typing import Optional
+
+from estimator_king.config_schema import AppConfig
+from estimator_king.llm.embeddings import EmbeddingProvider
+from estimator_king.llm.chat import ChatProvider
+from estimator_king.vectorstore.store import VectorStore
+```
+替換為含生命週期所需的完整 import：
 ```python
 import asyncio
 import logging
@@ -785,6 +796,7 @@ def test_serve_shares_one_vector_store_between_scheduler_and_bot():
     cfg.discord_token = "tok"
 
     with patch("estimator_king.runtime.build_providers", return_value=providers), \
+         patch("estimator_king.runtime._background_tasks", set()), \
          patch("estimator_king.runtime.CrawlScheduler") as MockSched, \
          patch("estimator_king.runtime.build_bot", return_value=fake_bot) as mock_build_bot, \
          patch("estimator_king.runtime.asyncio.create_task"), \
@@ -795,6 +807,27 @@ def test_serve_shares_one_vector_store_between_scheduler_and_bot():
     bot_vs = mock_build_bot.call_args.kwargs["vector_store"]
     assert sched_vs is bot_vs is providers.vector_store
     fake_bot.start.assert_awaited_once()
+```
+
+> `patch("estimator_king.runtime._background_tasks", set())` 是必要的：`serve` 內
+> `_background_tasks.add(scheduler_task)` 會把被 patch 成 MagicMock 的 task 塞進模組全域
+> set，且 `add_done_callback` 不會真的 fire `discard`，殘留物會在後續 `test_runner_shutdown`
+> 的 drain 迴圈（`asyncio.gather(<MagicMock>)`）引發 TypeError。patch 成拋棄式 set 可隔離。
+
+- [ ] **Step 6.5: 補 `not hasattr(m, "run_bot")` 守護到 tests/test_main_async.py**
+
+`run_bot` 在本 Task 已改名為 `run_service`，補上持久化回歸守護（spec §9.7）。先 Read `tests/test_main_async.py`，把 `test_run_crawl_no_dify_client_constructed`：
+```python
+def test_run_crawl_no_dify_client_constructed():
+    """The refactored __main__ must NOT carry a DifyKBClient symbol."""
+    assert not hasattr(m, "DifyKBClient")
+```
+改為：
+```python
+def test_run_crawl_no_dify_client_constructed():
+    """The refactored __main__ must NOT carry DifyKBClient nor the renamed run_bot."""
+    assert not hasattr(m, "DifyKBClient")
+    assert not hasattr(m, "run_bot")  # renamed to run_service in this task
 ```
 
 - [ ] **Step 7: 執行測試確認通過 + 型別**
@@ -816,7 +849,7 @@ Expected: 印 `ok`；測試全 PASS。
 - [ ] **Step 8: Commit**
 
 ```bash
-git add estimator_king/bot/runner.py estimator_king/runtime.py estimator_king/__main__.py tests/test_runner_shutdown.py tests/test_cli.py tests/test_runtime.py
+git add estimator_king/bot/runner.py estimator_king/runtime.py estimator_king/__main__.py tests/test_runner_shutdown.py tests/test_cli.py tests/test_runtime.py tests/test_main_async.py
 git commit -m "refactor(runtime): add serve composition root, slim bot/runner to build_bot"
 ```
 結尾加 Co-Authored-By。
@@ -873,11 +906,19 @@ Expected: FAIL（run 尚無 --db；run_service 尚未套用 db 覆寫）。
 
 - [ ] **Step 4: run_service 套用 --db 覆寫**
 
-在 `run_service` 中，於 config 載入成功之後、token 覆寫之前，插入：
+在 `run_service` 中，把（Task 4 結束後的這段，token 覆寫緊接 config 載入）：
+```python
+    if args.token is not None:
+        config.discord_token = args.token
+```
+改為（在前面插入 db 覆寫，得到 spec §7.2 的「db 先於 token」順序）：
 ```python
     if args.db is not None:
         config.database_path = args.db
+    if args.token is not None:
+        config.discord_token = args.token
 ```
+（以 `if args.token is not None:` 整段為錨點，避免用不唯一的 `sys.exit(1)` 作錨。此變更後 `run_service` 會讀 `args.db`，故所有 `run_service` 測試的 args mock 都須帶 `db=...`；Task 4 的路由測試已帶 `db=None`。）
 
 - [ ] **Step 5: 執行測試確認通過 + 型別**
 
@@ -922,18 +963,34 @@ Run:
 ```
 Expected：`no-subcmd exit=2`；run-help 與 crawl-help 各印出 `--db` 計數 >= 1。
 
-- [ ] **Step 4: 確認模組解耦（bot 不再依賴 scheduler；runtime 為組合根）**
+- [ ] **Step 4: 確認模組解耦（bot 不再依賴 scheduler/providers/signal；runtime 為組合根）**
 
-Run:
+Run（注意 grep 的 `&&`/`||`：有匹配 → 報 FAIL，無匹配 → 報 CLEAN）：
 ```bash
-grep -rn "CrawlScheduler\|_Shutdowner\|scheduler" estimator_king/bot/runner.py || echo "runner CLEAN of scheduler/shutdowner"
+grep -rn "CrawlScheduler\|_Shutdowner\|build_providers\|add_signal_handler\|signal\." estimator_king/bot/runner.py \
+  && echo "runner STILL references coupled symbols (FAIL)" \
+  || echo "runner CLEAN of scheduler/shutdowner/providers/signal"
 .venv/bin/python -c "import estimator_king.bot.runner as r; assert not hasattr(r, 'run_bot'); assert not hasattr(r, '_Shutdowner'); print('runner slim ok')"
 .venv/bin/python -c "import estimator_king.runtime as rt; assert hasattr(rt, 'serve') and hasattr(rt, 'build_providers') and hasattr(rt, '_Shutdowner'); print('runtime ok')"
+.venv/bin/python -c "import estimator_king.__main__ as m; assert not hasattr(m, 'run_bot'); assert hasattr(m, 'run_service') and hasattr(m, 'run_crawl'); print('__main__ dispatch ok')"
 ls estimator_king/bot/scheduler.py 2>&1 | head -1
+ls estimator_king/crawler/scheduler.py 2>&1 | head -1
 ```
-Expected：runner 印 `runner CLEAN of scheduler/shutdowner` 與 `runner slim ok`；runtime 印 `runtime ok`；`estimator_king/bot/scheduler.py` 不存在（No such file）。
+Expected：runner 印 `runner CLEAN of scheduler/shutdowner/providers/signal` 與 `runner slim ok`；runtime 印 `runtime ok`；`__main__` 印 `__main__ dispatch ok`；`bot/scheduler.py` 不存在（No such file）、`crawler/scheduler.py` 存在。
 
-- [ ] **Step 5: 確認 working tree 乾淨**
+- [ ] **Step 5: 確認 build_providers 是唯一 provider 來源（§9.3）**
+
+Run（檢查 runtime 之外無殘留的 provider 建構）：
+```bash
+grep -rn "EmbeddingProvider(\|ChatProvider(\|VectorStore(" estimator_king/ --include="*.py" | grep -v "estimator_king/runtime.py" \
+  && echo "provider construction LEAKED outside runtime (FAIL)" \
+  || echo "build_providers is the sole provider source OK"
+```
+Expected：印 `build_providers is the sole provider source OK`（grep 無匹配）。
+
+> §9.4（serve 注入同一 VectorStore）與 §9.8（build_providers 預設不建 chat）為行為不變式，由 Step 2 的 `tests/test_runtime.py`（`test_serve_shares_one_vector_store_between_scheduler_and_bot`、`test_build_providers_without_chat_skips_chat_provider`）覆蓋。
+
+- [ ] **Step 6: 確認 working tree 乾淨**
 
 Run: `git status --porcelain`
 Expected: 空輸出（各 Task 已各自 commit）。
