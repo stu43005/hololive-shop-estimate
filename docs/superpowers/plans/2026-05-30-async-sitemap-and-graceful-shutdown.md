@@ -159,7 +159,45 @@ async def test_proxy_credentials_split_into_basic_auth(monkeypatch):
     assert fake_session.last_kwargs["proxy_auth"] == BasicAuth("user", "pass")
 
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_header_honored_on_429(monkeypatch):
+    policy = CrawlerPolicy(
+        rate_limit_rps=1000.0, jitter_max=0.0, concurrency_per_domain=1, max_retries=3
+    )
+    calls = {"n": 0}
+
+    def request_factory(method: str, url: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeRequestContextManager(
+                _FakeResponse(429, "slow down", headers={"Retry-After": "2"})
+            )
+        return _FakeRequestContextManager(_FakeResponse(200, "ok"))
+
+    fake_session = _FakeSession(request_factory)
+    monkeypatch.setattr(
+        "estimator_king.crawler.async_http_client.aiohttp.ClientSession",
+        lambda *args, **kwargs: fake_session,
+    )
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    client = AsyncHTTPClient(policy, sleep_fn=fake_sleep)
+
+    body = await client.get("https://example.com/")
+    await client.close()
+
+    assert body == "ok"
+    assert calls["n"] == 2
+    assert 2.0 in sleeps  # Retry-After header value honored by tenacity wait
 ```
+
+> 註：此 `test_retry_after_header_honored_on_429` 補在 Task 1（擁有 `tests/test_async_http_client.py`），用以**保住 retry/Retry-After 覆蓋**——既有 async 測試全用 `max_retries=1`（停用重試），而 Task 5 將刪除唯一測重試的同步 `tests/test_http_client.py`。此測試針對現有重試邏輯（已實作），會在 Step 4 全檔測試時通過；以 membership 斷言（`2.0 in sleeps`）容忍 rate limiter 另外發出的 `sleep_fn` 呼叫。
 
 - [ ] **Step 2: 執行新測試確認失敗**
 
@@ -170,10 +208,9 @@ Expected: FAIL（`AsyncHTTPClient.__init__` 還沒有 `proxy` 參數 → `TypeEr
 
 修改 `estimator_king/crawler/async_http_client.py`。
 
-(a) import 區塊：把 `from ..config_schema import CrawlerPolicy` 改為同時匯入 `ProxyConfig`，並新增 aiohttp/yarl 工具：
+(a) import 區塊：把 `from ..config_schema import CrawlerPolicy` 改為同時匯入 `ProxyConfig`，並新增 aiohttp/yarl 工具（在現有 `import aiohttp` 等之後、`from .. import __version__` 之前插入這兩行）：
 
 ```python
-from aiohttp import BasicAuth
 from aiohttp.helpers import strip_auth_from_url
 from yarl import URL
 
@@ -181,7 +218,7 @@ from .. import __version__
 from ..config_schema import CrawlerPolicy, ProxyConfig
 ```
 
-（`BasicAuth` 匯入僅供型別清晰；實作不自行建構，由 `strip_auth_from_url` 回傳。若 ruff 報未使用，改為只匯入 `strip_auth_from_url` 與 `URL`。）
+（`BasicAuth` 由 `strip_auth_from_url` 在執行期回傳並指派給 `proxy_auth`，實作端不具名匯入，避免 ruff F401。測試端的 `test_proxy_credentials_split_into_basic_auth` 已自行 `from aiohttp import BasicAuth`，不受影響。）
 
 (b) `AsyncHTTPClient.__init__` 簽名新增 `proxy` 參數（放在 `policy` 之後、`*` 之前的 keyword 區，沿用既有風格放在 `*` 後亦可；此處放在現有 keyword-only 區塊最前）：
 
