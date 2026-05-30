@@ -292,7 +292,7 @@ Also update the class docstring of `SitemapEnumerator`: change the line `4. Filt
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_sitemap.py -v -o addopts=""`
-Expected: PASS — the new `TestSitemapEnumeratorLocaleFiltering` tests pass AND all pre-existing tests still pass (the default-locale path keeps `/products/...` and excludes `/en/...`, so `test_enumerate_products_excludes_en_paths` and `test_enumerate_with_real_fixtures` remain green).
+Expected: PASS — the new `TestSitemapEnumeratorLocaleFiltering` tests pass AND all pre-existing tests still pass (the default-locale path keeps `/products/...` and excludes `/en/...`, so `test_enumerate_products_excludes_en_paths` and `test_enumerate_with_real_fixtures` remain green). The continued green state of `test_enumerate_products_excludes_en_paths` is what verifies acceptance criterion §5.2 (hololive behavior unchanged: default kept, `/en/` excluded).
 
 - [ ] **Step 5: Commit**
 
@@ -332,6 +332,16 @@ Add to `tests/test_config.py`. Inside the existing `class TestStore`, append:
         )
         with pytest.raises(ValueError, match="must have a valid 'locale'"):
             store.validate()
+```
+
+Then add a module-level test pinning the `DEFAULT_LOCALE` invariant (spec §3.3: the dataclass default, the YAML, and `DEFAULT_LOCALE` must stay in sync). This catches drift if `DEFAULT_LOCALE` is ever changed:
+
+```python
+def test_store_locale_default_matches_default_locale_constant():
+    from estimator_king.crawler.sitemap import DEFAULT_LOCALE
+
+    store = Store(id="x", base_url="https://x", sitemap_url="https://x/s.xml")
+    assert store.locale == DEFAULT_LOCALE
 ```
 
 Then add a module-level test that `load_config` reads `locale` from YAML:
@@ -669,8 +679,11 @@ Expected: PASS (3 passed).
 
 - [ ] **Step 5: Verify both invocation forms manually**
 
-Run: `.venv/bin/python -m scripts.clean_crawl_queue --db /tmp/nonexistent-clean-test.db --dry-run`
+Run (module form): `.venv/bin/python -m scripts.clean_crawl_queue --db /tmp/nonexistent-clean-test.db --dry-run`
 Expected: prints `crawl_queue rows (all stores): 0 (dry-run, nothing deleted)` and exits 0 (a missing DB path is created empty by the repository).
+
+Run (plain-script form — exercises the `sys.path` injection branch): `.venv/bin/python scripts/clean_crawl_queue.py --db /tmp/nonexistent-clean-test.db --dry-run`
+Expected: same output as the module form, exit 0.
 
 Run: `rm -f /tmp/nonexistent-clean-test.db`
 Expected: cleans up the throwaway DB.
@@ -798,7 +811,7 @@ Run:
 import asyncio
 from estimator_king.config_schema import AppConfig
 from estimator_king.crawler.async_http_client import AsyncHTTPClient
-from estimator_king.crawler.sitemap import SitemapEnumerator
+from estimator_king.crawler.sitemap import SitemapEnumerator, locale_of_url
 
 cfg = AppConfig.from_yaml('stores_config.yaml')
 vspo = next(s for s in cfg.stores if s.id == 'vspo')
@@ -807,13 +820,13 @@ async def main():
     async with AsyncHTTPClient(cfg.crawler, proxy=cfg.proxy) as c:
         urls = await SitemapEnumerator(c).enumerate_products(vspo.base_url, vspo.locale)
         print('count:', len(urls))
-        print('all default-locale:', all('/products/' in u and '/en' not in u.split('/products/')[0] for u in urls))
+        print('all expected-locale:', all(locale_of_url(u) == vspo.locale.lower() for u in urls))
         print('sample:', urls[:3])
 
 asyncio.run(main())
 "
 ```
-Expected: prints a non-zero `count`, `all default-locale: True`, and sample URLs of the form `https://store.vspo.jp/products/...` (no locale prefix). This is a real network call against the live store; if the network is unavailable, note that and rely on the unit tests instead.
+Expected: prints a non-zero `count`, `all expected-locale: True`, and sample URLs of the form `https://store.vspo.jp/products/...` (no locale prefix). The check uses the project's own `locale_of_url`, so it flags any leaked locale (`en`, `ja-al`, `ja-dz`, …), not just `/en/`. This is a real network call against the live store; if the network is unavailable, note that and rely on the unit tests instead.
 
 ---
 
