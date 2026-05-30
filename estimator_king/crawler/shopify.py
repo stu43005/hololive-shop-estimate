@@ -11,6 +11,8 @@ from .html_extractor import extract_detail_sections as extract_html_details
 from .http_client import HTTPClient
 from .snapshot import ProductSnapshot, ProductVariant, compute_content_hash
 
+logger = logging.getLogger(__name__)
+
 def _clean_body_html(html: str) -> str:
     """Convert Shopify body_html to clean Markdown text, stripping HTML tags."""
     if not html or not html.strip():
@@ -150,13 +152,13 @@ def fetch_product(url: str, http_client: HTTPClient) -> ProductSnapshot:
     html_text = cast(str, getattr(html_resp, "text", ""))
 
     html_details = extract_html_details(html_text)
-    logging.debug(f"Extracted html_details for {canonical_url}: {html_details}")
+    logger.debug(f"Extracted html_details for {canonical_url}: {html_details}")
     if html_details:
         for key, value in html_details.items():
-            logging.debug(f"  {key}: {value[:50] if len(value) > 50 else value}")
+            logger.debug(f"  {key}: {value[:50] if len(value) > 50 else value}")
     snapshot = _build_snapshot_from_product_json(product, html_details=html_details)
     content_hash = compute_content_hash(snapshot)
-    logging.debug(f"Product {snapshot.product_id} hash: {content_hash[:8]}...")
+    logger.debug(f"Product {snapshot.product_id} hash: {content_hash[:8]}...")
     return ProductSnapshotWithHash(
         product_id=snapshot.product_id,
         title=snapshot.title,
