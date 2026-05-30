@@ -23,7 +23,6 @@ _background_tasks: set["asyncio.Task[None]"] = set()
 def create_bot() -> discord.Client:
     """Create and configure the Discord client with the required intents."""
     intents = discord.Intents.default()
-    intents.message_content = True
     intents.guilds = True
     return discord.Client(intents=intents)
 
