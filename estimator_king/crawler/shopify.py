@@ -3,15 +3,22 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import cast
-
-import requests
+from typing import Protocol, cast
 
 from .html_extractor import extract_detail_sections as extract_html_details
-from .http_client import HTTPClient
 from .snapshot import ProductSnapshot, ProductVariant, compute_content_hash
 
 logger = logging.getLogger(__name__)
+
+
+class _HTTPResponse(Protocol):
+    status_code: int
+    text: str
+
+
+class _HTTPGetter(Protocol):
+    def get(self, url: str) -> _HTTPResponse: ...
+
 
 def _clean_body_html(html: str) -> str:
     """Convert Shopify body_html to clean Markdown text, stripping HTML tags."""
@@ -44,7 +51,7 @@ class ShopifyJSONError(ShopifyProductError):
     pass
 
 
-def _raise_for_status(url: str, resp: requests.Response) -> None:
+def _raise_for_status(url: str, resp: _HTTPResponse) -> None:
     status = int(getattr(resp, "status_code", 0) or 0)
     if status < 200 or status >= 300:
         raise ShopifyHTTPError(url, status_code=status)
@@ -127,7 +134,7 @@ def _build_snapshot_from_product_json(
     )
 
 
-def fetch_product(url: str, http_client: HTTPClient) -> ProductSnapshot:
+def fetch_product(url: str, http_client: _HTTPGetter) -> ProductSnapshot:
     canonical_url = url.strip()
     if not canonical_url:
         raise ValueError("url must be a non-empty string")
