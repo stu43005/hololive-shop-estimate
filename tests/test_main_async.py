@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import estimator_king.__main__ as m
 from estimator_king.__main__ import run_crawl
 
 
@@ -45,6 +46,7 @@ def test_run_crawl_builds_embedding_provider_and_vector_store():
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.EmbeddingProvider") as mock_ep, \
          patch("estimator_king.__main__.VectorStore") as mock_vs, \
+         patch("estimator_king.__main__.run_crawl_cycle", new_callable=MagicMock), \
          patch("estimator_king.__main__.asyncio.run", return_value=counters):
         with pytest.raises(SystemExit) as exc:
             run_crawl(_make_args())
@@ -69,7 +71,7 @@ def test_run_crawl_passes_embedder_and_vector_store_to_cycle():
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.EmbeddingProvider") as mock_ep, \
          patch("estimator_king.__main__.VectorStore") as mock_vs, \
-         patch("estimator_king.__main__.run_crawl_cycle") as mock_cycle, \
+         patch("estimator_king.__main__.run_crawl_cycle", new_callable=MagicMock) as mock_cycle, \
          patch("estimator_king.__main__.asyncio.run", side_effect=fake_asyncio_run):
         with pytest.raises(SystemExit):
             run_crawl(_make_args())
@@ -90,7 +92,7 @@ def test_run_crawl_passes_force_refetch_to_cycle():
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.EmbeddingProvider"), \
          patch("estimator_king.__main__.VectorStore"), \
-         patch("estimator_king.__main__.run_crawl_cycle") as mock_cycle, \
+         patch("estimator_king.__main__.run_crawl_cycle", new_callable=MagicMock) as mock_cycle, \
          patch("estimator_king.__main__.asyncio.run", return_value=counters):
         with pytest.raises(SystemExit):
             run_crawl(_make_args(force_refetch=True))
@@ -107,7 +109,7 @@ def test_run_crawl_uses_db_path_from_config():
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.EmbeddingProvider"), \
          patch("estimator_king.__main__.VectorStore"), \
-         patch("estimator_king.__main__.run_crawl_cycle") as mock_cycle, \
+         patch("estimator_king.__main__.run_crawl_cycle", new_callable=MagicMock) as mock_cycle, \
          patch("estimator_king.__main__.asyncio.run", return_value=counters):
         with pytest.raises(SystemExit):
             run_crawl(_make_args())
@@ -124,7 +126,7 @@ def test_run_crawl_applies_db_override_before_cycle():
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.EmbeddingProvider"), \
          patch("estimator_king.__main__.VectorStore"), \
-         patch("estimator_king.__main__.run_crawl_cycle") as mock_cycle, \
+         patch("estimator_king.__main__.run_crawl_cycle", new_callable=MagicMock) as mock_cycle, \
          patch("estimator_king.__main__.asyncio.run", return_value=counters):
         with pytest.raises(SystemExit):
             run_crawl(_make_args(db="/override.db"))
@@ -141,6 +143,7 @@ def test_run_crawl_prints_json_counters(capsys):
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.EmbeddingProvider"), \
          patch("estimator_king.__main__.VectorStore"), \
+         patch("estimator_king.__main__.run_crawl_cycle", new_callable=MagicMock), \
          patch("estimator_king.__main__.asyncio.run", return_value=counters):
         with pytest.raises(SystemExit) as exc:
             run_crawl(_make_args())
@@ -166,6 +169,7 @@ def test_run_crawl_exits_1_on_cycle_exception():
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.EmbeddingProvider"), \
          patch("estimator_king.__main__.VectorStore"), \
+         patch("estimator_king.__main__.run_crawl_cycle", new_callable=MagicMock), \
          patch("estimator_king.__main__.asyncio.run",
                side_effect=RuntimeError("network error")):
         with pytest.raises(SystemExit) as exc:
@@ -176,7 +180,6 @@ def test_run_crawl_exits_1_on_cycle_exception():
 
 def test_run_crawl_no_dify_client_constructed():
     """The refactored __main__ must NOT carry a DifyKBClient symbol."""
-    import estimator_king.__main__ as m
     assert not hasattr(m, "DifyKBClient"), (
         "DifyKBClient should not be present in the refactored __main__"
     )

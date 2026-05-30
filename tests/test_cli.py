@@ -134,6 +134,7 @@ def test_run_crawl_success_prints_json_and_exits_0(capsys):
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.EmbeddingProvider"), \
          patch("estimator_king.__main__.VectorStore"), \
+         patch("estimator_king.__main__.run_crawl_cycle", new_callable=MagicMock), \
          patch("estimator_king.__main__.asyncio.run", return_value=counters):
         with pytest.raises(SystemExit) as exc:
             run_crawl(_make_crawl_args())
