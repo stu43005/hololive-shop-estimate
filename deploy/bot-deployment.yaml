@@ -18,10 +18,8 @@ spec:
       containers:
         - name: bot
           image: estimator-king-bot:latest
-          command:
-            - python
-            - -m
-            - estimator_king.bot
+          args:
+            - run
             - --token
             - $(DISCORD_TOKEN)
             - --config
