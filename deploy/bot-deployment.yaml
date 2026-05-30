@@ -24,6 +24,8 @@ spec:
             - estimator_king.bot
             - --token
             - $(DISCORD_TOKEN)
+            - --config
+            - /config/stores_config.yaml
           envFrom:
             - configMapRef:
                 name: estimator-king-config
@@ -33,15 +35,32 @@ spec:
                 secretKeyRef:
                   name: estimator-king-secrets
                   key: DISCORD_TOKEN
-            - name: DIFY_WORKFLOW_API_KEY
+            - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: estimator-king-secrets
-                  key: DIFY_WORKFLOW_API_KEY
+                  key: OPENAI_API_KEY
+            - name: DATABASE_PATH
+              value: "/data/estimator_king.db"
+            - name: CHROMA_PATH
+              value: "/data/chroma"
+          volumeMounts:
+            - name: state-storage
+              mountPath: /data
+            - name: stores-config
+              mountPath: /config
+              readOnly: true
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
               memory: "512Mi"
               cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+      volumes:
+        - name: state-storage
+          persistentVolumeClaim:
+            claimName: estimator-king-state-pvc
+        - name: stores-config
+          configMap:
+            name: estimator-king-stores-config

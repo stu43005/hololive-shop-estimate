@@ -4,7 +4,7 @@ metadata:
   name: estimator-king-state-pvc
   namespace: dify
   labels:
-    app.kubernetes.io/name: estimator-king-crawler
+    app.kubernetes.io/name: estimator-king-bot
 spec:
   accessModes:
     - ReadWriteOnce

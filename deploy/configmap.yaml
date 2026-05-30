@@ -6,8 +6,14 @@ metadata:
   labels:
     app.kubernetes.io/name: estimator-king
 data:
-  DIFY_BASE_URL: "https://dify.long-cod.ts.net/v1"
   CRAWLER_LOG_LEVEL: "INFO"
+  CHROMA_PATH: "/data/chroma"
+
+  # Override the following when using a custom OpenAI-compatible endpoint (e.g. ollama):
+  # OPENAI_BASE_URL: "http://ollama:11434/v1"
+  # EMBEDDING_MODEL: "nomic-embed-text"
+  # EMBEDDING_DIMENSIONS: "768"
+  # CHAT_MODEL: "llama3"
 
   # stores_config.yaml is mounted from a separate ConfigMap created from file.
   # Ops reference command:

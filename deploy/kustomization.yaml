@@ -7,7 +7,6 @@ resources:
   - configmap.yaml
   - secrets.yaml
   - crawler-pvc.yaml
-  - crawler-cronjob.yaml
   - bot-deployment.yaml
 
 commonLabels:
