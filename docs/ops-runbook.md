@@ -1,6 +1,6 @@
 # Estimator King Operations Runbook
 
-This runbook provides procedures for deploying, managing, and troubleshooting the Estimator King crawler and Discord bot on Kubernetes.
+This runbook provides procedures for deploying, managing, and troubleshooting the Estimator King Discord bot — which runs the crawl scheduler in-process — on Kubernetes.
 
 For local development, see [local-runbook.md](local-runbook.md).
 
@@ -54,10 +54,11 @@ The system is deployed on Kubernetes in the `estimator-king` namespace. A single
      --dry-run=client -o yaml | kubectl apply -f -
    ```
 
-5. **Deploy Crawler (CronJob) and Bot (Deployment)**:
+5. **Deploy the Bot (Deployment)**:
+
+   The bot process runs the crawl scheduler in-process; there is no separate crawler workload.
 
    ```bash
-   kubectl apply -f deploy/crawler-cronjob.yaml
    kubectl apply -f deploy/bot-deployment.yaml
    ```
 
@@ -83,42 +84,14 @@ To rotate any secret (e.g., `DISCORD_BOT_TOKEN`):
    kubectl rollout restart deployment/estimator-king-bot -n estimator-king
    ```
 
-3. **Verify Crawler**:
-
-   The crawler will pick up new secrets on its next scheduled run. No manual restart is needed unless a crawl is currently running.
-
 ---
 
-## 3. Ad-hoc Crawl Commands
+## 3. Crawling
 
-### Trigger a Manual Crawl
+Crawling runs **in-process** inside the bot: the `CrawlScheduler` triggers a cycle on startup (`run_on_start`) and then every `crawl_schedule_hours`. There is no separate crawler workload and no ad-hoc crawl job in production — the ChromaDB vector store is single-writer, so a second crawl process must never run against the live PVC.
 
-```bash
-kubectl create job --from=cronjob/estimator-king-crawler manual-crawl-$(date +%s) -n estimator-king
-```
-
-### Force a Full Re-fetch (One-Cycle Backfill)
-
-To re-fetch every product regardless of content hash and daily budget:
-
-```bash
-kubectl create job manual-refetch-$(date +%s) -n estimator-king \
-  --from=cronjob/estimator-king-crawler \
-  --dry-run=client -o json \
-  | jq '.spec.template.spec.containers[0].args += ["--force-refetch"]' \
-  | kubectl apply -f -
-```
-
-### Debug a Specific Store
-
-```bash
-kubectl run manual-crawl-debug -it --rm -n estimator-king \
-  --image=estimator-king:latest \
-  --env-from=configMap/estimator-king-config \
-  --env-from=secret/estimator-king-secrets \
-  --overrides='{"spec":{"containers":[{"name":"crawler","volumeMounts":[{"name":"data","mountPath":"/data"},{"name":"config","mountPath":"/config"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"estimator-king-state-pvc"}},{"name":"config","configMap":{"name":"estimator-king-stores-config"}}]}}' \
-  -- python -m estimator_king --config /config/stores_config.yaml --db /data/estimator_king.db
-```
+- To force a fresh full rebuild (for example after an embedding-model change), see [§6 Re-index Procedure](#6-re-index-procedure).
+- For a local one-off crawl during development, see [local-runbook.md](local-runbook.md) (`python -m estimator_king crawl`).
 
 ---
 
@@ -132,33 +105,27 @@ kubectl run manual-crawl-debug -it --rm -n estimator-king \
   kubectl logs -l app.kubernetes.io/name=estimator-king-bot -n estimator-king -f
   ```
 
-- **Crawler Logs (Latest Job)**:
-
-  ```bash
-  kubectl logs -n estimator-king \
-    $(kubectl get pods -n estimator-king -l app.kubernetes.io/name=estimator-king-crawler \
-      --sort-by=.metadata.creationTimestamp | tail -n 1 | awk '{print $1}')
-  ```
+  The in-process crawl cycle logs to the same bot logs (there is no separate crawler pod).
 
 ### Log Field Definitions
 
-Logging follows a structured format: `%(asctime)s - %(levelname)s - %(message)s`
+Logging follows a structured format: `%(asctime)s [%(levelname)s] %(message)s`
 
 | Field | Definition |
 | ----- | ---------- |
 | `asctime` | Timestamp of the log entry (YYYY-MM-DD HH:MM:SS,sss) |
 | `levelname` | Severity level: `INFO`, `ERROR`, `WARNING`, `DEBUG` |
 | `message` | The log message content |
-| `store_id` | (Crawler only) ID of the store being processed |
-| `product_id` | (Crawler only) ID of the product being synced |
-| `operation` | (Crawler only) Sync operation: create, update, skip |
+| `store_id` | (crawl phase only) ID of the store being processed |
+| `product_id` | (crawl phase only) ID of the product being synced |
+| `operation` | (crawl phase only) Sync operation: create, update, skip |
 
 Common message patterns:
 
 - `Processing store: <store_id>`: Start of a store crawl.
 - `Discovered <N> products from <store_id>`: Results from sitemap enumeration.
 - `Sync completed for <store_id>: +<C> created, ~<U> updated, =<S> skipped`: Per-store sync summary.
-- `Crawler completed: <JSON_SUMMARY>`: Final report for the entire run.
+- `Crawl cycle complete: <JSON_SUMMARY>`: Final report for the entire crawl cycle (logged by the in-process scheduler under `run`).
 
 ---
 
@@ -172,11 +139,11 @@ If the bot is crashing:
 2. Check resource limits (OOMKill) — the bot holds ChromaDB in memory.
 3. Verify `OPENAI_API_KEY` is valid: check logs for embedding or chat API errors.
 
-### Crawler Failure
+### Crawl Cycle Failure
 
 If a crawl fails:
 
-1. **Database Lock**: If SQLite is locked, check for hung jobs and delete them.
+1. **Database Lock**: If SQLite is locked, restart the bot Deployment to release the in-process lock.
 2. **PVC Full**: Check `estimator-king-state-pvc` usage — both `estimator_king.db` and `chroma/` live here.
 3. **Sitemap Changes**: If "Discovered 0 products" appears for a previously working store, verify the `base_url` and Shopify sitemap availability.
 4. **Embedding API Error**: Check `OPENAI_API_KEY` quota and rate limits.
@@ -185,32 +152,31 @@ If a crawl fails:
 
 ## 6. Re-index Procedure
 
-Vectors from different embedding models or dimension settings are incompatible. If you change `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS` in the secret, you must delete the ChromaDB directory and run a full re-fetch:
+Vectors from different embedding models or dimension settings are incompatible. If you change `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS`, you must clear the vector store and let the bot rebuild it from scratch. Because ChromaDB is single-writer, the bot must be stopped before clearing the data.
 
-1. **Open a shell into the bot pod** (or a debug pod with the PVC mounted):
-
-   ```bash
-   kubectl exec -it deployment/estimator-king-bot -n estimator-king -- sh
-   ```
-
-2. **Delete the ChromaDB directory**:
+1. **Scale the bot down** (releases the PVC / ChromaDB):
 
    ```bash
-   rm -rf /data/chroma
-   exit
+   kubectl scale deployment/estimator-king-bot --replicas=0 -n estimator-king
    ```
 
-3. **Trigger a full re-fetch crawl job**:
+2. **Clear the vector store and crawl state** with a short-lived pod that mounts the PVC:
 
    ```bash
-   kubectl create job manual-refetch-$(date +%s) -n estimator-king \
-     --from=cronjob/estimator-king-crawler \
-     --dry-run=client -o json \
-     | jq '.spec.template.spec.containers[0].args += ["--force-refetch"]' \
-     | kubectl apply -f -
+   kubectl run reindex-clean -it --rm -n estimator-king \
+     --image=busybox --restart=Never \
+     --overrides='{"spec":{"containers":[{"name":"reindex-clean","image":"busybox","command":["sh","-c","rm -rf /data/chroma /data/estimator_king.db"],"volumeMounts":[{"name":"data","mountPath":"/data"}]}],"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"estimator-king-state-pvc"}}]}}'
    ```
 
-This re-fetches every product and rebuilds the vector index from scratch.
+3. **Scale the bot back up**:
+
+   ```bash
+   kubectl scale deployment/estimator-king-bot --replicas=1 -n estimator-king
+   ```
+
+On startup the bot's scheduler runs a crawl immediately (`run_on_start`). Because the SQLite crawl state was deleted, every product is rediscovered and re-embedded in a single cycle, rebuilding the vector index from scratch.
+
+> Deleting `estimator_king.db` resets crawl state (content hashes, active/inactive tracking). This is intended for a full re-index — the next crawl rebuilds it.
 
 ---
 
@@ -235,22 +201,19 @@ kubectl run smoke-test -it --rm -n estimator-king \
 kubectl logs -l app.kubernetes.io/name=estimator-king-bot -n estimator-king | grep "Logged in as"
 ```
 
-**Expected**: `... - INFO - Logged in as EstimatorKing#1234`
+**Expected**: `... [INFO] Logged in as EstimatorKing#1234`
 
 ### Summary Report Verification
 
 ```bash
-kubectl logs -n estimator-king \
-  $(kubectl get pods -n estimator-king -l app.kubernetes.io/name=estimator-king-crawler \
-    --sort-by=.metadata.creationTimestamp | tail -n 1 | awk '{print $1}') \
-  | grep "Crawler completed"
+kubectl logs -l app.kubernetes.io/name=estimator-king-bot -n estimator-king | grep "Crawl cycle complete"
 ```
 
 ---
 
 ## 8. Summary Report JSON Specification
 
-At the end of every crawl run, the crawler outputs a JSON object to stdout and logs it.
+The `crawl` CLI prints this JSON object to stdout on completion. Under `run`, the in-process scheduler logs the same counters via `logger.info` (`Crawl cycle complete: ...`) rather than printing to stdout.
 
 ### JSON Schema
 
@@ -275,8 +238,8 @@ At the end of every crawl run, the crawler outputs a JSON object to stdout and l
 - `timestamp`: ISO8601 or standard Python logging timestamp.
 - `level`: Log level (INFO/ERROR).
 - `message`: Contextual message.
-- `store_id`: (Crawler only) ID of the store being processed.
-- `product_id`: (Crawler only) ID of the product being synced.
+- `store_id`: (crawl phase only) ID of the store being processed.
+- `product_id`: (crawl phase only) ID of the product being synced.
 
 ### Metrics (Future)
 
@@ -286,6 +249,6 @@ At the end of every crawl run, the crawler outputs a JSON object to stdout and l
 
 ### Recommended Alerts
 
-- **Crawler Failures**: Alert if `errors > 0` in the summary report.
+- **Crawl Failures**: Alert if `errors > 0` in the crawl summary counters.
 - **Bot Downtime**: Alert if `estimator-king-bot` deployment replicas < 1 for > 5 minutes.
-- **Persistent Failures**: Alert if crawler CronJob fails for 2 consecutive days.
+- **Persistent Failures**: Alert if the bot's daily crawl logs `errors > 0` for 2 consecutive days.
