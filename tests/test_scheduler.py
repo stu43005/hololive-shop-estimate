@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from estimator_king.bot.scheduler import CrawlScheduler
+from estimator_king.config_schema import AppConfig, CrawlerPolicy, Store
 
 
 @pytest.mark.asyncio
@@ -55,3 +56,33 @@ async def test_run_once_swallows_cycle_errors(monkeypatch):
     sched = CrawlScheduler(config=object(), db_path="db", embedder=object(), vector_store=object())
 
     await sched.run_once()  # must not raise
+
+
+def _schedulable_config():
+    return AppConfig(
+        stores=[Store(id="hololive", base_url="https://x", sitemap_url="https://x/sm.xml")],
+        crawler=CrawlerPolicy(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_forever_propagates_cancellation(monkeypatch):
+    entered = asyncio.Event()
+
+    async def fake_cycle(*a, **k):
+        entered.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr("estimator_king.bot.scheduler.run_crawl_cycle", fake_cycle)
+    sched = CrawlScheduler(
+        config=_schedulable_config(), db_path="db", embedder=object(), vector_store=object()
+    )
+
+    task = asyncio.create_task(sched.run_forever())
+    await entered.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sched._running is False
