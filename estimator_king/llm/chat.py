@@ -1,11 +1,15 @@
 """Chat provider that returns structured price estimates."""
 
 import json
+import logging
+import time
 
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
 from estimator_king.llm.config import ProviderConfig
+
+logger = logging.getLogger(__name__)
 
 
 class PriceRange(BaseModel):
@@ -56,9 +60,18 @@ class ChatProvider:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        if self._config.chat_structured_output:
-            return self._estimate_structured(messages)
-        return self._estimate_json_object(messages)
+        start = time.monotonic()
+        try:
+            if self._config.chat_structured_output:
+                return self._estimate_structured(messages)
+            return self._estimate_json_object(messages)
+        finally:
+            logger.debug(
+                "chat request: model=%s structured=%s -> %.0fms",
+                self._config.chat_model,
+                self._config.chat_structured_output,
+                (time.monotonic() - start) * 1000.0,
+            )
 
     def _estimate_structured(self, messages: list[dict[str, str]]) -> EstimateBatch:
         response = self._client.chat.completions.parse(
