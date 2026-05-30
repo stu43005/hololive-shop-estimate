@@ -1,5 +1,7 @@
 """Discord bot slash command implementation for product price estimation."""
 
+import logging
+
 import discord
 from discord import app_commands
 from discord.ui import Modal, TextInput
@@ -7,6 +9,8 @@ from discord.ui import Modal, TextInput
 from estimator_king.config_schema import AppConfig
 from estimator_king.bot.estimator import Estimator
 from estimator_king.llm.chat import EstimateBatch, EstimationError
+
+logger = logging.getLogger(__name__)
 
 # Constants for input validation
 MAX_PRODUCTS = 10
@@ -141,9 +145,14 @@ class ProductInputModal(Modal, title="Enter Product Names"):
         """
         # Parse product lines from user input
         product_list = parse_product_lines(self.products.value)
+        logger.debug(
+            "modal submitted by %s: %d products parsed",
+            interaction.user.id, len(product_list),
+        )
 
         # Validation: minimum 1 product
         if len(product_list) < 1:
+            logger.warning("validation failed for %s: empty input", interaction.user.id)
             await interaction.response.send_message(
                 "❌ Please enter at least 1 product name", ephemeral=True
             )
@@ -151,6 +160,10 @@ class ProductInputModal(Modal, title="Enter Product Names"):
 
         # Validation: maximum 10 products
         if len(product_list) > MAX_PRODUCTS:
+            logger.warning(
+                "validation failed for %s: %d products exceeds max %d",
+                interaction.user.id, len(product_list), MAX_PRODUCTS,
+            )
             await interaction.response.send_message(
                 f"❌ Maximum {MAX_PRODUCTS} products allowed", ephemeral=True
             )
@@ -164,8 +177,12 @@ class ProductInputModal(Modal, title="Enter Product Names"):
             for embed in format_estimates(batch):
                 await interaction.followup.send(embed=embed)
         except EstimationError as e:
+            logger.error("estimation failed for %s: %s", interaction.user.id, e)
             await interaction.followup.send(f"❌ Estimation failed: {e}")
         except Exception as e:
+            logger.exception(
+                "unexpected error handling request from %s", interaction.user.id
+            )
             await interaction.followup.send(f"❌ Unexpected error: {e}")
 
 
