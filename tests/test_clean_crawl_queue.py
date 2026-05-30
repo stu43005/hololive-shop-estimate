@@ -44,3 +44,9 @@ def test_clean_store_scope(db_path: str) -> None:
     with ProductStateRepository(db_path) as repo:
         assert repo.queue_size() == 1
         assert repo.queue_size("hololive") == 1
+
+
+def test_clean_empty_queue_is_noop(db_path: str) -> None:
+    before, deleted = clean(db_path)
+    assert before == 0
+    assert deleted == 0
