@@ -323,6 +323,17 @@ rm -rf chroma/
 This will re-fetch every product and rebuild the vector index. Depending on the number of stores
 and products, this may take a while and consume embedding API quota.
 
+### Re-index after the item-level indexing upgrade
+
+The vector ID scheme and document format changed (per-item vectors). After deploying:
+
+```bash
+rm -rf chroma/
+.venv/bin/python -m estimator_king crawl --force-refetch
+```
+
+Changing `EMBEDDING_MODEL`/`EMBEDDING_DIMENSIONS` or bumping `item_types_version` in `stores_config.yaml` also triggers a re-index.
+
 ---
 
 ## 9. Troubleshooting

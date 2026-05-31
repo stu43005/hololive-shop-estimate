@@ -178,6 +178,10 @@ On startup the bot's scheduler runs a crawl immediately (`run_on_start`). Becaus
 
 > Deleting `estimator_king.db` resets crawl state (content hashes, active/inactive tracking). This is intended for a full re-index — the next crawl rebuilds it.
 
+### Re-index after the item-level indexing upgrade
+
+The vector ID scheme and document format changed (per-item vectors). After deploying, follow steps 1–3 above (scale down → clear `/data/chroma` → scale up). The SQLite DB does **not** need to be deleted for this migration — the schema migrates additively on startup. If you also changed `EMBEDDING_MODEL`/`EMBEDDING_DIMENSIONS` or bumped `item_types_version` in `stores_config.yaml`, clear both `chroma/` and `estimator_king.db` as shown above.
+
 ---
 
 ## 7. Smoke Tests & Verification

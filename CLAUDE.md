@@ -41,6 +41,6 @@ A single bot process owns both the SQLite database (product state / dedup) and t
 
 ## Gotchas
 
-- **Re-index on embedding change**: vectors from different models/dimensions are incompatible. Changing `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS` requires `rm -rf chroma/` then `crawl --force-refetch`.
+- **Re-index on indexing-model change**: vectors from different models/dimensions are incompatible, AND this build changed the vector ID scheme (one vector per *item*, not per product) and the embedding document format. Any of these requires `rm -rf chroma/` then `crawl --force-refetch`. The SQLite `products` table migrates additively (new `item_types_version` column via idempotent ALTER); bumping `item_types_version` in `stores_config.yaml` forces a full re-index on the next crawl.
 - **Single DB writer**: only one crawler process should touch the SQLite DB at a time (WAL mode, but concurrent writers cause `database is locked`).
 - **`stores_config.yaml` crawler policy** controls rate limiting, per-domain concurrency, retry, daily budget (`max_products_per_run`), schedule interval, and inactive thresholds — change crawl behavior there, not in code.
