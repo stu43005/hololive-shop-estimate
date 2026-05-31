@@ -158,7 +158,7 @@ def test_run_crawl_config_load_failure_exits_1():
 
 
 # ---------------------------------------------------------------------------
-# run_bot() — routing + token handling (mocked)
+# run_service() — routing + token handling (mocked)
 # ---------------------------------------------------------------------------
 
 def test_run_service_routes_to_serve_with_token_override():

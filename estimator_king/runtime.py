@@ -2,7 +2,7 @@
 
 ``build_providers`` is the single place that constructs the embedding / chat /
 vector-store providers, shared by both the ``run`` and ``crawl`` commands. The
-``serve`` composition root (added later) wires the bot and crawl scheduler as
+``serve`` composition root wires the bot and crawl scheduler as
 two independent components over one shared VectorStore.
 """
 
