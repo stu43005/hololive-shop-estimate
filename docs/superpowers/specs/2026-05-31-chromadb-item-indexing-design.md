@@ -170,13 +170,24 @@ class ProductItem:
 
 放 `stores_config.yaml`（§9）：`item_types: [...]`（如 タペストリー／アクリルスタンド／アクリルキーホルダー／缶バッジ／ぬいぐるみ／キーホルダー／ネックレス／ポーチ／ボイス／Tシャツ／タオル …）與 `item_types_version: int`。
 
-### 6.2 分類流程 `classify(text: str) -> str | None`
+### 6.2 分類 API（module 函式，編排兩層 + 快取）
 
-- **第一層（零 LLM）**：對輸入文字（品項名 +（索引時）product 標題）做受控詞彙**最長匹配**（詞彙詞為子字串，取最長者）。恰好命中一個 → 回傳該類型。
-- **第二層（小模型 fallback）**：第一層**零命中或多重命中**時，呼叫 typing 小模型（§10），要求從受控詞彙表選**一個**，或回 `その他`。輸出以受控詞彙做後驗證；不在表內者一律歸 `その他`。
-- 結果寫入快取（§6.3）。
+分類編排為 `estimator_king/sync/typing.py` 的 **module 函式**（非 `TypingProvider` 方法）；`TypingProvider`（§10.1）只是 LLM 包裝。兩個對外函式：
 
-`classify_query(line)` 與 `classify_item(item)` 皆呼叫同一 `classify`；query 端可回傳**多個**命中類型（第一層多重命中時全數保留供 §8 各查一遍），item 端取單一主類型（多重命中走第二層收斂為一）。
+```python
+def classify_item(text, *, item_types, item_types_version, typing_provider, repository) -> str:
+    """索引端：必回傳單一類型字串（零命中時最終為 'その他'，永不 None）。"""
+
+def classify_query(text, *, item_types, item_types_version, typing_provider, repository) -> list[str]:
+    """查詢端：回傳 0..N 個類型；第一層多重命中時全數保留供 §9 各查一遍；
+    第一層零命中時呼叫第二層得單一類型，包成單元素 list；該類型為 'その他' 時回傳空 list（不做類型過濾，只走純 embedding）。"""
+```
+
+兩者共用內部分層：
+
+- **第一層（零 LLM）**：對 `text`（item 端＝品項名＋product 標題；query 端＝查詢行）做受控詞彙 `item_types` **最長匹配**（詞彙詞為子字串）。命中集合：`classify_query` 保留全部命中；`classify_item` 取最長一個。恰好命中 → 直接用，**不**進第二層、**不**寫快取（決定性、無需快取）。
+- **第二層（小模型 fallback）**：第一層**零命中**（`classify_item` 亦含多重命中需收斂）時：先查快取（§6.3，key 含 `item_types_version`）；命中即用。未命中則呼叫 `typing_provider.classify_via_llm(text, item_types)`（§10.1），輸出以 `item_types` 後驗證，不在表內者一律歸 `その他`，並寫入快取。
+- **None 協調**：`classify_item` 最終一律有值（`その他` 為下限），與 §4.2「`item_type` 為單一純量字串」一致；`classify_query` 以**空 list** 表示「不過濾」，無 `None`。
 
 ### 6.3 類型快取表 `item_type_cache`（新增於 `estimator_king/database/schema.sql`）
 
@@ -199,7 +210,7 @@ CREATE TABLE IF NOT EXISTS item_type_cache (
 
 ### 6.5 typing system prompt（依 GPT-5.4 prompt guidance 改寫）
 
-第二層分類呼叫的 system prompt 採 GPT-5.4 骨架，但**刻意精簡**（單一分類任務、低延遲、便宜模型）。受控詞彙表於 runtime 以 `", ".join(item_types)` 注入。輸出用 json_object（`{"item_type": "..."}`）+ §6.2 後驗證。骨架（最終以英文撰寫）：
+第二層分類呼叫的 system prompt 採 GPT-5.4 骨架，但**刻意精簡**（單一分類任務、低延遲、便宜模型）。受控詞彙表由 `classify_via_llm(text, item_types)`（§10.1）以 `", ".join(item_types)` 代入 `{item_types}` 佔位。輸出用 json_object（`{"item_type": "..."}`）+ §6.2 後驗證。骨架（最終以英文撰寫）：
 
 ```text
 Role: You classify one Japanese merchandise item into exactly one category.
@@ -262,8 +273,9 @@ product 需重建時，逐 item 計算 `item_hash = sha256(embedding 文字 + st
   ) -> SyncResult: ...
   ```
 
-  內部：對每個 product 走 §7.2 gating；需重建時 `decompose_items(snapshot, talents=talents)` → 逐 item `classify_item(...)`（用 `typing_provider`、`item_types`、`repository` 做快取）→ `_format_item_document` → §7.3 的 per-item upsert/刪除。
-- `sync_products` 的 `_Embedder`／`_VectorStore` Protocol 旁新增 `_TypingProvider` Protocol（`classify(text) -> str | None` 或 `classify_item`），維持既有 duck-typing 測試慣例。
+  內部：對每個 product 走 §7.2 gating；需重建時 `decompose_items(snapshot, talents=talents)` → 逐 item 呼叫 module 函式 `typing.classify_item(text, item_types=item_types, item_types_version=item_types_version, typing_provider=typing_provider, repository=repository)`（§6.2）→ `_format_item_document` → §7.3 的 per-item upsert/刪除。
+- `sync_products` 的 `_Embedder`／`_VectorStore` Protocol 旁新增 `_TypingProvider` Protocol（`classify_via_llm(text: str, item_types: list[str]) -> str`，對應 §10.1），維持既有 duck-typing 測試慣例。
+- **serve 路徑同樣經此鏈**：`CrawlScheduler`（[scheduler.py:20](../../../estimator_king/crawler/scheduler.py)）是 `run_crawl_cycle` 的**第二個呼叫者**（scheduler.py:34）。其 `__init__` 須新增 `typing_provider` 並於 scheduler.py:34 轉傳給 `run_crawl_cycle`；`serve`（[runtime.py:121](../../../estimator_king/runtime.py)）建構 `CrawlScheduler(...)` 時傳入 `providers.typing`。
 
 ## 8. VectorStore 擴充 `estimator_king/vectorstore/store.py`
 
@@ -367,7 +379,7 @@ size/variant differs; low = only cross-type or weak matches.
 ```
 
 - env：`TYPING_MODEL`、`TYPING_BASE_URL`、`TYPING_API_KEY` 於 `load_config`（[config_schema.py:181](../../../estimator_king/config_schema.py)）以 `os.getenv` 讀入 `AppConfig.typing_*`；cascade（未設定回落 chat，再回落 openai）在 `build_provider_config` 組 `ProviderConfig` 時套用（見 §10.2）。
-- 新增 `TypingProvider`（`estimator_king/llm/typing_provider.py`）：以 OpenAI SDK 呼叫 `typing_model`，輸入受控詞彙表與待分類文字，回傳單一類型字串（json_object 模式 + 後驗證，與 [llm/chat.py](../../../estimator_king/llm/chat.py) 的 fallback 模式一致，相容 ollama）。
+- 新增 `TypingProvider`（`estimator_king/llm/typing_provider.py`）：建構子 `TypingProvider(config: ProviderConfig)`（持有以 `typing_api_key`/`typing_base_url` 建的 OpenAI client 與 `typing_model`）。唯一方法 `classify_via_llm(text: str, item_types: list[str]) -> str`：以 §6.5 prompt（`{item_types}` 代入）呼叫 `typing_model`，json_object 模式取 `item_type` 字串回傳（後驗證在 §6.2 module 函式做，與 [llm/chat.py](../../../estimator_king/llm/chat.py) 的 fallback 模式一致，相容 ollama）。`TypingProvider` **不**持有 `item_types`／不碰快取——兩層編排與快取由 §6.2 module 函式負責。
 
 - `build_provider_config`（[config_schema.py:146](../../../estimator_king/config_schema.py)）新增傳入：`typing_model=self.typing_model`、`typing_base_url=self.typing_base_url or self.chat_base_url or self.openai_base_url`、`typing_api_key=self.typing_api_key or self.chat_api_key or self.openai_api_key or ""`。
 
@@ -414,7 +426,10 @@ estimator:
 
 - `Providers` 容器新增 `typing: TypingProvider`（crawl 與 serve 皆需）。
 - `build_providers(config, *, with_chat=...)` 在建 `embedder`／`vector_store` 後，以 `config.build_provider_config()` 產出的 `ProviderConfig`（含 §10.1 typing 欄位）建構 `TypingProvider` 放入容器。
-- crawl 路徑：`run_crawl_cycle` 由呼叫端（CLI `crawl`）傳入 `providers.typing`（§7.4）。serve 路徑：`build_bot` 由 `serve` 傳入 `providers.typing`（§10.2 注入）。
+- CLI `crawl` 路徑：`__main__` 的 crawl 指令傳 `providers.typing` 給 `run_crawl_cycle`（§7.4）。
+- serve 路徑有**兩條**接線（[runtime.py:114](../../../estimator_king/runtime.py) `serve`）：
+  - 查詢端（index 已建好的向量）：`build_bot` 接 `providers.typing` → 注入 `Estimator`（§10.2）。
+  - 索引端（程序內排程爬取）：`CrawlScheduler(config, db_path, embedder, vector_store, typing_provider=providers.typing)`（§7.4），由 scheduler 轉傳 `run_crawl_cycle`。兩端共用同一 `providers.typing` 實例。
 
 ## 11. 遷移
 
@@ -445,10 +460,11 @@ estimator:
   - SET 與 ¥0 排除。
   - 命名規則三分支（product 標題／選項值併入／殘餘標題）。
   - `detail_snippet` 擷取：section 含「・<品項名> …」時取對應規格行；無對應行時為空字串（不退回整段 description）。
-- `tests/test_typing.py`：第一層最長匹配（唯一命中／多重命中／零命中）；第二層後驗證歸 `その他`；快取命中不呼叫小模型（fake provider 計數）。
+- `tests/test_typing.py`：第一層最長匹配（唯一命中／多重命中／零命中）；`classify_item` 零命中→第二層→`その他`（永不 None）；`classify_query` 多重命中回多元素、`その他`→空 list；第二層後驗證歸 `その他`；快取命中不呼叫 `classify_via_llm`（fake provider 計數，含 `item_types_version` 失效）。
 - `tests/test_engine_items.py`：逐 item upsert；過時 item 向量刪除；`item_hash` 相同略過重嵌；gating key（含 `item_types_version`）。
 - `tests/test_estimator.py`：逐行多類型各查 + 純查合併去重（同 ID 保留最小 distance）；零類型只純查；recency rerank 排序（fake hits 帶 `published_at`）；recency 邊界：候選含 `published_at==0` 時該項 `recency_norm=0` 且不參與 min/max、`>0` 候選 < 2 時退化純相似度；脈絡行格式（含 `0` → `?` 日期）。
 - `tests/test_config_schema.py`：`load_config` 解析 `item_types`／`item_types_version`／`talents`／`estimator.top_k`／`estimator.recency_weight`（含預設值回落）；typing env cascade 經 `build_provider_config`。
+- `tests/test_runtime.py`／`tests/test_scheduler.py`：`build_providers` 產出含 `typing` 的 `Providers`；`CrawlScheduler.__init__` 接 `typing_provider` 並於 `run_once` 轉傳給 `run_crawl_cycle`（serve 索引端接線；fake provider 驗證傳遞）。
 - `tests/test_shopify.py`（或既有）：`published_at` 解析（ISO8601 → epoch、缺失回落 `created_at`、再缺 `0`）；`ProductSnapshotWithHash` 帶 `published_at` 仍可 import/建構（驗證 dataclass 排序修正）。
 - 驗證工具鏈（[CLAUDE.md](../../../CLAUDE.md)）：`.venv/bin/basedpyright estimator_king`（prod 0 error）、`uvx ruff check`、相關 `pytest -o addopts=""`。
 
