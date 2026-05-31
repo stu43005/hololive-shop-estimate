@@ -118,6 +118,18 @@ class AppConfig:
     chat_structured_output: bool = True
     chroma_path: str = "./chroma"
 
+    # Item-type classification + retrieval tuning (structural, from YAML)
+    item_types: List[str] = field(default_factory=list)
+    item_types_version: int = 0
+    talents: frozenset[str] = field(default_factory=frozenset)
+    estimator_top_k: int = 10
+    estimator_recency_weight: float = 0.05
+
+    # Typing provider (credentials, from env)
+    typing_model: str = "gpt-4o-mini"
+    typing_base_url: str | None = None
+    typing_api_key: str | None = None
+
     # Discord (bot)
     discord_token: Optional[str] = None
 
@@ -159,6 +171,9 @@ class AppConfig:
             chat_base_url=self.chat_base_url or self.openai_base_url,
             chat_model=self.chat_model,
             chat_structured_output=self.chat_structured_output,
+            typing_model=self.typing_model,
+            typing_base_url=self.typing_base_url or self.chat_base_url or self.openai_base_url,
+            typing_api_key=self.typing_api_key or self.chat_api_key or self.openai_api_key or "",
         )
 
     @staticmethod
@@ -244,6 +259,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             return default
         return int(raw) if raw.strip() != "" else None
 
+    est = yaml_data.get("estimator", {}) or {}
     openai_api_key = os.getenv("OPENAI_API_KEY")
     openai_base_url = os.getenv("OPENAI_BASE_URL")
     config = AppConfig(
@@ -264,6 +280,14 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         chroma_path=os.getenv("CHROMA_PATH", "./chroma"),
         discord_token=os.getenv("DISCORD_TOKEN", os.getenv("DISCORD_BOT_TOKEN")),
         database_path=os.getenv("DATABASE_PATH", "./estimator_king.db"),
+        item_types=list(yaml_data.get("item_types", []) or []),
+        item_types_version=int(yaml_data.get("item_types_version", 0) or 0),
+        talents=frozenset(yaml_data.get("talents", []) or []),
+        estimator_top_k=int(est.get("top_k", 10)),
+        estimator_recency_weight=float(est.get("recency_weight", 0.05)),
+        typing_model=os.getenv("TYPING_MODEL", "gpt-4o-mini"),
+        typing_base_url=os.getenv("TYPING_BASE_URL"),
+        typing_api_key=os.getenv("TYPING_API_KEY"),
     )
 
     # Validate structural configuration (not credentials)
