@@ -32,6 +32,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     common.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                         help="Set logging level (default: INFO)")
+    common.add_argument("--db", default=None,
+                        help="Override database path from config")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -44,8 +46,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
     p_crawl = sub.add_parser("crawl", parents=[common],
                              help="Run one crawl cycle and exit")
-    p_crawl.add_argument("--db", default=None,
-                         help="Override database path from config")
     p_crawl.add_argument("--force-refetch", action="store_true", default=False,
                          help="Re-fetch all active products regardless of age")
 
@@ -96,6 +96,8 @@ def run_service(args: argparse.Namespace) -> None:
     except Exception as e:
         sys.stderr.write(f"Error: Failed to load config: {e}\n")
         sys.exit(1)
+    if args.db is not None:
+        config.database_path = args.db
     if args.token is not None:
         config.discord_token = args.token
     if not config.discord_token:

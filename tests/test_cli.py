@@ -68,6 +68,13 @@ def test_parse_args_run_token_and_guild():
     assert args.guild_id == 123
 
 
+def test_parse_args_run_db_flag():
+    """run accepts the shared --db (moved to the common parent)."""
+    args = parse_args(["run", "--db", "/x"])
+    assert args.command == "run"
+    assert args.db == "/x"
+
+
 # ---------------------------------------------------------------------------
 # parse_args — subcommand required
 # ---------------------------------------------------------------------------
@@ -173,6 +180,17 @@ def test_run_service_routes_to_serve_with_token_override():
     assert mock_cfg.discord_token == "cli-token"
     mock_serve.assert_called_once_with(mock_cfg, guild_id=123)
     mock_asyncio_run.assert_called_once_with(mock_serve.return_value)
+
+
+def test_run_service_applies_db_override():
+    """run_service overrides config.database_path when --db is given."""
+    mock_cfg = MagicMock()
+    mock_cfg.discord_token = "tok"
+    with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.serve", new_callable=MagicMock), \
+         patch("estimator_king.__main__.asyncio.run"):
+        run_service(MagicMock(config="stores.yaml", db="/x", token=None, guild_id=None))
+    assert mock_cfg.database_path == "/x"
 
 
 def test_run_service_exits_1_when_token_missing():
