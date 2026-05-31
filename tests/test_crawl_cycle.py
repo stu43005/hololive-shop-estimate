@@ -8,6 +8,11 @@ from estimator_king.crawler.cycle import run_crawl_cycle
 from estimator_king.crawler.sitemap import SitemapError
 
 
+class FakeTypingProvider:
+    def classify_via_llm(self, text, item_types):
+        return "その他"
+
+
 class FakeEmbedder:
     def embed_documents(self, texts):
         return [[0.0] for _ in texts]
@@ -19,6 +24,9 @@ class FakeVectorStore:
 
     def delete(self, ids):
         pass
+
+    def get_by_product(self, store_id, product_id):
+        return []
 
 
 @pytest.fixture
@@ -44,7 +52,7 @@ def test_run_cycle_invokes_inactive_once_after_stores(db_path):
             return PipelineResult()
         proc.side_effect = fake_proc
 
-        counters = asyncio.run(run_crawl_cycle(cfg, db_path, FakeEmbedder(), FakeVectorStore()))
+        counters = asyncio.run(run_crawl_cycle(cfg, db_path, FakeEmbedder(), FakeVectorStore(), FakeTypingProvider()))
 
     assert inactive.call_count == 1  # once per cycle, cross-store
     assert enq.call_args.kwargs["limit"] == 32  # budget = 32 - new_count(0)
@@ -62,7 +70,7 @@ def test_force_refetch_skips_budget_enqueue(db_path):
             return PipelineResult()
         proc.side_effect = fake_proc
 
-        asyncio.run(run_crawl_cycle(cfg, db_path, FakeEmbedder(), FakeVectorStore(), force_refetch=True))
+        asyncio.run(run_crawl_cycle(cfg, db_path, FakeEmbedder(), FakeVectorStore(), FakeTypingProvider(), force_refetch=True))
 
     enq.assert_not_called()
 
@@ -79,7 +87,7 @@ def test_sitemap_failure_counts_error_and_continues(db_path):
             return PipelineResult()
         proc.side_effect = fake_proc
 
-        counters = asyncio.run(run_crawl_cycle(cfg, db_path, FakeEmbedder(), FakeVectorStore()))
+        counters = asyncio.run(run_crawl_cycle(cfg, db_path, FakeEmbedder(), FakeVectorStore(), FakeTypingProvider()))
 
     assert counters["errors"] >= 1
     assert inactive.call_count == 1  # cross-store sweep still runs once

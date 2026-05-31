@@ -10,6 +10,11 @@ from estimator_king.crawler.snapshot import ProductSnapshot, ProductVariant
 from estimator_king.database.repository import ProductStateRepository
 
 
+class FakeTypingProvider:
+    def classify_via_llm(self, text, item_types):
+        return "その他"
+
+
 class FakeEmbedder:
     def embed_documents(self, texts):
         return [[0.1, 0.2] for _ in texts]
@@ -18,12 +23,20 @@ class FakeEmbedder:
 class FakeVectorStore:
     def __init__(self):
         self.upserts = []
+        self._meta = {}
 
     def upsert(self, id, document, embedding, metadata):
         self.upserts.append(id)
+        self._meta[id] = dict(metadata)
 
     def delete(self, ids):
         pass
+
+    def get_by_product(self, store_id, product_id):
+        from estimator_king.vectorstore.store import QueryHit
+        return [QueryHit(id=i, document="", metadata=m, distance=0.0)
+                for i, m in self._meta.items()
+                if m.get("store_id") == store_id and m.get("product_id") == product_id]
 
 
 @pytest.fixture
@@ -44,10 +57,13 @@ def test_success_indexes_and_clears_queue(repo):
 
     with patch("estimator_king.crawler.async_pipeline.fetch_product", return_value=_snap(1)):
         result = asyncio.run(async_process_queue(
-            "hololive", policy, repo, FakeEmbedder(), vs))
+            "hololive", policy, repo, FakeEmbedder(), vs,
+            typing_provider=FakeTypingProvider(), talents=frozenset(),
+            item_types=[], item_types_version=0))
 
     assert result.processed == 1
-    assert vs.upserts == ["hololive:1"]
+    assert len(vs.upserts) >= 1
+    assert all(i.startswith("hololive:1:") for i in vs.upserts)
     assert repo.peek_all("hololive") == []  # queue drained
     state = repo.get_by_external_key("hololive:1")
     assert state is not None and state.last_fetch_success_at is not None
@@ -58,7 +74,9 @@ def test_fetch_failure_increments_failures_and_keeps_queue(repo):
     repo.enqueue_url("hololive", "https://x/products/1")
     with patch("estimator_king.crawler.async_pipeline.fetch_product", return_value=_snap(1)):
         asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
-                                        FakeEmbedder(), FakeVectorStore()))
+                                        FakeEmbedder(), FakeVectorStore(),
+                                        typing_provider=FakeTypingProvider(), talents=frozenset(),
+                                        item_types=[], item_types_version=0))
     repo.enqueue_url("hololive", "https://x/products/1")  # re-queue for the failing run
 
     def boom(url, client):
@@ -66,7 +84,10 @@ def test_fetch_failure_increments_failures_and_keeps_queue(repo):
 
     with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=boom):
         result = asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
-                                                 FakeEmbedder(), FakeVectorStore()))
+                                                 FakeEmbedder(), FakeVectorStore(),
+                                                 typing_provider=FakeTypingProvider(),
+                                                 talents=frozenset(), item_types=[],
+                                                 item_types_version=0))
 
     assert result.failed == 1
     assert repo.peek_all("hololive") != []  # entry kept for retry
@@ -92,7 +113,9 @@ def test_proxy_forwarded_to_async_http_client(repo):
          patch("estimator_king.crawler.async_pipeline.fetch_product", return_value=_snap(1)):
         asyncio.run(async_process_queue(
             "hololive", CrawlerPolicy(), repo,
-            FakeEmbedder(), FakeVectorStore(), proxy=proxy_cfg))
+            FakeEmbedder(), FakeVectorStore(), proxy=proxy_cfg,
+            typing_provider=FakeTypingProvider(), talents=frozenset(),
+            item_types=[], item_types_version=0))
 
     assert captured["proxy"] is proxy_cfg
 
@@ -105,7 +128,10 @@ def test_client_error_404_deletes_queue_entry_for_new_product(repo):
 
     with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=boom):
         result = asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
-                                                 FakeEmbedder(), FakeVectorStore()))
+                                                 FakeEmbedder(), FakeVectorStore(),
+                                                 typing_provider=FakeTypingProvider(),
+                                                 talents=frozenset(), item_types=[],
+                                                 item_types_version=0))
 
     assert result.failed == 1
     assert repo.peek_all("hololive") == []  # definitively gone: dropped, not retried
@@ -116,7 +142,9 @@ def test_client_error_410_deletes_queue_and_increments_when_row_exists(repo):
     repo.enqueue_url("hololive", "https://x/products/1")
     with patch("estimator_king.crawler.async_pipeline.fetch_product", return_value=_snap(1)):
         asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
-                                        FakeEmbedder(), FakeVectorStore()))
+                                        FakeEmbedder(), FakeVectorStore(),
+                                        typing_provider=FakeTypingProvider(), talents=frozenset(),
+                                        item_types=[], item_types_version=0))
     repo.enqueue_url("hololive", "https://x/products/1")  # re-queue for the failing run
 
     def boom(url, client):
@@ -124,7 +152,10 @@ def test_client_error_410_deletes_queue_and_increments_when_row_exists(repo):
 
     with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=boom):
         result = asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
-                                                 FakeEmbedder(), FakeVectorStore()))
+                                                 FakeEmbedder(), FakeVectorStore(),
+                                                 typing_provider=FakeTypingProvider(),
+                                                 talents=frozenset(), item_types=[],
+                                                 item_types_version=0))
 
     assert result.failed == 1
     assert repo.peek_all("hololive") == []  # dropped
@@ -139,7 +170,10 @@ def test_client_error_400_keeps_queue_entry(repo):
 
     with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=boom):
         result = asyncio.run(async_process_queue("hololive", CrawlerPolicy(), repo,
-                                                 FakeEmbedder(), FakeVectorStore()))
+                                                 FakeEmbedder(), FakeVectorStore(),
+                                                 typing_provider=FakeTypingProvider(),
+                                                 talents=frozenset(), item_types=[],
+                                                 item_types_version=0))
 
     assert result.failed == 1
     assert repo.peek_all("hololive") != []  # only 404/410 are definitive; 400 is retried
@@ -157,7 +191,9 @@ def test_worker_pool_processes_all_entries(repo):
 
     with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=fake_fetch):
         result = asyncio.run(async_process_queue(
-            "hololive", policy, repo, FakeEmbedder(), vs))
+            "hololive", policy, repo, FakeEmbedder(), vs,
+            typing_provider=FakeTypingProvider(), talents=frozenset(),
+            item_types=[], item_types_version=0))
 
     assert result.processed == 5
     assert repo.peek_all("hololive") == []  # queue fully drained by the worker pool
@@ -181,6 +217,8 @@ def test_worker_pool_caps_concurrency_at_worker_count(repo):
 
     with patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=fake_fetch):
         asyncio.run(async_process_queue(
-            "hololive", policy, repo, FakeEmbedder(), FakeVectorStore()))
+            "hololive", policy, repo, FakeEmbedder(), FakeVectorStore(),
+            typing_provider=FakeTypingProvider(), talents=frozenset(),
+            item_types=[], item_types_version=0))
 
     assert max_active == 2  # worker pool caps concurrent fetches at concurrency_per_domain

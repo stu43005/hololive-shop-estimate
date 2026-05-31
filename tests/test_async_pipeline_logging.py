@@ -11,17 +11,31 @@ from estimator_king.crawler.snapshot import ProductSnapshot, ProductVariant
 from estimator_king.database.repository import ProductStateRepository
 
 
+class FakeTypingProvider:
+    def classify_via_llm(self, text, item_types):
+        return "その他"
+
+
 class FakeEmbedder:
     def embed_documents(self, texts):
         return [[0.1, 0.2] for _ in texts]
 
 
 class FakeVectorStore:
+    def __init__(self):
+        self._meta = {}
+
     def upsert(self, id, document, embedding, metadata):
-        pass
+        self._meta[id] = dict(metadata)
 
     def delete(self, ids):
         pass
+
+    def get_by_product(self, store_id, product_id):
+        from estimator_king.vectorstore.store import QueryHit
+        return [QueryHit(id=i, document="", metadata=m, distance=0.0)
+                for i, m in self._meta.items()
+                if m.get("store_id") == store_id and m.get("product_id") == product_id]
 
 
 @pytest.fixture
@@ -53,7 +67,9 @@ def test_queue_start_heartbeat_and_done_logged(repo, caplog):
         ):
             result = asyncio.run(async_process_queue(
                 "hololive", CrawlerPolicy(), repo,
-                FakeEmbedder(), FakeVectorStore()))
+                FakeEmbedder(), FakeVectorStore(),
+                typing_provider=FakeTypingProvider(), talents=frozenset(),
+                item_types=[], item_types_version=0))
 
     assert result.processed == n
     msgs = [
