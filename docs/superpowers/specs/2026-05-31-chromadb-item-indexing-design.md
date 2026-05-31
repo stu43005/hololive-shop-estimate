@@ -61,16 +61,17 @@ estimate 路徑（查詢時）— 逐行（per-line）
 class ProductItem:
     product_id: int
     product_title: str           # 來源 product 標題
-    item_name: str               # 此品項顯示名（見 §5 命名規則）
+    item_name: str               # 此品項顯示名（見 §5.3 命名規則）
     price_jpy: int               # 此品項價格（整數 JPY）
     source_variant_ids: tuple[int, ...]   # 合併後對應的原始 variant id（≥1）
     talents: tuple[str, ...]     # 合併時收集到的 talent（可空）
-    detail_snippet: str          # 最佳努力擷取的段落片段（可空，見 §5.3）
+    detail_snippet: str          # 最佳努力擷取的段落片段（可空，見 §5.4）
+    published_at: int            # epoch 秒；無法取得時為 0（來源見 §4.3）
 ```
 
 ### 4.2 每 item 向量
 
-- **向量 ID**：`f"{store_id}:{product_id}:{item_slug}"`。`item_slug` = 對 `item_name` 正規化（§5.4 的 `_normalize_text` 同規則）後取 SHA-256 前 16 hex，確保同一 product 內穩定且不撞號。
+- **向量 ID**：`f"{store_id}:{product_id}:{item_slug}"`。`item_slug` = 對 `item_name` 套用 `crawler/snapshot.py::_normalize_text`（decode HTML entities + collapse whitespace）後取 SHA-256 前 16 hex，確保同一 product 內穩定且不撞號。`_normalize_text` 目前為 `snapshot.py` 的 module-private 函式，實作時提升為可被 `items.py` import（移除底線或於 `snapshot.py` 匯出）。
 - **embedding 文字**（§5.2）。
 - **metadata**：
   - `store_id: str`
@@ -84,7 +85,18 @@ class ProductItem:
   - `detail_snippet: str`（§5.4 擷取的規格片段，供查詢端送進 LLM 脈絡；可空）
   - `item_hash: str`（此 item 的內容雜湊，見 §7.2）
 
+> item 向量 metadata **不含** `content_hash`（product 級的 `content_hash` 由 `ProductState` 持有，見 §7.1）；per-item 的重嵌判斷改以 `item_hash` 承載（§7.3）。舊 `_format_product_document` 寫入的 `title`、`content_hash` metadata 鍵在新模型中**不再寫入**。
+>
 > ChromaDB 1.5.9 實測：metadata 可存 list 但 `where` 無法對 list 成員過濾（`where={"types":"x"}` 對 list 欄位回傳空）；而查詢需 `where={item_type:T}`，故 `item_type` 必須是**單一純量**。複合品項（如「ぬいキーホルダー」）的 recall 由 embedding 文字含全名 + 純 embedding 補查（§8）保住。
+
+### 4.3 來源時間戳擷取（`ProductSnapshot` 與 shopify parser 擴充）
+
+`published_at` 目前**不存在於資料流**：`ProductSnapshot`（[crawler/snapshot.py](../../../estimator_king/crawler/snapshot.py)）只有 `product_id/title/description/variants/html_details`；`crawler/shopify.py::_build_snapshot_from_product_json` 也未解析時間戳。需新增：
+
+- `ProductSnapshot` 新增欄位 `published_at: int = 0`（epoch 秒）。
+- `shopify.py::_build_snapshot_from_product_json` 從 product JSON 的 `published_at`（Shopify 為 ISO8601 字串，如 `2023-06-30T19:00:07+09:00`；缺失或 `created_at` 皆可回落）解析為 epoch 秒；解析失敗則 `0`。`fetch_product`/`_build_snapshot` 透傳此欄位至 `ProductSnapshotWithHash`。
+- **決定性保證**：`canonicalize_snapshot`／`compute_content_hash`（[snapshot.py](../../../estimator_king/crawler/snapshot.py)）**維持不納入** `published_at`（其註解已明示排除時間戳）。`published_at` 純為 metadata，**不得**進入 `content_hash`，否則商品改版時間會讓 hash 抖動。
+- `ProductItem.published_at` 由所屬 product 的 `snapshot.published_at` 帶入（同一 product 的所有 item 共用）。
 
 ## 5. 品項拆解模組 `estimator_king/sync/items.py`（新增）
 
@@ -101,21 +113,27 @@ class ProductItem:
 
 > 純結構（LCP/LCS）模板偵測經實證**不可靠**：themed series（如「Start your Journey ポーチ／りんご型プレート」「活動三周年 Tシャツ／トートバッグ」）共享長主題前後綴，結構上與 talent 列舉無法區分，會誤併不同品項。唯一可靠訊號是「變動 token 是否為 talent」，故需 talent 字典。
 
-去重演算法（剝除 option 前綴後對殘餘標題操作）：
+去重演算法以**等價類（canonical key）** 定義，天然具傳遞性，不需 union-find：
 
 1. 依 `price_jpy` 分組。
-2. 對每個 size ≥ 2 的同價組：把各殘餘標題以空白切 token；
-   - 若任兩筆之間僅差**恰好一個 token**，且該差異 token ∈ `talents`，視為同品項的 talent 變體；
-   - 對整組做傳遞閉包（union-find）：若全組兩兩皆滿足上述條件（殘餘標題移除其 talent token 後完全相同），整組合併為**一筆 item**。
-3. 合併的 item：`source_variant_ids` 收集全組、`talents` 收集差異 token、`price_jpy` 為該組價格。
-4. 未滿足合併條件者，每個 variant 各自成一筆 item。
+2. 對每筆殘餘標題（剝除 option 前綴後）以空白切 token，計算 **canonical key**：
+   - 移除標題中**所有屬於 `talents`** 的 token（以 `_normalize_text` 正規化後逐 token 比對 `talents` 集合，移除命中者），其餘 token 依原順序以單一空白接回，即為 canonical key。
+3. 同一同價組內 **canonical key 相同**的多筆殘餘標題合併為**一筆 item**；合併需滿足：(a) 被移除的 talent token 至少一筆非空（確認差異確由 talent 造成、而非完全相同字串）；(b) canonical key 非空（避免整串都被當成 talent 而誤併）。
+4. 合併的 item：`source_variant_ids` 收集全組、`talents` 收集各筆被移除的 talent token（去重）、`price_jpy` 為該組價格。
+5. 不滿足合併（canonical key 互異，如 themed series「ポーチ」vs「りんご型プレート」其 token 非 talent 故 key 不同）者，每個 variant 各自成一筆 item。
 
 不同 size 因價格不同會落在不同價組 → 不會被合併 → 各自成獨立 item（解決 §2 size 議題）。
 
 ### 5.3 命名規則（`item_name`）
 
-- **整個 product 合併成單一 item 時**（去重後只剩 1 筆，且來源 ≥2 個 talent 變體）：`item_name = product_title`（product 標題即品項名，例：Blue Journey ×23 → 「3Dアクリルスタンド Blue Journey衣装ver.」）。
-- **variant 標題僅為選項值時**（剝除前綴後殘餘為純 size／顏色，如「黒　M」；判定：殘餘不含 product 標題的主要 token，或殘餘長度 < 4 全形字）：`item_name = f"{product_title} {殘餘}"`，使 size／顏色成為品項名一部分。
+先定義 **product 主要 token 集合**：`product_title` 經 `_normalize_text` 正規化、切 token 後，保留長度 ≥ 2 全形字（或 ≥ 2 個碼位）的 token 所成集合（濾掉單字符雜訊）。判定依序套用：
+
+- **整個 product 合併成單一 item 時**（§5.2 去重後 `items` 只剩 1 筆，且該筆 `len(source_variant_ids) ≥ 2`）：`item_name = product_title`（product 標題即品項名，例：Blue Journey ×23 → 「3Dアクリルスタンド Blue Journey衣装ver.」）。
+- **variant 殘餘為純選項值時**（剝除前綴後殘餘判定為 size／顏色而非品項描述）：`item_name = f"{product_title} {殘餘}"`。判定條件（OR）：
+  - 殘餘 token 與 product 主要 token 集合**交集為空**（殘餘未重述任何品項描述詞）；**或**
+  - 殘餘以 `str` 計（不折算半形）長度 `< 4`（涵蓋「M」「XL」「黒 M」等短選項值；全形空白先以 `_normalize_text` 正規化為半形空白）。
+
+  例：「黒　M」交集為空且長度短 → 落此分支 →「ぶいすぽっ！オリジナルTシャツ 黒 M」。
 - **其餘**（混合品項、各自獨立）：`item_name = 剝除前綴後的殘餘標題`。
 
 ### 5.4 段落片段擷取（`detail_snippet`，最佳努力、決定性、可空）
@@ -124,8 +142,11 @@ class ProductItem:
 
 `snapshot.html_details`（如「グッズ詳細」「セット詳細」）常以「・<品項名> …」條列各品項規格（含尺寸、材質）。對每個 item：
 
-- 在各段落內容中，以「・」「◇」或換行切段後，尋找與該 item 主要 token 重疊度最高的一段；命中且重疊度達門檻則取該段為 `detail_snippet`，否則為空字串。
-- 擷取不到時**直接略過**（`detail_snippet=""`），不退回整段 description（避免把整 product 噪音灌進單一 item）。
+- **段落切分**：把各 `html_details` 值以分隔符 `・`／`◇`／換行切成候選段。
+- **item token 集合**：取 `item_name` 經 `_normalize_text` 正規化、切 token 後長度 ≥ 2 的 token（即 §5.3 定義的「主要 token」同規則）。
+- **重疊度量**：候選段（同樣正規化切 token）與 item token 集合的**交集 token 數**。
+- **門檻**：取交集數最大的候選段；命中需滿足「交集 token 數 ≥ 2」**且**「交集數 ≥ item token 集合大小的 50%（無條件進位）」。達標 → 該段為 `detail_snippet`；否則 `detail_snippet=""`。
+- 擷取不到時**直接略過**（不退回整段 description，避免把整 product 噪音灌進單一 item）。
 - 此片段**不影響價格**（價格一律取自 variant），僅補充規格語義供檢索與估價判斷。
 
 ### 5.5 embedding 文字格式（`_format_item_document`，取代 `_format_product_document`）
@@ -187,14 +208,18 @@ CREATE TABLE IF NOT EXISTS item_type_cache (
 
 - 既有判斷：`state.content_hash == content_hash and state.last_indexed_at is not None`（[sync/engine.py](../../../estimator_king/sync/engine.py)）。
 - **擴充**：加入 `state.normalizer_version == NORMALIZER_VERSION and state.item_types_version == 當前 item_types_version`。任一不符 → 重建該 product 全部 items。
-- `ProductState` 與 `products` 資料表新增欄位 `item_types_version INTEGER`（additive；§11 遷移）。
+- `ProductState` 與 `products` 資料表新增欄位 `item_types_version INTEGER`，連動修改點（缺一即型別不一致）見 §11：
+  - `ProductState` dataclass 新增 `item_types_version: int | None = None`（[repository.py](../../../estimator_king/database/repository.py)）。
+  - `_row_to_state` 讀取該欄（舊列為 `NULL` → `None`，視為版本不符）。
+  - `upsert` 的 INSERT 欄位列、`VALUES` 佔位、`ON CONFLICT DO UPDATE` 子句新增該欄。
+  - `sync_products` 寫入 `ProductState` 時帶入當前 `item_types_version`。
 
 ### 7.3 per-item gating
 
 product 需重建時，逐 item 計算 `item_hash = sha256(embedding 文字 + str(price_jpy) + item_type)`：
 
-- 取得該 product 現存的 item 向量（§8.1 `get_by_product`），比對 `item_hash`：相同則略過 upsert（避免無謂重嵌）。
-- 計算「應存在的 item ID 集合」與「現存 ID 集合」的差集，**刪除過時 item 向量**（variant 消失／合併關係改變時）。
+- 取得該 product 現存的 item 向量（§8.1 `get_by_product`），比對其 metadata 的 `item_hash`：相同則略過該 item 的 upsert（避免無謂重嵌）。
+- 計算「應存在的 item ID 集合」與「現存 ID 集合」的差集，以既有 `VectorStore.delete(ids)`（[store.py](../../../estimator_king/vectorstore/store.py)，已存在）**刪除過時 item 向量**（variant 消失／合併關係改變時）。
 
 ## 8. VectorStore 擴充 `estimator_king/vectorstore/store.py`
 
@@ -206,6 +231,7 @@ def get_by_product(self, store_id: str, product_id: str) -> list[QueryHit]:
 ```
 
 - 實測 chromadb 1.5.9：`collection.get(where={...})` 可用、`where` 純量等值與 `$in`／`$and` 可用。
+- **刪除沿用既有 API**：§7.3 的過時向量刪除直接用既有 `VectorStore.delete(ids)`（[store.py](../../../estimator_king/vectorstore/store.py)），本節不新增刪除方法。
 
 ### 8.2 `query` 既有 `where` 參數沿用
 
@@ -218,20 +244,23 @@ def get_by_product(self, store_id: str, product_id: str) -> list[QueryHit]:
 ### 9.1 每行流程（取代 `_estimate_chunk` 內的單一 query）
 
 1. `types = typing.classify_query(line)`（0..N 個類型）。
-2. 檢索並合併（去重 by 向量 ID）：
-   - 對 `types` 中每個類型：`vector_store.query(emb, top_k, where={"item_type": T})`；
-   - 另做一次 `vector_store.query(emb, top_k)`（純 embedding，不過濾）；
+2. 檢索並合併（去重 by 向量 ID，保留最小 distance 者）：
+   - 對 `types` 中每個類型各做一次 `vector_store.query(emb, n_results=estimator_top_k, where={"item_type": T})`；
+   - 另做一次 `vector_store.query(emb, n_results=estimator_top_k)`（純 embedding，不過濾）；
    - 若 `types` 為空 → 只做純 embedding 查詢。
-3. **recency rerank（輕微偏好）**：對合併後候選依下式排序後取前 `top_k` 筆：
+   - 候選池大小 ≤ (N+1)×`estimator_top_k`，於 step 3 rerank 後截為前 `estimator_top_k` 筆送入脈絡。
+3. **recency rerank（輕微偏好）**：對合併後候選依下式排序，取前 `estimator_top_k` 筆：
 
-   ```
-   score = cosine_similarity + λ * recency_norm
+   ```text
+   score            = cosine_similarity + λ * recency_norm
    cosine_similarity = 1 - distance
-   recency_norm ∈ [0,1]，以 published_at 線性映射（最舊→0，最新→1；published_at==0 視為最舊）
-   λ = recency_weight（§10，預設小值，僅在相似度接近時影響排序）
+   recency_norm     = (pub - min_pub) / (max_pub - min_pub)   # 以「本次候選集合」的 published_at 為基準
    ```
 
-4. 組脈絡行：`- {item_name} | {item_type} | ¥{price_jpy} | {YYYY-MM} | {store_id}`；若 `detail_snippet` 非空，再接一行縮排的規格片段（截斷至約 120 全形字）。讓 chat model 能依規格（size／材質）對齊比價，而非只靠品項名。
+   - `min_pub`／`max_pub` 取自**本次候選集合**的 `published_at`（非全 collection）。
+   - 當 `max_pub == min_pub`（含全為 `0`）時 `recency_norm = 0`（避免除零，退化為純相似度排序）。
+   - `λ = estimator_recency_weight`（§10，預設小值，僅在相似度接近時影響排序）。
+4. 組脈絡行（讀新 metadata 鍵，**不再讀**舊 `title`）：`- {item_name} | {item_type} | ¥{price_jpy} | {YYYY-MM} | {store_id}`；其中 `YYYY-MM` 由 `published_at` 換算（`0` → 顯示 `?`）。若 `detail_snippet` 非空，再接一行縮排的規格片段（截斷至約 120 全形字）。讓 chat model 能依規格（size／材質）對齊比價，而非只靠品項名。
 
 ### 9.2 size 註記
 
@@ -254,25 +283,57 @@ def get_by_product(self, store_id: str, product_id: str) -> list[QueryHit]:
     typing_api_key: str = ""             # cascade: typing → chat → openai
 ```
 
-- env：`TYPING_MODEL`、`TYPING_BASE_URL`、`TYPING_API_KEY`，於 [config_schema.py::build_provider_config](../../../estimator_king/config_schema.py) 讀取並做 cascade（未設定時回落 chat，再回落 openai）。
+- env：`TYPING_MODEL`、`TYPING_BASE_URL`、`TYPING_API_KEY` 於 `load_config`（[config_schema.py:181](../../../estimator_king/config_schema.py)）以 `os.getenv` 讀入 `AppConfig.typing_*`；cascade（未設定回落 chat，再回落 openai）在 `build_provider_config` 組 `ProviderConfig` 時套用（見 §10.2）。
 - 新增 `TypingProvider`（`estimator_king/llm/typing_provider.py`）：以 OpenAI SDK 呼叫 `typing_model`，輸入受控詞彙表與待分類文字，回傳單一類型字串（json_object 模式 + 後驗證，與 [llm/chat.py](../../../estimator_king/llm/chat.py) 的 fallback 模式一致，相容 ollama）。
 
-### 10.2 檢索參數（`stores_config.yaml` 的 `estimator` 區段，新增）
+- `build_provider_config`（[config_schema.py:146](../../../estimator_king/config_schema.py)）新增傳入：`typing_model=self.typing_model`、`typing_base_url=self.typing_base_url or self.chat_base_url or self.openai_base_url`、`typing_api_key=self.typing_api_key or self.chat_api_key or self.openai_api_key or ""`。
+
+### 10.2 新增 structural 設定（YAML，非 env）
+
+以下為 `stores_config.yaml` 新增的**結構性**設定（與 §10.1 的 env credential 不同路徑），需在 `AppConfig` 新增欄位並於 `load_config` 解析：
 
 ```yaml
+item_types: [タペストリー, アクリルスタンド, 缶バッジ, ぬいぐるみ, キーホルダー, ネックレス, ポーチ, ボイス, Tシャツ, タオル]
+item_types_version: 1
+talents: [博衣こより, 白銀ノエル, 尾丸ポルカ]      # §12，mining + 人工審核產出
 estimator:
-  top_k: 10              # 既有預設沿用
-  recency_weight: 0.05   # λ，輕微偏好
+  top_k: 10
+  recency_weight: 0.05
 ```
 
-由 `config_schema` 讀入並注入 `Estimator`。
+`AppConfig`（[config_schema.py:90](../../../estimator_king/config_schema.py)）新增欄位（型別 + 預設）：
+
+```python
+    item_types: List[str] = field(default_factory=list)
+    item_types_version: int = 0
+    talents: frozenset[str] = field(default_factory=frozenset)
+    estimator_top_k: int = 10
+    estimator_recency_weight: float = 0.05
+```
+
+`load_config`（[config_schema.py:181](../../../estimator_king/config_schema.py)）新增解析（structural，從 `yaml_data` 讀，非 env）：
+
+```python
+    est = yaml_data.get("estimator", {}) or {}
+    # 傳入 AppConfig(...)：
+    item_types=list(yaml_data.get("item_types", []) or []),
+    item_types_version=int(yaml_data.get("item_types_version", 0) or 0),
+    talents=frozenset(yaml_data.get("talents", []) or []),
+    estimator_top_k=int(est.get("top_k", 10)),
+    estimator_recency_weight=float(est.get("recency_weight", 0.05)),
+```
+
+- typing env（`TYPING_MODEL`／`TYPING_BASE_URL`／`TYPING_API_KEY`）於 `load_config` 以 `os.getenv` 讀入 `AppConfig.typing_*` 欄位（同 §10.1，AppConfig 亦新增對應 `typing_model: str = "gpt-4o-mini"`、`typing_base_url: str | None = None`、`typing_api_key: str | None = None`）。
+- 注入：`Estimator` 建構子新增 `recency_weight` 參數，`top_k` 沿用既有（[estimator.py:44](../../../estimator_king/bot/estimator.py) 已有 `top_k`）；`runtime`／組裝層以 `config.estimator_top_k`、`config.estimator_recency_weight` 注入。`decompose_items` 與 typing 模組由組裝層傳入 `config.talents`、`config.item_types`、`config.item_types_version`。
+- `AppConfig.validate` 為結構驗證；`item_types`／`talents` 允許為空（空 `talents` → 不去重；空 `item_types` → 第一層永不命中、全走第二層或 `その他`），不在 `validate` 強制。
 
 ## 11. 遷移
 
 - **向量重建**：向量 ID 規則與 embedding 文字皆改變 → 需 `rm -rf chroma/` 後 `crawl --force-refetch`。更新 [CLAUDE.md](../../../CLAUDE.md) Gotchas 與 [docs/local-runbook.md](../../../docs/local-runbook.md)／[docs/ops-runbook.md](../../../docs/ops-runbook.md)。
-- **SQLite**：
-  - 新增 `item_type_cache` 表（`CREATE TABLE IF NOT EXISTS`，自動建立）。
-  - `products` 表新增 `item_types_version INTEGER`：以 `CREATE TABLE IF NOT EXISTS` 既有結構 + 啟動時 `ALTER TABLE ... ADD COLUMN`（若不存在）的 additive 遷移；舊列預設 `NULL`，視為「版本不符」→ 下次 crawl 自然重建。
+- **SQLite**（現況：[repository.py::_ensure_schema](../../../estimator_king/database/repository.py) 只 `executescript(schema.sql)`，schema 全為 `CREATE TABLE IF NOT EXISTS`，**對既有表不會加欄**；[schema.sql](../../../estimator_king/database/schema.sql) 標明 greenfield/no-migrations）：
+  - `schema.sql` 的 `products` CREATE 新增 `item_types_version INTEGER`（供全新資料庫）；另新增 `item_type_cache` 表（§6.3，`CREATE TABLE IF NOT EXISTS`）。
+  - **既有資料庫加欄遷移**：在 `_ensure_schema` 內 `executescript` 之後，加入冪等 ALTER：以 `PRAGMA table_info(products)` 取現有欄名，若不含 `item_types_version` 則執行 `ALTER TABLE products ADD COLUMN item_types_version INTEGER`。舊列該欄為 `NULL` → `_row_to_state` 讀為 `None` → §7.2 視為版本不符 → 下次 crawl 自然重建。
+  - 連動修改（§7.2 已列）：`ProductState` 欄位、`_row_to_state`、`upsert` 的 INSERT／VALUES／ON CONFLICT 子句、`sync_products` 寫入值，全部同步加入 `item_types_version`。
 - **talent 字典 seed**：實作期執行一次性 mining 腳本 `scripts/mine_talents.py`（同價組內單一差異 token、頻次門檻、濾除含 `ver.`／`限定`／純數字者），產出初版 `talents` 清單供人工審核後寫入 `stores_config.yaml`（`talents: [...]`）。
 
 ## 12. talent 字典來源與設定
