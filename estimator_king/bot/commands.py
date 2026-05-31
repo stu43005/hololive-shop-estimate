@@ -84,30 +84,26 @@ def format_estimates(
 
         formatted_products.append(product_block)
 
-    full_content = "".join(formatted_products)
-
-    embeds = []
+    # Pass 1: pack product blocks into page-sized strings.
+    pages: list[str] = []
     current_content = ""
-    page_num = 1
-
     for product_block in formatted_products:
         test_content = current_content + product_block
         if len(test_content) > max_length and current_content:
-            embed = discord.Embed(
-                title=f"Price Estimates (page {page_num}/{1 if len(full_content) <= max_length else 2})",
-                description=current_content.rstrip("\n---\n\n"),
-                color=discord.Color.blue(),
-            )
-            embeds.append(embed)
+            pages.append(current_content)
             current_content = product_block
-            page_num += 1
         else:
             current_content = test_content
-
     if current_content:
+        pages.append(current_content)
+
+    # Pass 2: build embeds with a correct page/total denominator.
+    total = len(pages)
+    embeds = []
+    for i, content in enumerate(pages, start=1):
         embed = discord.Embed(
-            title=f"Price Estimates (page {page_num}/{page_num})",
-            description=current_content.rstrip("\n---\n\n"),
+            title=f"Price Estimates (page {i}/{total})",
+            description=content.removesuffix("\n\n---\n\n"),
             color=discord.Color.blue(),
         )
         embeds.append(embed)

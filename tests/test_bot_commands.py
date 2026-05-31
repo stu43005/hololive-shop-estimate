@@ -46,3 +46,25 @@ def test_modal_uses_injected_estimator():
 
     modal = asyncio.run(_make_modal())
     assert modal._estimator is not None
+
+
+def _est(name, rationale="r"):
+    return ProductEstimate(
+        product_name=name, suggested_price_jpy=100,
+        price_range_jpy=PriceRange(min=100, max=100), confidence="high",
+        rationale=rationale, reference_products=[])
+
+
+def test_page_denominator_consistent_across_pages():
+    batch = EstimateBatch(estimates=[_est(f"item {i}", rationale="x" * 250) for i in range(12)])
+    embeds = format_estimates(batch, max_length=400)
+    total = len(embeds)
+    assert total >= 3
+    for i, embed in enumerate(embeds, start=1):
+        assert f"page {i}/{total}" in embed.title
+
+
+def test_trailing_dash_in_rationale_not_stripped():
+    batch = EstimateBatch(estimates=[_est("solo", rationale="ends with dash -")])
+    embeds = format_estimates(batch, max_length=2000)
+    assert "ends with dash -" in embeds[0].description
