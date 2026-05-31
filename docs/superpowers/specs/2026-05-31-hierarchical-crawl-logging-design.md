@@ -8,7 +8,7 @@
 
 ## 2. 非目標（Out of Scope）
 
-- 樹**只在 `crawl` 入口顯示**；`run`（bot + 程序內排程）維持現有 log 不輸出樹（以 flag 區分，見 §4.1a）。共用 `sync_products` 不變。
+- 樹**只在 `crawl` 入口顯示**；`run`（bot + 程序內排程）維持現有 log 不輸出樹（以 flag 區分，見 §7.0）。共用 `sync_products` 不變。
 - 不改變任何業務行為、回傳值「**數值**」、控制流或估價結果；只新增 logging 與**三個內部函式的回傳型別**（`classify_item`、`decompose_items`、`_rebuild_product_items`——純資訊承載，數值不變）。
 - 不引入結構化（JSON）log、不加結構化欄位（`store=..` `pid=..`）——純文字樹。
 - 不改 `classify_query` 的**對外回傳型別與輸出語義**（仍 `list[str]`、`その他→[]`）；其**內部 body** 需配合 `_llm_classify` 改回 tuple 而解構（§7.1，純機械式、輸出不變）。`classify_query` 不在 crawl 樹內。
@@ -27,12 +27,12 @@
 每個 worker 對單一 product 呼叫 `sync_products`（於 `asyncio.to_thread`，多執行緒）。在該呼叫內把整棵樹**累積成一個多行字串**，於該 product 處理完時用**單一 `logger.info(tree)`** 輸出。Python `logging` 對單筆 record 的寫出是原子的 → 併發下每棵樹完整不被其他 product 切斷。
 
 - **代價（可接受）**：樹在 product 處理**完成後**才一次出現（非逐行即時），且以**完成順序**排列（非 enqueue 順序）。
-- 共用 `sync_products`，但**輸出受 `log_item_trees` flag 控制**（§4.1a／§7.0）：`crawl` 入口開、`run` 入口關。
+- 共用 `sync_products`，但**輸出受 `log_item_trees` flag 控制**（§7.0）：`crawl` 入口開、`run` 入口關。
 - **單一 message 設計**：整棵樹是**一個** `message`（含 `\n`）。在 `%(asctime)s [%(levelname)s] %(name)s: %(message)s` 格式下，只有**首行**帶 `asctime/level/name` 前綴，其餘樹行為裸行——此為刻意設計（樹更易讀）；**不得**為了補前綴而把樹拆成多筆 record（會重新引入交錯）。原子性成立的前提：`asyncio.to_thread` 為真執行緒 + stdlib `StreamHandler.emit` 持鎖逐筆寫出。
 
 ### 4.2 log level 與 skipped 收斂
 
-- 本節所述輸出**僅在 `crawl` 入口（`log_item_trees=True`）生效**；`run` 入口完全不輸出樹與 skipped 單行（§4.1a）。
+- 本節所述輸出**僅在 `crawl` 入口（`log_item_trees=True`）生效**；`run` 入口完全不輸出樹與 skipped 單行（§7.0）。
 - 整棵樹在 **INFO**（crawl 時預設可見）。
 - **未變動（`unchanged`/skipped）product** → 不展開整棵樹，只出**一行** INFO（見 §5）。每輪只處理當日預算（`max_products_per_run`）+ 新品，量可控；`crawl --force-refetch` 才全量展開。
 - embedding／typing 失敗使整個 product 進入既有 `except`（[engine.py:116](../../../estimator_king/sync/engine.py)）：維持現行 `logger.exception("Sync failed for %s")`，**該 product 不輸出樹**（已知取捨：失敗 product 看 exception log + traceback，而非樹）。
