@@ -134,6 +134,7 @@ async def serve(config: AppConfig, *, guild_id: Optional[int]) -> None:
         embedder=providers.embedder,
         chat=providers.chat,
         vector_store=providers.vector_store,
+        typing_provider=providers.typing_provider,
         guild_id=guild_id,
     )
 

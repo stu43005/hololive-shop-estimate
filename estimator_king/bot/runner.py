@@ -17,6 +17,7 @@ from estimator_king.bot.commands import setup_commands
 if TYPE_CHECKING:
     from estimator_king.llm.embeddings import EmbeddingProvider
     from estimator_king.llm.chat import ChatProvider
+    from estimator_king.llm.typing_provider import TypingProvider
     from estimator_king.vectorstore.store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ def build_bot(
     embedder: "EmbeddingProvider",
     chat: "ChatProvider",
     vector_store: "VectorStore",
+    typing_provider: "TypingProvider",
     guild_id: Optional[int],
 ) -> discord.Client:
     """Construct a fully-configured (but not yet started) Discord client: build
@@ -42,7 +44,11 @@ def build_bot(
     on_ready command-sync handler. The caller starts it via bot.start()."""
     from estimator_king.bot.estimator import Estimator
 
-    estimator = Estimator(embedder, chat, vector_store)
+    estimator = Estimator(
+        embedder, chat, vector_store, typing_provider,
+        item_types=config.item_types,
+        item_types_version=config.item_types_version,
+    )
     bot = create_bot()
     tree = setup_commands(bot, config, estimator)
 
