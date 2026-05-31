@@ -1,5 +1,5 @@
 from estimator_king.crawler.snapshot import ProductSnapshot, ProductVariant
-from estimator_king.sync.items import ProductItem, decompose_items
+from estimator_king.sync.items import decompose_items
 
 TALENTS = frozenset({"さくらみこ", "白上フブキ", "博衣こより"})
 

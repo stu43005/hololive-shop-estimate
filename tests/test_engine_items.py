@@ -1,7 +1,6 @@
-from datetime import datetime, timezone
 
 from estimator_king.crawler.snapshot import ProductSnapshot, ProductVariant
-from estimator_king.database.repository import ProductState, ProductStateRepository
+from estimator_king.database.repository import ProductStateRepository
 from estimator_king.sync.engine import sync_products
 
 TALENTS = frozenset({"さくらみこ"})
@@ -76,7 +75,6 @@ def test_creates_one_vector_per_item_with_own_price():
 def test_unchanged_product_skips_reembed():
     repo, vs = _repo(), FakeVectorStore()
     _sync(repo, vs, _snap())
-    first = {i: d for i, (d, _) in vs.docs.items()}
     for i in vs.docs:
         vs.docs[i] = (vs.docs[i][0] + "_orig", vs.docs[i][1])
     res = _sync(repo, vs, _snap())

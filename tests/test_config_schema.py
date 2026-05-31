@@ -1,4 +1,3 @@
-import os
 import textwrap
 
 from estimator_king.config_schema import load_config
