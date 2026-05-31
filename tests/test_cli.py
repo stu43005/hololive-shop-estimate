@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from estimator_king.__main__ import parse_args, run_bot, run_crawl
+from estimator_king.runtime import MissingEmbeddingKey, Providers
 
 
 # ---------------------------------------------------------------------------
@@ -117,13 +118,9 @@ def _make_crawl_args(**kwargs):
     return MagicMock(**defaults)
 
 
-def _make_cfg(*, embedding_api_key="sk-test"):
+def _make_cfg():
     mock_cfg = MagicMock()
     mock_cfg.database_path = "./estimator_king.db"
-    mock_cfg.chroma_path = "./chroma"
-    provider_cfg = MagicMock()
-    provider_cfg.embedding_api_key = embedding_api_key
-    mock_cfg.build_provider_config.return_value = provider_cfg
     return mock_cfg
 
 
@@ -131,7 +128,6 @@ def test_run_crawl_success_prints_json_and_exits_0(capsys):
     mock_cfg = _make_cfg()
     counters = {"discovered": 5, "fetched_ok": 5, "created": 2,
                 "updated": 1, "skipped": 2, "inactive": 0, "errors": 0}
-    from estimator_king.runtime import Providers
     providers = Providers(embedder=MagicMock(), vector_store=MagicMock(), chat=None)
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.build_providers", return_value=providers), \
@@ -145,7 +141,6 @@ def test_run_crawl_success_prints_json_and_exits_0(capsys):
 
 
 def test_run_crawl_missing_embedding_key_exits_2():
-    from estimator_king.runtime import MissingEmbeddingKey
     mock_cfg = _make_cfg()
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.build_providers", side_effect=MissingEmbeddingKey()):
