@@ -5,6 +5,7 @@ from estimator_king.crawler.snapshot import (
     ProductVariant,
     canonicalize_snapshot,
     compute_content_hash,
+    normalize_text,
     NORMALIZER_VERSION,
 )
 
@@ -140,3 +141,20 @@ def test_hash_changes_when_content_changes():
     snapshot2 = ProductSnapshot(123, "B", "D", [], {})  # Different title
 
     assert compute_content_hash(snapshot1) != compute_content_hash(snapshot2)
+
+
+def test_normalize_text_is_public_and_collapses_whitespace():
+    assert normalize_text("  a　b  ") == "a b"
+
+
+def test_published_at_defaults_to_zero_and_excluded_from_hash():
+    base = ProductSnapshot(
+        product_id=1, title="t", description="d", variants=[], html_details={}
+    )
+    with_date = ProductSnapshot(
+        product_id=1, title="t", description="d", variants=[], html_details={},
+        published_at=1700000000,
+    )
+    assert base.published_at == 0
+    # published_at must NOT change the content hash (deterministic gating)
+    assert compute_content_hash(base) == compute_content_hash(with_date)

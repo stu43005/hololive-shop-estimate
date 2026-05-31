@@ -28,6 +28,7 @@ class ProductSnapshot:
     description: str
     variants: List[ProductVariant]
     html_details: Dict[str, str]  # Section name → content
+    published_at: int = 0  # epoch seconds; 0 when unknown. Excluded from content hash.
 
 
 def canonicalize_snapshot(snapshot: ProductSnapshot) -> str:
@@ -75,10 +76,14 @@ def compute_content_hash(snapshot: ProductSnapshot) -> str:
     return hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
 
 
-def _normalize_text(text: str) -> str:
+def normalize_text(text: str) -> str:
     """Normalize text: decode entities, collapse whitespace."""
     # Decode HTML entities
     decoded = html.unescape(text)
     # Collapse whitespace
     normalized = " ".join(decoded.split())
     return normalized.strip()
+
+
+# Backward-compatible private alias (internal callers used the underscore name).
+_normalize_text = normalize_text
