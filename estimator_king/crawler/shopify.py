@@ -49,7 +49,7 @@ def _parse_product_json(payload: object) -> dict[str, object]:
 
 @dataclass
 class ProductSnapshotWithHash(ProductSnapshot):
-    content_hash: str
+    content_hash: str = ""  # always set explicitly at construction; default satisfies dataclass field-ordering rule
 
 
 def _build_snapshot_from_product_json(
