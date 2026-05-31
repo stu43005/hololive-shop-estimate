@@ -377,6 +377,29 @@ size/variant differs; low = only cross-type or weak matches.
 
 - 若使用 GPT-5.x chat 模型，reasoning effort 建議 `low`～`medium`（估價需少量推理，非高度 agentic）；verbosity 偏精簡（rationale 一兩句）。此為旋鈕建議，非硬性。
 
+### 9.4 回應可靠性（estimate → format → Discord）
+
+現行 `/estimate` 回應路徑（[estimator.py](../../../estimator_king/bot/estimator.py) → [commands.py::format_estimates](../../../estimator_king/bot/commands.py) → `followup.send`）的傳輸/長度層大致可靠（`defer(thinking=True)` 處理 3 秒 ACK、每 embed 各自 send 避開「單訊息 10 embeds」限制、2000 字切頁保守於 4096 上限），但有三個須修正的缺陷：
+
+#### 9.4.1 結果對帳（最關鍵）
+
+LLM 僅被「請求」依序回傳每行，無任何保證。新增**對帳**，使 `format_estimates` 永遠收到與輸入**等量、同序**的估價：
+
+- 在 `Estimator.estimate_products`（[estimator.py:51](../../../estimator_king/bot/estimator.py)）收集完 `all_estimates` 後，對齊回 `product_names`：
+  - 以 `_normalize_text`（§4.2 同函式）正規化後的 `product_name` 為 key，建 `估價 by name` 映射（重複則保留第一個）。
+  - 逐一走 `product_names`：命中映射 → 用該估價；未命中 → 插入**佔位估價**（`product_name=該行原文`、`suggested_price_jpy=0`、`price_range_jpy=PriceRange(0,0)`、`confidence="low"`、`rationale="No estimate returned for this item."`、`reference_products=[]`）。
+  - 未對應到任何輸入行的多餘估價 → 丟棄並 `logger.warning`（記錄數量）。
+  - 回傳長度 == `len(product_names)`、順序同輸入。
+- 此對帳純後處理（不改 `EstimateBatch`／`ProductEstimate` schema，[chat.py](../../../estimator_king/llm/chat.py) 不動），對 OpenAI structured 與 ollama json_object 兩路皆適用。
+
+#### 9.4.2 頁碼分母 bug
+
+[commands.py:97](../../../estimator_king/bot/commands.py#L97) 把總頁數寫死成 `1 if … else 2`，≥3 頁時顯示「page 3/2」。**修正**：先把所有頁內容組成 `list[str]`（沿用 2000 字切頁邏輯），再以 `total = len(pages)` 統一產生標題 `f"Price Estimates (page {i}/{total})"`。
+
+#### 9.4.3 `rstrip` 誤用
+
+[commands.py:98](../../../estimator_king/bot/commands.py#L98)、[110](../../../estimator_king/bot/commands.py#L110) 的 `current_content.rstrip("\n---\n\n")` 把參數當**字元集合**，會剝掉結尾所有 `\n`／`-`（rationale 結尾若有破折號會被誤刪）。**修正**：改用 `str.removesuffix("\n\n---\n\n")` 移除已知分隔後綴（product_block 結尾固定為 `"\n\n---\n\n"`，[commands.py:83](../../../estimator_king/bot/commands.py#L83)），或在組頁時不對最後一塊附加分隔。
+
 ## 10. Provider 設定擴充
 
 ### 10.1 typing 小模型（`estimator_king/llm/config.py`）
@@ -477,10 +500,11 @@ estimator:
   - `detail_snippet` 擷取：section 含「・<品項名> …」時取對應規格行；無對應行時為空字串（不退回整段 description）。
 - `tests/test_typing.py`：第一層最長匹配（唯一命中／多重命中／零命中）；`classify_item` 零命中→第二層→`その他`（永不 None）；`classify_query` 多重命中回多元素、`その他`→空 list；第二層後驗證歸 `その他`；快取命中不呼叫 `classify_via_llm`（fake provider 計數，含 `item_types_version` 失效）。
 - `tests/test_engine_items.py`：逐 item upsert；過時 item 向量刪除；`item_hash` 相同略過重嵌；gating key（含 `item_types_version`）。
-- `tests/test_estimator.py`：`Estimator` 以注入的 `item_types`/`item_types_version`/fake `typing_provider` 及 `repository=None` 呼叫 `classify_query`（驗證關鍵字參數）；逐行多類型各查 + 純查合併去重（同 ID 保留最小 distance）；零類型只純查；recency rerank 排序（fake hits 帶 `published_at`）；recency 邊界：候選含 `published_at==0` 時該項 `recency_norm=0` 且不參與 min/max、`>0` 候選 < 2 時退化純相似度；脈絡行格式（含 `0` → `?` 日期）。
+- `tests/test_estimator.py`：`Estimator` 以注入的 `item_types`/`item_types_version`/fake `typing_provider` 及 `repository=None` 呼叫 `classify_query`（驗證關鍵字參數）；逐行多類型各查 + 純查合併去重（同 ID 保留最小 distance）；零類型只純查；recency rerank 排序（fake hits 帶 `published_at`）；recency 邊界：候選含 `published_at==0` 時該項 `recency_norm=0` 且不參與 min/max、`>0` 候選 < 2 時退化純相似度；脈絡行格式（含 `0` → `?` 日期）；**對帳（§9.4.1）**：LLM 回傳數量不足／重排／多餘時，`estimate_products` 回傳長度 == 輸入、同序，缺項為佔位估價（confidence `low`），多餘估價被丟棄並記 warning（fake chat 刻意錯位）。
 - `tests/test_config_schema.py`：`load_config` 解析 `item_types`／`item_types_version`／`talents`／`estimator.top_k`／`estimator.recency_weight`（含預設值回落）；typing env cascade 經 `build_provider_config`。
 - `tests/test_runtime.py`／`tests/test_scheduler.py`：`build_providers` 產出含 `typing` 的 `Providers`；空 `typing_api_key`（僅設 `EMBEDDING_API_KEY`）時 `build_providers` 不 raise（lazy client，§10.1）、crawl 第一層命中路徑不建 client；`CrawlScheduler.__init__` 接 `typing_provider` 並於 `run_once` 轉傳給 `run_crawl_cycle`（serve 索引端接線；fake provider 驗證傳遞）。
 - `tests/test_shopify.py`（或既有）：`published_at` 解析（ISO8601 → epoch、缺失回落 `created_at`、再缺 `0`）；`ProductSnapshotWithHash` 帶 `published_at` 仍可 import/建構（驗證 dataclass 排序修正）。
+- `tests/test_commands.py`（§9.4.2／9.4.3）：≥3 頁時頁碼分母正確（`page i/total`）；`removesuffix` 不誤刪 rationale 結尾破折號（含 rationale 以 `-` 結尾的案例）。
 - 驗證工具鏈（[CLAUDE.md](../../../CLAUDE.md)）：`.venv/bin/basedpyright estimator_king`（prod 0 error）、`uvx ruff check`、相關 `pytest -o addopts=""`。
 
 ## 15. 驗收標準
@@ -490,4 +514,5 @@ estimator:
 3. `くしゃみ連発ぬいキーホルダー`：類型對齊到 `キーホルダー`／`ぬいぐるみ` 相關品項。
 4. 混合品項 product 的每個 item 帶**自身價格**（不再是 product min）。
 5. Blue Journey 類同種多 talent 商品合併為單筆，themed series 不被誤併。
-6. 驗證工具鏈全綠。
+6. `/estimate` 回應：輸入 N 行 → 回應恰含 N 筆、同序；LLM 漏項時對應行顯示佔位（confidence `low`）而非靜默缺漏；多頁時頁碼 `i/total` 正確。
+7. 驗證工具鏈全綠。
