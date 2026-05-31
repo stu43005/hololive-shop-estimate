@@ -10,11 +10,17 @@ class FakeEmbedder:
         return [0.1, 0.2]
 
 
+class FakeTypingProvider:
+    def classify_via_llm(self, text, item_types):
+        return "その他"
+
+
 class FakeVectorStore:
     def query(self, embedding, n_results, where=None):
         return [QueryHit(
             id="hololive:1", document="doc",
-            metadata={"title": "ref", "price_jpy": 2000, "store_id": "hololive"},
+            metadata={"item_name": "ref", "item_type": "その他", "price_jpy": 2000,
+                      "store_id": "hololive", "published_at": 0, "detail_snippet": ""},
             distance=0.1,
         )]
 
@@ -29,7 +35,8 @@ class FakeChat:
 
 
 def test_chunk_debug_and_done_info(caplog):
-    est = Estimator(FakeEmbedder(), FakeChat(), FakeVectorStore())
+    est = Estimator(FakeEmbedder(), FakeChat(), FakeVectorStore(),
+                    FakeTypingProvider(), item_types=[], item_types_version=1)
     est.CHUNK_SIZE = 1  # force two chunks
 
     with caplog.at_level(logging.DEBUG, logger="estimator_king.bot.estimator"):
