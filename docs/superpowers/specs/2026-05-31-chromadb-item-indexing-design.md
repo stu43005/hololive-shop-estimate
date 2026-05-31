@@ -131,24 +131,27 @@ class ProductItem:
 
 - **整個 product 合併成單一 item 時**（§5.2 去重後 `items` 只剩 1 筆，且該筆 `len(source_variant_ids) ≥ 2`）：`item_name = product_title`（product 標題即品項名，例：Blue Journey ×23 → 「3Dアクリルスタンド Blue Journey衣装ver.」）。
 - **variant 殘餘為純選項值時**（剝除前綴後殘餘判定為 size／顏色而非品項描述）：`item_name = f"{product_title} {殘餘}"`。判定條件（OR）：
-  - 殘餘 token 與 product 主要 token 集合**交集為空**（殘餘未重述任何品項描述詞）；**或**
-  - 殘餘以 `str` 計（不折算半形）長度 `< 4`（涵蓋「M」「XL」「黒 M」等短選項值；全形空白先以 `_normalize_text` 正規化為半形空白）。
+  - 殘餘以 `_normalize_text` 正規化後（全形空白→半形）以 `str` 計長度 `< 4`（涵蓋「M」「XL」「黒 M」等短選項值）；**或**
+  - 殘餘命中 size／規格 pattern：`re.search(r"(^|[\s/])(XX?[SML]|[SML]|フリー)?サイズ|^(XX?[SML]|[SML])([\s/]|$)|フリーサイズ", 殘餘)`（涵蓋「Lサイズ」「XLサイズ」「フリーサイズ」「M」等）。
 
-  例：「黒　M」交集為空且長度短 → 落此分支 →「ぶいすぽっ！オリジナルTシャツ 黒 M」。
+  例：「黒　M」長度短 → 落此分支 →「ぶいすぽっ！オリジナルTシャツ 黒 M」。
+  - **不再以「與 product 標題 token 交集為空」單獨觸發**（實測會對活動／生日商品誤觸發：活動名與品項名本就無共同 token，導致 `イオフィカラー ショルダーバッグ` 被誤併成 `…誕生日記念2022 イオフィカラー ショルダーバッグ`，反而把活動名灌回品項名、重新引入 talent/活動名主導）。
 - **其餘**（混合品項、各自獨立）：`item_name = 剝除前綴後的殘餘標題`。
 
 ### 5.4 段落片段擷取（`detail_snippet`，最佳努力、決定性、可空）
 
 **動機**：品項名（甚至 variant 標題）不一定載明 size、材質等規格——這些往往**只**存在於 `description`／section content。缺了它，無論 embedding 或 chat model 都只能靠標題「猜」size／材質。因此需從整 product 的段落中**擷取屬於該 item 的規格行**補足，並同時用於 embedding 與查詢端 LLM 脈絡（§9.1）。
 
-`snapshot.html_details`（如「グッズ詳細」「セット詳細」）常以「・<品項名> …」條列各品項規格（含尺寸、材質）。對每個 item：
+`snapshot.html_details`（如「グッズ詳細」「セット詳細」）常以「・<品項名> …」條列各品項規格（含尺寸、材質）。匹配以 **substring/核心包含**為主（token 交集為輔）——實測日文品項名約 51% 為**無空白單 token**，純 token 交集（≥2）對其結構性失效（命中僅 ~11%），改用核心子字串包含後實體商品命中升至 ~45% 且精準。對每個 item：
 
-- **段落切分**：把各 `html_details` 值以分隔符 `・`／`◇`／換行切成候選段。
-- **item token 集合**：取 `item_name` 經 `_normalize_text` 正規化、切 token 後長度 ≥ 2 的 token（即 §5.3 定義的「主要 token」同規則）。
-- **重疊度量**：候選段（同樣正規化切 token）與 item token 集合的**交集 token 數**。
-- **門檻**：取交集數最大的候選段；命中需滿足「交集 token 數 ≥ 2」**且**「交集數 ≥ item token 集合大小的 50%（無條件進位）」。達標 → 該段為 `detail_snippet`；否則 `detail_snippet=""`。
+- **段落切分**：把各 `html_details` 值以分隔符 `・`／`◇`／換行切成候選段，去空白。
+- **匹配核心（cores）**：由 `item_name` 經 `_normalize_text` 正規化後產生候選核心字串：完整 `item_name`；若含 ` - ` 則加其前段與後段；再加「移除 talent token 後的核心」（與 §5.2 同 talent 集合）。
+- **評分（取最高分的候選段為 snippet）**：
+  - 主：某 core（長度 ≥ 4）以**子字串**出現在候選段 → 分數 = 該 core 長度（取最長者）。
+  - 輔（無任何 substring 命中時）：候選段與 `item_name` 長度 ≥ 2 的 token 交集數 ≥ 2 → 分數 = 交集數。
+  - 全部候選段皆 0 分 → `detail_snippet=""`。
 - 擷取不到時**直接略過**（不退回整段 description，避免把整 product 噪音灌進單一 item）。
-- 此片段**不影響價格**（價格一律取自 variant），僅補充規格語義供檢索與估價判斷。
+- **覆蓋為部分（best-effort）**：實體商品約 45% 命中（其餘多為語音／數位品項本就無尺寸材質規格、或該 product 非逐項條列）；命中時精準。此片段**不影響價格**（價格一律取自 variant），僅補充規格語義供檢索與估價判斷，缺失安全降級。
 
 ### 5.5 embedding 文字格式（`_format_item_document`，取代 `_format_product_document`）
 
@@ -496,8 +499,8 @@ estimator:
   - 四種情境分類正確：單品／同種多 talent 變體（合併，命名用 product 標題）／系列無 SET（各自獨立）／混合多品項（各自獨立）。
   - talent-gated 去重：Blue Journey ×N 合併；themed series（同主題不同品項）**不**合併（反例）；同價但不同品項不合併。
   - SET 與 ¥0 排除。
-  - 命名規則三分支（product 標題／選項值併入／殘餘標題）。
-  - `detail_snippet` 擷取：section 含「・<品項名> …」時取對應規格行；無對應行時為空字串（不退回整段 description）。
+  - 命名規則三分支：whole-product 合併→product 標題；短選項值（`< 4` 或 size pattern，如「黒 M」「Lサイズ」）→併入 product 標題；混合品項殘餘→原樣（驗證活動/生日商品的長品項名如「イオフィカラー ショルダーバッグ」**不**被誤併入活動名）。
+  - `detail_snippet` 擷取（substring/core 為主）：section 條列含品項名核心時取對應規格行（含單 token 日文名以子字串命中，如「Eternity アクリルジオラマスタンド」→ 其 サイズ/素材 行）；無對應行（語音/數位、或非條列）時為空字串（不退回整段 description）。
 - `tests/test_typing.py`：第一層最長匹配（唯一命中／多重命中／零命中）；`classify_item` 零命中→第二層→`その他`（永不 None）；`classify_query` 多重命中回多元素、`その他`→空 list；第二層後驗證歸 `その他`；快取命中不呼叫 `classify_via_llm`（fake provider 計數，含 `item_types_version` 失效）。
 - `tests/test_engine_items.py`：逐 item upsert；過時 item 向量刪除；`item_hash` 相同略過重嵌；gating key（含 `item_types_version`）。
 - `tests/test_estimator.py`：`Estimator` 以注入的 `item_types`/`item_types_version`/fake `typing_provider` 及 `repository=None` 呼叫 `classify_query`（驗證關鍵字參數）；逐行多類型各查 + 純查合併去重（同 ID 保留最小 distance）；零類型只純查；recency rerank 排序（fake hits 帶 `published_at`）；recency 邊界：候選含 `published_at==0` 時該項 `recency_norm=0` 且不參與 min/max、`>0` 候選 < 2 時退化純相似度；脈絡行格式（含 `0` → `?` 日期）；**對帳（§9.4.1）**：LLM 回傳數量不足／重排／多餘時，`estimate_products` 回傳長度 == 輸入、同序，缺項為佔位估價（confidence `low`），多餘估價被丟棄並記 warning（fake chat 刻意錯位）。
