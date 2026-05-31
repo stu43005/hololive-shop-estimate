@@ -65,7 +65,9 @@ class FakeTypingProvider:
 | `tests/test_crawl_cycle.py` (3 calls), `tests/test_integration_async_pipeline.py` (3 calls) | `run_crawl_cycle` gains positional `typing_provider` (5th arg, before `*`) | **Task 12:** insert `FakeTypingProvider()` as the 5th positional arg in every call. |
 | `tests/test_scheduler.py` (4 `CrawlScheduler(...)` + `fake_cycle` signature) | `CrawlScheduler.__init__` gains required `typing_provider`; `run_once` passes it positionally to `run_crawl_cycle` | **Task 13:** add `typing_provider=object()` to the 4 constructions; change `fake_cycle` to `async def fake_cycle(config, db_path, embedder, vector_store, typing_provider, *, force_refetch=False)`. |
 | `tests/test_runtime.py`, `tests/test_main_async.py`, `tests/test_cli.py` (`Providers(...)`) | `Providers` gains required `typing` field | **Task 14:** add `typing=MagicMock()` (or a `FakeTypingProvider()`) to every `Providers(...)` construction. Positional-index assertions on the `CrawlScheduler(...)`/`run_crawl_cycle(...)` mocks still hold (vector_store stays `args[3]`, `typing_provider` is keyword/5th-positional). |
+| `tests/test_estimator.py` (3 `Estimator(...)`, old signature) | `Estimator.__init__` new signature | **Task 16 Step 1:** file is fully replaced/extended with the new-signature `_estimator(...)` helper. |
 | `tests/test_e2e_mocked.py` (4 `Estimator(...)` + pre-seeded metadata) | `Estimator.__init__` new signature; `_format_reference` reads new metadata keys | **Task 16:** add `FakeTypingProvider()` + `item_types=[...], item_types_version=1` to the 4 calls; change the pre-seeded vector metadata from `{title, price_jpy, store_id}` to the new schema (`item_name, item_type, price_jpy, published_at, store_id, detail_snippet`) and assert on `item_name`. |
+| `tests/test_async_pipeline.py`, `tests/test_async_pipeline_logging.py`, `tests/test_integration_async_pipeline.py` (run the **real** `sync_products`) | new `sync_products` calls `vector_store.get_by_product(...)`; upsert IDs are now per-item `store:product:slug` (not `store:product`) | **Task 11 / Task 12:** add a `get_by_product(self, store_id, product_id)` method to each test's `FakeVectorStore` (return prior hits matching that product, mirroring `tests/test_engine_items.py`); update upsert-ID assertions from `store:product` to the per-item scheme (assert ids start with `f"{store}:{product}:"`, or assert counts). `created`/`errors` assertions then hold once `get_by_product` exists. |
 | `tests/test_estimator_logging.py` (`Estimator(...)` + chunk-debug log assertions) | new `Estimator` signature; rewrite keeps the per-chunk `logger.debug` line so the assertion survives | **Task 16:** fix the constructor call; the rewritten `estimate_products` (below) **retains** the `chunk %d/%d: %d products` debug line so `test_chunk_debug_and_done_info` still passes. |
 
 ---
@@ -657,7 +659,7 @@ And the params tuple (insert `item_types_version` right after `state.normalizer_
             )
 
     def list_other_typed(self, limit: int) -> list[str]:
-        """Distinct readable item texts classified as 'その他', for vocab review (§6.4)."""
+        """Distinct readable item texts classified as 'その他', for vocabulary review."""
         with self._lock:
             rows = self.connection.execute(
                 "SELECT DISTINCT text_sample FROM item_type_cache WHERE item_type = 'その他'"
@@ -1196,6 +1198,7 @@ def test_classify_item_zero_hit_llm_validates_to_sonota():
     out = classify_item("謎の物体", item_types=ITEM_TYPES,
                         item_types_version=1, typing_provider=tp, repository=FakeRepo())
     assert out == "その他"
+    assert tp.calls == 1  # zero-hit path must reach the LLM
 
 
 def test_cache_hit_skips_llm():
@@ -1515,6 +1518,22 @@ def test_unchanged_product_skips_reembed():
     repo.close()
 
 
+def test_item_types_version_bump_forces_rebuild():
+    repo, vs = _repo(), FakeVectorStore()
+    first = _sync(repo, vs, _snap())
+    assert first.created == 1 and first.skipped == 0
+    # Same content_hash at the SAME version -> skipped (gating proven).
+    same = _sync(repo, vs, _snap())
+    assert same.skipped == 1
+    # Same snapshot but a HIGHER item_types_version -> product reprocessed, not skipped.
+    bumped = sync_products(
+        [("http://x/products/10", _snap())], "hololive", repo,
+        FakeEmbedder(), vs, typing_provider=FakeTypingProvider(), talents=TALENTS,
+        item_types=ITEM_TYPES, item_types_version=2)
+    assert bumped.skipped == 0 and bumped.updated == 1
+    repo.close()
+
+
 def test_stale_item_vector_deleted_when_variant_removed():
     repo, vs = _repo(), FakeVectorStore()
     _sync(repo, vs, _snap())
@@ -1806,7 +1825,19 @@ async def async_process_queue(
 
 - [ ] **Step 3: Update existing test calls (per migration table) and run**
 
-Add a module-level `FakeTypingProvider` (shared fake) to `tests/test_async_pipeline.py` and `tests/test_async_pipeline_logging.py`, then add the new keyword args (`typing_provider=FakeTypingProvider(), talents=frozenset(), item_types=[], item_types_version=0`) to **every** `async_process_queue(...)` call in both files.
+These tests run the **real** `sync_products`. In both `tests/test_async_pipeline.py` and `tests/test_async_pipeline_logging.py`:
+1. Add a module-level `FakeTypingProvider` (shared fake) and pass the new keyword args (`typing_provider=FakeTypingProvider(), talents=frozenset(), item_types=[], item_types_version=0`) to **every** `async_process_queue(...)` call.
+2. Add a `get_by_product` method to each file's `FakeVectorStore` so `_rebuild_product_items` can list prior item vectors:
+
+```python
+    def get_by_product(self, store_id, product_id):
+        from estimator_king.vectorstore.store import QueryHit
+        return [QueryHit(id=i, document="", metadata=m, distance=0.0)
+                for i, m in getattr(self, "_meta", {}).items()
+                if m.get("store_id") == store_id and m.get("product_id") == product_id]
+```
+   (Track upserted metadata in the fake's `upsert` so `get_by_product` can return it; if the fake only records ids, returning `[]` is acceptable when the test never re-syncs the same product.)
+3. Update the upsert-ID assertion in `test_async_pipeline.py` (the `vs.upserts == ["hololive:1"]` check) to the per-item scheme — assert every upserted id starts with `"hololive:1:"` (or assert the count), since vectors are now per item, not per product.
 
 Run: `.venv/bin/python -m pytest tests/test_async_pipeline.py tests/test_async_pipeline_logging.py -v -o addopts=""`
 Expected: PASS.
@@ -1867,6 +1898,12 @@ async def run_crawl_cycle(
 - [ ] **Step 2: Update existing test calls (per migration table)**
 
 Add a module-level `FakeTypingProvider` (the shared fake) and insert `FakeTypingProvider()` as the 5th positional arg into every `run_crawl_cycle(...)` call in `tests/test_crawl_cycle.py` (3 calls) and `tests/test_integration_async_pipeline.py` (3 calls), e.g. `run_crawl_cycle(cfg, db_path, embedder, vector_store, FakeTypingProvider(), force_refetch=...)`.
+
+`tests/test_crawl_cycle.py` fully mocks `async_process_queue`, so `sync_products` never runs there — the positional-arg insertion is the only change needed.
+
+`tests/test_integration_async_pipeline.py` runs the **real** `sync_products`, so additionally:
+1. Add `get_by_product(self, store_id, product_id)` to its `FakeVectorStore` (return prior `QueryHit`s matching the product, tracking upserted metadata as in `tests/test_engine_items.py`).
+2. Update the upsert-ID assertions: change `set(vs.upserts) == {"test-store:8087824892124", "test-store:8087824892125"}` to assert each upserted id starts with `"test-store:8087824892124:"` / `"...8087824892125:"` (per-item scheme). The `counters["created"] == 2` / `counters["errors"] == 0` and the re-sync skip assertion (`vs.upserts == upserts_after_first`) hold once `get_by_product` exists.
 
 Run: `.venv/bin/python -m pytest tests/test_crawl_cycle.py tests/test_integration_async_pipeline.py -v -o addopts=""`
 Expected: PASS.
@@ -2229,6 +2266,64 @@ def test_recency_rerank_prefers_newer_when_similar():
     # 'new' line should appear before 'old' line in the reference block
     prompt = chat.last_user_prompt
     assert prompt.index("new") < prompt.index("old")
+
+
+def test_recency_boundary_zero_pub_excluded_and_single_pub_degenerates():
+    # One published_at==0 (no boost, excluded from min/max) + one >0; with only a
+    # single >0 candidate the span is undefined → degenerate to pure similarity.
+    hits = [_hit("nodate", "ぬいぐるみ", 500, 0, 0.30),
+            _hit("dated", "ぬいぐるみ", 900, 2000, 0.10)]
+    vs = RecordingVectorStore(hits)
+    chat = FakeChat([_est("もちもちぬいぐるみ")])
+    est = _estimator(vs, chat, top_k=2, recency=0.9)
+    est.estimate_products(["もちもちぬいぐるみ"], "u")
+    prompt = chat.last_user_prompt
+    # lower-distance 'dated' ranks first on similarity; 'nodate' (pub 0) gets no boost
+    assert prompt.index("dated") < prompt.index("nodate")
+    # the pub==0 hit renders a '?' date in its context line
+    assert "| ? |" in prompt
+
+
+def test_context_line_format_shape():
+    vs = RecordingVectorStore([_hit("itemX", "ぬいぐるみ", 500, 0, 0.1)])
+    chat = FakeChat([_est("もちもちぬいぐるみ")])
+    est = _estimator(vs, chat)
+    est.estimate_products(["もちもちぬいぐるみ"], "u")
+    assert "- itemX | ぬいぐるみ | ¥500 | ? | s" in chat.last_user_prompt
+
+
+def test_merge_keeps_minimum_distance_for_same_id():
+    # type-filtered query returns id 'a' at dist 0.4; plain query returns 'a' at 0.1.
+    class TwoPhaseStore:
+        def __init__(self):
+            self._calls = 0
+            self.where_calls = []
+
+        def query(self, embedding, n_results, where=None):
+            self.where_calls.append(where)
+            self._calls += 1
+            dist = 0.4 if where is not None else 0.1
+            return [_hit("a", "ぬいぐるみ", 500, 0, dist)]
+
+    vs = TwoPhaseStore()
+    chat = FakeChat([_est("もちもちぬいぐるみ")])
+    est = _estimator(vs, chat)
+    est.estimate_products(["もちもちぬいぐるみ"], "u")
+    # only one merged reference for id 'a' (deduped), keeping the smaller distance.
+    assert chat.last_user_prompt.count("- a | ") == 1
+
+
+def test_surplus_estimate_dropped_with_warning(caplog):
+    import logging
+    vs = RecordingVectorStore([_hit("a", "ぬいぐるみ", 500, 0, 0.1)])
+    # chat returns an estimate whose name matches no input line
+    chat = FakeChat([_est("totally unrelated")])
+    est = _estimator(vs, chat)
+    with caplog.at_level(logging.WARNING):
+        batch = est.estimate_products(["line A"], "u")
+    assert [e.product_name for e in batch.estimates] == ["line A"]  # length == input
+    assert batch.estimates[0].confidence == "low"  # padded
+    assert any("dropped" in r.message for r in caplog.records)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
