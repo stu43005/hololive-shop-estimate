@@ -75,6 +75,7 @@ def run_crawl(args: argparse.Namespace) -> None:
         counters = asyncio.run(
             run_crawl_cycle(config, config.database_path,
                             providers.embedder, providers.vector_store,
+                            providers.typing_provider,
                             force_refetch=args.force_refetch))
     except Exception as e:
         logger.error("Crawler failed: %s", e)

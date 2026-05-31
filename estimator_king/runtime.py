@@ -16,8 +16,9 @@ from typing import Callable, Optional
 import discord
 
 from estimator_king.config_schema import AppConfig
-from estimator_king.llm.embeddings import EmbeddingProvider
 from estimator_king.llm.chat import ChatProvider
+from estimator_king.llm.embeddings import EmbeddingProvider
+from estimator_king.llm.typing_provider import TypingProvider
 from estimator_king.vectorstore.store import VectorStore
 from estimator_king.crawler.scheduler import CrawlScheduler
 from estimator_king.bot.runner import build_bot
@@ -37,6 +38,7 @@ class MissingEmbeddingKey(Exception):
 class Providers:
     embedder: EmbeddingProvider
     vector_store: VectorStore
+    typing_provider: TypingProvider
     chat: Optional[ChatProvider] = None
 
 
@@ -52,8 +54,10 @@ def build_providers(config: AppConfig, *, with_chat: bool = False) -> Providers:
         raise MissingEmbeddingKey()
     embedder = EmbeddingProvider(provider_config)
     vector_store = VectorStore(config.chroma_path)
+    typing_provider = TypingProvider(provider_config)
     chat = ChatProvider(provider_config) if with_chat else None
-    return Providers(embedder=embedder, vector_store=vector_store, chat=chat)
+    return Providers(embedder=embedder, vector_store=vector_store,
+                     typing_provider=typing_provider, chat=chat)
 
 
 # Strong references to background tasks: asyncio only keeps a weak reference, so
@@ -119,7 +123,8 @@ async def serve(config: AppConfig, *, guild_id: Optional[int]) -> None:
     assert providers.chat is not None
 
     scheduler = CrawlScheduler(
-        config, config.database_path, providers.embedder, providers.vector_store)
+        config, config.database_path, providers.embedder, providers.vector_store,
+        providers.typing_provider)
     scheduler_task = asyncio.create_task(scheduler.run_forever())
     _background_tasks.add(scheduler_task)
     scheduler_task.add_done_callback(_background_tasks.discard)

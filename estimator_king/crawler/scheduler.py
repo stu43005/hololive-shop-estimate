@@ -11,18 +11,21 @@ from estimator_king.crawler.cycle import run_crawl_cycle
 if TYPE_CHECKING:
     from estimator_king.config_schema import AppConfig
     from estimator_king.llm.embeddings import EmbeddingProvider
+    from estimator_king.llm.typing_provider import TypingProvider
     from estimator_king.vectorstore.store import VectorStore
 
 logger = logging.getLogger(__name__)
 
 
 class CrawlScheduler:
-    def __init__(self, config: AppConfig, db_path: str,
-                 embedder: EmbeddingProvider, vector_store: VectorStore) -> None:
+    def __init__(self, config: "AppConfig", db_path: str,
+                 embedder: "EmbeddingProvider", vector_store: "VectorStore",
+                 typing_provider: "TypingProvider") -> None:
         self._config = config
         self._db_path = db_path
         self._embedder = embedder
         self._vector_store = vector_store
+        self._typing_provider = typing_provider
         self._running = False
 
     async def run_once(self) -> None:
@@ -32,7 +35,8 @@ class CrawlScheduler:
         self._running = True
         try:
             counters = await run_crawl_cycle(
-                self._config, self._db_path, self._embedder, self._vector_store)
+                self._config, self._db_path, self._embedder, self._vector_store,
+                self._typing_provider)
             logger.info("Crawl cycle complete: %s", counters)
         except Exception:
             logger.exception("Crawl cycle raised")
