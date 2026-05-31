@@ -387,14 +387,14 @@ LLM 僅被「請求」依序回傳每行，無任何保證。新增**對帳**，
 
 - 在 `Estimator.estimate_products`（[estimator.py:51](../../../estimator_king/bot/estimator.py)）收集完 `all_estimates` 後，對齊回 `product_names`：
   - 以 `_normalize_text`（§4.2 同函式）正規化後的 `product_name` 為 key，建 `估價 by name` 映射（重複則保留第一個）。
-  - 逐一走 `product_names`：命中映射 → 用該估價；未命中 → 插入**佔位估價**（`product_name=該行原文`、`suggested_price_jpy=0`、`price_range_jpy=PriceRange(0,0)`、`confidence="low"`、`rationale="No estimate returned for this item."`、`reference_products=[]`）。
+  - 逐一走 `product_names`：命中映射 → 用該估價；未命中 → 插入**佔位估價**（`product_name=該行原文`、`suggested_price_jpy=0`、`price_range_jpy=PriceRange(min=0, max=0)`（pydantic 不接受 positional，須具名）、`confidence="low"`、`rationale="No estimate returned for this item."`、`reference_products=[]`）。
   - 未對應到任何輸入行的多餘估價 → 丟棄並 `logger.warning`（記錄數量）。
   - 回傳長度 == `len(product_names)`、順序同輸入。
 - 此對帳純後處理（不改 `EstimateBatch`／`ProductEstimate` schema，[chat.py](../../../estimator_king/llm/chat.py) 不動），對 OpenAI structured 與 ollama json_object 兩路皆適用。
 
 #### 9.4.2 頁碼分母 bug
 
-[commands.py:97](../../../estimator_king/bot/commands.py#L97) 把總頁數寫死成 `1 if … else 2`，≥3 頁時顯示「page 3/2」。**修正**：先把所有頁內容組成 `list[str]`（沿用 2000 字切頁邏輯），再以 `total = len(pages)` 統一產生標題 `f"Price Estimates (page {i}/{total})"`。
+[commands.py:97](../../../estimator_king/bot/commands.py#L97) 把總頁數寫死成 `1 if … else 2`：≥3 頁時非末頁分母固定為 2（應為實際總頁數），例如 3 頁會顯示「page 1/2」「page 2/2」「page 3/3」（分母不一致且錯誤）。**修正**：先把所有頁內容組成 `list[str]`（沿用 2000 字切頁邏輯），再以 `total = len(pages)` 統一產生標題 `f"Price Estimates (page {i}/{total})"`。
 
 #### 9.4.3 `rstrip` 誤用
 
