@@ -93,8 +93,9 @@ class ProductItem:
 
 `published_at` 目前**不存在於資料流**：`ProductSnapshot`（[crawler/snapshot.py](../../../estimator_king/crawler/snapshot.py)）只有 `product_id/title/description/variants/html_details`；`crawler/shopify.py::_build_snapshot_from_product_json` 也未解析時間戳。需新增：
 
-- `ProductSnapshot` 新增欄位 `published_at: int = 0`（epoch 秒）。
-- `shopify.py::_build_snapshot_from_product_json` 從 product JSON 的 `published_at`（Shopify 為 ISO8601 字串，如 `2023-06-30T19:00:07+09:00`；缺失或 `created_at` 皆可回落）解析為 epoch 秒；解析失敗則 `0`。`fetch_product`/`_build_snapshot` 透傳此欄位至 `ProductSnapshotWithHash`。
+- `ProductSnapshot` 新增欄位 `published_at: int = 0`（epoch 秒，帶預設值）。
+- **dataclass 欄位排序衝突（必須同步處理）**：`shopify.py::ProductSnapshotWithHash(ProductSnapshot)` 目前宣告 `content_hash: str`（**無預設值**）。基底新增帶預設值的 `published_at` 後，dataclass 規則「有預設欄位後不可接無預設欄位」會在 class 定義時拋 `TypeError: non-default argument 'content_hash' follows default argument`，使 `shopify.py` 無法 import。**修正**：將 `ProductSnapshotWithHash.content_hash` 改為帶預設值 `content_hash: str = ""`（其建構處 [shopify.py:147](../../../estimator_king/crawler/shopify.py) 一律顯式帶入，預設值僅為滿足排序規則）。
+- `shopify.py::_build_snapshot_from_product_json` 從 product JSON 的 `published_at`（Shopify 為 ISO8601 字串，如 `2023-06-30T19:00:07+09:00`；缺失則回落 `created_at`，再缺則 `0`）解析為 epoch 秒（`datetime.fromisoformat` → `int(dt.timestamp())`）；解析失敗則 `0`。`_build_snapshot`／`fetch_product` 透傳此欄位至 `ProductSnapshotWithHash(...)`（[shopify.py:147](../../../estimator_king/crawler/shopify.py) 的建構新增 `published_at=snapshot.published_at`）。
 - **決定性保證**：`canonicalize_snapshot`／`compute_content_hash`（[snapshot.py](../../../estimator_king/crawler/snapshot.py)）**維持不納入** `published_at`（其註解已明示排除時間戳）。`published_at` 純為 metadata，**不得**進入 `content_hash`，否則商品改版時間會讓 hash 抖動。
 - `ProductItem.published_at` 由所屬 product 的 `snapshot.published_at` 帶入（同一 product 的所有 item 共用）。
 
@@ -196,6 +197,29 @@ CREATE TABLE IF NOT EXISTS item_type_cache (
 
 `ProductStateRepository` 新增 `list_other_typed(limit) -> list[str]`：列出快取中歸為 `その他` 的 distinct 文字樣本，供人工檢視後把新類型補進 `item_types`（並 bump `item_types_version`）。本規格只提供查詢能力，補詞由人工執行。
 
+### 6.5 typing system prompt（依 GPT-5.4 prompt guidance 改寫）
+
+第二層分類呼叫的 system prompt 採 GPT-5.4 骨架，但**刻意精簡**（單一分類任務、低延遲、便宜模型）。受控詞彙表於 runtime 以 `", ".join(item_types)` 注入。輸出用 json_object（`{"item_type": "..."}`）+ §6.2 後驗證。骨架（最終以英文撰寫）：
+
+```text
+Role: You classify one Japanese merchandise item into exactly one category.
+
+# Goal
+Pick the single best category for the given item text.
+
+<constraints>
+- Choose EXACTLY ONE value from this allowed list: {item_types}.
+- If none clearly fits, output "その他". Never invent a category outside the list.
+- Decide from the item name/description tokens; ignore talent names and event titles.
+</constraints>
+
+# Output
+Return JSON only: {"item_type": "<one allowed value or その他>"}. No prose.
+```
+
+- reasoning effort 建議 `none`／`low`（純分類、延遲敏感）；verbosity 最小（僅 JSON）。
+- 此 prompt 僅用於**第二層 fallback**；第一層受控詞彙最長匹配（§6.2）零 LLM、不經此 prompt。
+
 ## 7. 與 `content_hash` 脫鉤與重嵌 gating
 
 ### 7.1 `content_hash` 不變
@@ -220,6 +244,26 @@ product 需重建時，逐 item 計算 `item_hash = sha256(embedding 文字 + st
 
 - 取得該 product 現存的 item 向量（§8.1 `get_by_product`），比對其 metadata 的 `item_hash`：相同則略過該 item 的 upsert（避免無謂重嵌）。
 - 計算「應存在的 item ID 集合」與「現存 ID 集合」的差集，以既有 `VectorStore.delete(ids)`（[store.py](../../../estimator_king/vectorstore/store.py)，已存在）**刪除過時 item 向量**（variant 消失／合併關係改變時）。
+
+### 7.4 呼叫鏈與簽名變更（接線）
+
+新依賴（talents／item_types／item_types_version／typing provider／type 快取）需從持有 `config` 的 `run_crawl_cycle` 逐層下傳，與既有 `embedder`／`vector_store` 同模式：
+
+- **`TypingProvider` 建構位置**：由 `runtime.build_providers`（§10.3）在建 `embedder`／`vector_store` 時一併建立（crawl 與 serve 皆需），放入 `Providers` 容器；`run_crawl_cycle` 與 `build_bot` 透過參數取得。type 快取讀寫走 `ProductStateRepository.get_cached_type/put_cached_type`（§6.3）——`run_crawl_cycle` 已持有 `repo`（[cycle.py:35](../../../estimator_king/crawler/cycle.py)）。
+- **`run_crawl_cycle`**（[cycle.py:24](../../../estimator_king/crawler/cycle.py)）：新增參數 `typing_provider: TypingProvider`；`talents`／`item_types`／`item_types_version` 直接取自其已持有的 `config`。
+- **`async_process_queue`**（[async_pipeline.py:33](../../../estimator_king/crawler/async_pipeline.py)）：新增 keyword 參數 `typing_provider`、`talents: frozenset[str]`、`item_types: list[str]`、`item_types_version: int` 轉傳。
+- **`sync_products`**（[engine.py:77](../../../estimator_king/sync/engine.py)）新簽名：
+
+  ```python
+  def sync_products(
+      items, store_id, repository, embedder, vector_store,
+      *, typing_provider, talents: frozenset[str],
+      item_types: list[str], item_types_version: int,
+  ) -> SyncResult: ...
+  ```
+
+  內部：對每個 product 走 §7.2 gating；需重建時 `decompose_items(snapshot, talents=talents)` → 逐 item `classify_item(...)`（用 `typing_provider`、`item_types`、`repository` 做快取）→ `_format_item_document` → §7.3 的 per-item upsert/刪除。
+- `sync_products` 的 `_Embedder`／`_VectorStore` Protocol 旁新增 `_TypingProvider` Protocol（`classify(text) -> str | None` 或 `classify_item`），維持既有 duck-typing 測試慣例。
 
 ## 8. VectorStore 擴充 `estimator_king/vectorstore/store.py`
 
@@ -257,8 +301,9 @@ def get_by_product(self, store_id: str, product_id: str) -> list[QueryHit]:
    recency_norm     = (pub - min_pub) / (max_pub - min_pub)   # 以「本次候選集合」的 published_at 為基準
    ```
 
-   - `min_pub`／`max_pub` 取自**本次候選集合**的 `published_at`（非全 collection）。
-   - 當 `max_pub == min_pub`（含全為 `0`）時 `recency_norm = 0`（避免除零，退化為純相似度排序）。
+   - `min_pub`／`max_pub` 取自**本次候選集合中 `published_at > 0`** 的項（排除缺失值，非全 collection）。
+   - 缺失（`published_at == 0`）的候選其 `recency_norm` 固定為 `0`（無 recency 加成），且不參與 `min_pub`／`max_pub` 計算——避免缺失值（1970）把分母撐大、稀釋真實日期的 recency 訊號。
+   - 當 `published_at > 0` 的候選 < 2 個（無法形成區間）或 `max_pub == min_pub` 時，全體 `recency_norm = 0`（避免除零，退化為純相似度排序）。
    - `λ = estimator_recency_weight`（§10，預設小值，僅在相似度接近時影響排序）。
 4. 組脈絡行（讀新 metadata 鍵，**不再讀**舊 `title`）：`- {item_name} | {item_type} | ¥{price_jpy} | {YYYY-MM} | {store_id}`；其中 `YYYY-MM` 由 `published_at` 換算（`0` → 顯示 `?`）。若 `detail_snippet` 非空，再接一行縮排的規格片段（截斷至約 120 全形字）。讓 chat model 能依規格（size／材質）對齊比價，而非只靠品項名。
 
@@ -266,9 +311,47 @@ def get_by_product(self, store_id: str, product_id: str) -> list[QueryHit]:
 
 查詢行的原始文字（含使用者可能附註的 size，如「ぬいぐるみ L」）同時用於 embedding 與送進 chat 脈絡。size／材質對齊由 chat model 依參考行的 `item_name` **與 `detail_snippet`**（§5.4 擷取的規格）判斷，**無需額外解析**。
 
-### 9.3 system prompt 微調
+### 9.3 estimate system prompt（依 GPT-5.4 prompt guidance 改寫）
 
-更新 [SYSTEM_PROMPT](../../../estimator_king/bot/estimator.py)：說明參考行格式新增 `item_type` 與日期，並指示「同類型優先、相近日期的價格更具參考性」。
+改寫 [SYSTEM_PROMPT](../../../estimator_king/bot/estimator.py)，採 GPT-5.4 建議骨架（Role → Goal → Success criteria → Constraints → Output → Stop rules），規則塊用 XML 標籤，僅對真正不變量用 must/never，描述「目的地」而非逐步流程。輸出仍由既有 `EstimateBatch` structured output（[llm/chat.py](../../../estimator_king/llm/chat.py)）約束，prompt 負責欄位語義與取材紀律。骨架（最終以英文撰寫，內容固定如下語義）：
+
+```text
+Role: You are the Estimator King, a price estimator for Japanese hololive/vspo
+merchandise. You price one item per input line using only the provided references.
+
+# Goal
+For each product line, output a JPY price estimate grounded in the reference items.
+
+# Success criteria
+- One estimate per input line, in the same order; none skipped.
+- suggested_price and price_range are integer JPY justified by the references.
+- confidence reflects match quality (see constraints).
+
+<constraints>
+- Ground every estimate ONLY in the provided reference context; never invent
+  prices or products not present in it.
+- Prefer references of the SAME item_type as the queried line; use cross-type
+  references only as weak signal.
+- When references of comparable type span different dates, weight more RECENT
+  prices higher (merchandise prices drift upward over time).
+- Match size/material using each reference's item_name and detail line when present.
+- Prices are integer JPY. Include up to 3 reference_products actually drawn from
+  the context.
+</constraints>
+
+# Output
+Return an estimate object per line (product_name, suggested_price_jpy,
+price_range_jpy, confidence ∈ {high, medium, low}, rationale, reference_products).
+confidence: high = direct/near-exact same-type match; medium = same-type but
+size/variant differs; low = only cross-type or weak matches.
+
+<stop_rules>
+- If no strong match exists, still return an estimate with confidence "low" and a
+  rationale stating the limitation — do NOT fabricate a closer match.
+</stop_rules>
+```
+
+- 若使用 GPT-5.x chat 模型，reasoning effort 建議 `low`～`medium`（估價需少量推理，非高度 agentic）；verbosity 偏精簡（rationale 一兩句）。此為旋鈕建議，非硬性。
 
 ## 10. Provider 設定擴充
 
@@ -324,8 +407,14 @@ estimator:
 ```
 
 - typing env（`TYPING_MODEL`／`TYPING_BASE_URL`／`TYPING_API_KEY`）於 `load_config` 以 `os.getenv` 讀入 `AppConfig.typing_*` 欄位（同 §10.1，AppConfig 亦新增對應 `typing_model: str = "gpt-4o-mini"`、`typing_base_url: str | None = None`、`typing_api_key: str | None = None`）。
-- 注入：`Estimator` 建構子新增 `recency_weight` 參數，`top_k` 沿用既有（[estimator.py:44](../../../estimator_king/bot/estimator.py) 已有 `top_k`）；`runtime`／組裝層以 `config.estimator_top_k`、`config.estimator_recency_weight` 注入。`decompose_items` 與 typing 模組由組裝層傳入 `config.talents`、`config.item_types`、`config.item_types_version`。
+- 注入：`Estimator.__init__`（[estimator.py:44](../../../estimator_king/bot/estimator.py)，已有 `top_k=10`）新增 `recency_weight: float = 0.05` 與查詢端 typing 所需的 `typing_provider`。唯一實例化點在 **`build_bot`（[bot/runner.py:45](../../../estimator_king/bot/runner.py)）**（非 `runtime`），該處持有 `config`：改為 `Estimator(embedder, chat, vector_store, typing_provider, top_k=config.estimator_top_k, recency_weight=config.estimator_recency_weight)`。`decompose_items`／索引端 typing 的 `talents`／`item_types`／`item_types_version` 走 §7.4 的 crawl 呼叫鏈。
 - `AppConfig.validate` 為結構驗證；`item_types`／`talents` 允許為空（空 `talents` → 不去重；空 `item_types` → 第一層永不命中、全走第二層或 `その他`），不在 `validate` 強制。
+
+### 10.3 `build_providers`／`Providers` 擴充（[runtime.py](../../../estimator_king/runtime.py)）
+
+- `Providers` 容器新增 `typing: TypingProvider`（crawl 與 serve 皆需）。
+- `build_providers(config, *, with_chat=...)` 在建 `embedder`／`vector_store` 後，以 `config.build_provider_config()` 產出的 `ProviderConfig`（含 §10.1 typing 欄位）建構 `TypingProvider` 放入容器。
+- crawl 路徑：`run_crawl_cycle` 由呼叫端（CLI `crawl`）傳入 `providers.typing`（§7.4）。serve 路徑：`build_bot` 由 `serve` 傳入 `providers.typing`（§10.2 注入）。
 
 ## 11. 遷移
 
@@ -345,7 +434,7 @@ estimator:
 
 - **typing 小模型失敗**：第二層呼叫例外時，記錄並回傳 `その他`（不阻斷索引／查詢）。索引端沿用 [sync/engine.py](../../../estimator_king/sync/engine.py) 既有「embed/vector 失敗 fire-and-forget、不前進 `last_indexed_at`」策略。
 - **去重輸入異常**（價格無法解析）：該 variant 比照 ¥0 規則略過。
-- **`published_at` 缺失**：metadata 記 `0`，recency_norm 視為最舊。
+- **`published_at` 缺失**：metadata 記 `0`；recency rerank 時不參與 `min_pub`／`max_pub`、`recency_norm` 固定為 `0`（無加成），規則見 §9.1 step 3。
 - **查詢端類型過濾後零命中**：純 embedding 查詢必定執行，保證脈絡不空。
 
 ## 14. 測試（pytest，沿用 fakes 慣例）
@@ -358,7 +447,9 @@ estimator:
   - `detail_snippet` 擷取：section 含「・<品項名> …」時取對應規格行；無對應行時為空字串（不退回整段 description）。
 - `tests/test_typing.py`：第一層最長匹配（唯一命中／多重命中／零命中）；第二層後驗證歸 `その他`；快取命中不呼叫小模型（fake provider 計數）。
 - `tests/test_engine_items.py`：逐 item upsert；過時 item 向量刪除；`item_hash` 相同略過重嵌；gating key（含 `item_types_version`）。
-- `tests/test_estimator.py`：逐行多類型各查 + 純查合併去重；零類型只純查；recency rerank 排序（fake hits 帶 `published_at`）；脈絡行格式。
+- `tests/test_estimator.py`：逐行多類型各查 + 純查合併去重（同 ID 保留最小 distance）；零類型只純查；recency rerank 排序（fake hits 帶 `published_at`）；recency 邊界：候選含 `published_at==0` 時該項 `recency_norm=0` 且不參與 min/max、`>0` 候選 < 2 時退化純相似度；脈絡行格式（含 `0` → `?` 日期）。
+- `tests/test_config_schema.py`：`load_config` 解析 `item_types`／`item_types_version`／`talents`／`estimator.top_k`／`estimator.recency_weight`（含預設值回落）；typing env cascade 經 `build_provider_config`。
+- `tests/test_shopify.py`（或既有）：`published_at` 解析（ISO8601 → epoch、缺失回落 `created_at`、再缺 `0`）；`ProductSnapshotWithHash` 帶 `published_at` 仍可 import/建構（驗證 dataclass 排序修正）。
 - 驗證工具鏈（[CLAUDE.md](../../../CLAUDE.md)）：`.venv/bin/basedpyright estimator_king`（prod 0 error）、`uvx ruff check`、相關 `pytest -o addopts=""`。
 
 ## 15. 驗收標準
