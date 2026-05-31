@@ -179,7 +179,8 @@ class ProductItem:
 
 ```python
 def classify_item(text, *, item_types, item_types_version, typing_provider, repository) -> str:
-    """索引端：必回傳單一類型字串（零命中時最終為 'その他'，永不 None）。"""
+    """索引端：必回傳單一類型字串（恰好命中 1 個→直接用；多重命中或零命中→第二層 LLM 擇一，
+    無適合者為 'その他'；永不 None）。"""
 
 def classify_query(text, *, item_types, item_types_version, typing_provider, repository=None) -> list[str]:
     """查詢端：回傳 0..N 個類型；第一層多重命中時全數保留供 §9 各查一遍；
@@ -189,10 +190,11 @@ def classify_query(text, *, item_types, item_types_version, typing_provider, rep
 
 兩者共用內部分層：
 
-- **第一層（零 LLM、決定性）**：對 `text`（item 端＝品項名＋product 標題；query 端＝查詢行）做受控詞彙 `item_types` **最長匹配**（詞彙詞為子字串）。命中（≥1 個）→ 直接用，**不**進第二層、**不**寫快取：
-  - `classify_item`：多重命中時取**最長**一個（決定性收斂，不呼叫 LLM）。
-  - `classify_query`：保留**全部**命中（供 §9 各查一遍）。
-- **第二層（小模型 fallback）**：**僅當第一層零命中**時觸發：若 `repository` 非 None 先查快取（§6.3，key 含 `item_types_version`），命中即用；未命中（或 `repository=None`）則呼叫 `typing_provider.classify_via_llm(text, item_types)`（§10.1），輸出以 `item_types` 後驗證，不在表內者一律歸 `その他`，`repository` 非 None 時寫入快取。（`classify_item` 索引端一律有 `repository`；`classify_query` bot 端為 None → 不快取。）
+- **第一層（受控詞彙比對，零 LLM）**：對 `text`（item 端＝品項名＋product 標題；query 端＝查詢行）做受控詞彙 `item_types` 比對（詞彙詞為子字串），得命中集合：
+  - **恰好命中 1 個**（兩端皆同）→ 直接用，**不**進第二層、**不**寫快取（決定性）。
+  - `classify_query` **多重命中**：保留**全部**命中（供 §9 各查一遍），**不**走 LLM。
+  - `classify_item` **多重命中**：需單一主類型——**進第二層由 LLM 判斷**（最長匹配在同時命中兩類型詞時會選錯，如「ぬいぐるみポーチ」「タオル&キーホルダー」；交給 LLM 從命中者擇一更準）。
+- **第二層（小模型 fallback）**：觸發條件——`classify_item` 的**零命中或多重命中**、`classify_query` 的**零命中**。流程：若 `repository` 非 None 先查快取（§6.3，key 含 `item_types_version`），命中即用；未命中（或 `repository=None`）則呼叫 `typing_provider.classify_via_llm(text, item_types)`（§10.1，傳完整詞彙、LLM 擇一），輸出以 `item_types` 後驗證，不在表內者一律歸 `その他`，`repository` 非 None 時寫入快取。（`classify_item` 索引端一律有 `repository` → 走 LLM 也會被快取，吸收非決定性、不影響 content_hash gating；`classify_query` bot 端為 None → 不快取。`classify_via_llm` 簽名不變，多重命中與零命中共用同一呼叫。）
 - **None 協調**：`classify_item` 最終一律有值（`その他` 為下限），與 §4.2「`item_type` 為單一純量字串」一致；`classify_query` 以**空 list** 表示「不過濾」，無 `None`。
 
 ### 6.3 類型快取表 `item_type_cache`（新增於 `estimator_king/database/schema.sql`）
@@ -501,7 +503,7 @@ estimator:
   - SET 與 ¥0 排除。
   - 命名規則三分支：whole-product 合併→product 標題；短選項值（`< 4` 或 size pattern，如「黒 M」「Lサイズ」）→併入 product 標題；混合品項殘餘→原樣（驗證活動/生日商品的長品項名如「イオフィカラー ショルダーバッグ」**不**被誤併入活動名）。
   - `detail_snippet` 擷取（substring/core 為主）：section 條列含品項名核心時取對應規格行（含單 token 日文名以子字串命中，如「Eternity アクリルジオラマスタンド」→ 其 サイズ/素材 行）；無對應行（語音/數位、或非條列）時為空字串（不退回整段 description）。
-- `tests/test_typing.py`：第一層最長匹配（唯一命中／多重命中／零命中）；`classify_item` 零命中→第二層→`その他`（永不 None）；`classify_query` 多重命中回多元素、`その他`→空 list；第二層後驗證歸 `その他`；快取命中不呼叫 `classify_via_llm`（fake provider 計數，含 `item_types_version` 失效）。
+- `tests/test_typing.py`：第一層恰好命中 1 個→直接用、不呼叫 LLM；`classify_item` **多重命中→第二層 LLM 擇一**、**零命中→第二層→`その他`**（永不 None，fake provider 計數驗證有呼叫）；`classify_query` 多重命中回多元素、不呼叫 LLM、`その他`→空 list；第二層後驗證歸 `その他`；快取命中不呼叫 `classify_via_llm`（含 `item_types_version` 失效）。
 - `tests/test_engine_items.py`：逐 item upsert；過時 item 向量刪除；`item_hash` 相同略過重嵌；gating key（含 `item_types_version`）。
 - `tests/test_estimator.py`：`Estimator` 以注入的 `item_types`/`item_types_version`/fake `typing_provider` 及 `repository=None` 呼叫 `classify_query`（驗證關鍵字參數）；逐行多類型各查 + 純查合併去重（同 ID 保留最小 distance）；零類型只純查；recency rerank 排序（fake hits 帶 `published_at`）；recency 邊界：候選含 `published_at==0` 時該項 `recency_norm=0` 且不參與 min/max、`>0` 候選 < 2 時退化純相似度；脈絡行格式（含 `0` → `?` 日期）；**對帳（§9.4.1）**：LLM 回傳數量不足／重排／多餘時，`estimate_products` 回傳長度 == 輸入、同序，缺項為佔位估價（confidence `low`），多餘估價被丟棄並記 warning（fake chat 刻意錯位）。
 - `tests/test_config_schema.py`：`load_config` 解析 `item_types`／`item_types_version`／`talents`／`estimator.top_k`／`estimator.recency_weight`（含預設值回落）；typing env cascade 經 `build_provider_config`。
