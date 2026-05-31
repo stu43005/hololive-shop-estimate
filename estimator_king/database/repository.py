@@ -17,6 +17,7 @@ class ProductState:
     product_url: str
     content_hash: str
     normalizer_version: int
+    item_types_version: int | None = None
     last_seen_in_sitemap_at: datetime | None = None
     last_fetch_success_at: datetime | None = None
     last_indexed_at: datetime | None = None
@@ -113,18 +114,19 @@ class ProductStateRepository:
                 """
                 INSERT INTO products (
                     external_key, store_id, product_id, product_url,
-                    content_hash, normalizer_version,
+                    content_hash, normalizer_version, item_types_version,
                     last_seen_in_sitemap_at, last_fetch_success_at, last_indexed_at,
                     created_at, updated_at,
                     consecutive_failures, consecutive_sitemap_misses,
                     inactive, inactive_reason, inactive_since
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(external_key) DO UPDATE SET
                     store_id=excluded.store_id,
                     product_id=excluded.product_id,
                     product_url=COALESCE(excluded.product_url, products.product_url),
                     content_hash=excluded.content_hash,
                     normalizer_version=excluded.normalizer_version,
+                    item_types_version=excluded.item_types_version,
                     last_seen_in_sitemap_at=COALESCE(excluded.last_seen_in_sitemap_at, products.last_seen_in_sitemap_at),
                     last_fetch_success_at=COALESCE(excluded.last_fetch_success_at, products.last_fetch_success_at),
                     last_indexed_at=COALESCE(excluded.last_indexed_at, products.last_indexed_at),
@@ -138,6 +140,7 @@ class ProductStateRepository:
                 (
                     state.external_key, state.store_id, state.product_id, state.product_url,
                     state.content_hash, state.normalizer_version,
+                    int(state.item_types_version) if state.item_types_version is not None else None,
                     _dt_to_iso(state.last_seen_in_sitemap_at),
                     _dt_to_iso(state.last_fetch_success_at),
                     _dt_to_iso(state.last_indexed_at),
@@ -340,6 +343,36 @@ class ProductStateRepository:
                 (_dt_to_iso(now), external_key),
             )
 
+    def get_cached_type(self, text_hash: str) -> str | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT item_type FROM item_type_cache WHERE text_hash = ?",
+                (text_hash,),
+            ).fetchone()
+            return None if row is None else str(row["item_type"])
+
+    def put_cached_type(self, text_hash: str, item_type: str, version: int,
+                        text_sample: str) -> None:
+        with self._lock:
+            _ = self.connection.execute(
+                "INSERT INTO item_type_cache (text_hash, text_sample, item_type, item_types_version, created_at)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(text_hash) DO UPDATE SET"
+                " text_sample=excluded.text_sample, item_type=excluded.item_type,"
+                " item_types_version=excluded.item_types_version",
+                (text_hash, text_sample, item_type, int(version), _dt_to_iso(_utc_now())),
+            )
+
+    def list_other_typed(self, limit: int) -> list[str]:
+        """Distinct readable item texts classified as 'その他', for vocabulary review."""
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT DISTINCT text_sample FROM item_type_cache WHERE item_type = 'その他'"
+                " ORDER BY text_sample LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+            return [str(r["text_sample"]) for r in rows]
+
     def _apply_pragmas(self, conn: sqlite3.Connection) -> None:
         _ = conn.execute("PRAGMA journal_mode=WAL")
         _ = conn.execute("PRAGMA synchronous=NORMAL")
@@ -347,6 +380,11 @@ class ProductStateRepository:
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript(_read_schema_sql())
+        # Idempotent additive migration for pre-existing databases: schema.sql uses
+        # CREATE TABLE IF NOT EXISTS and will not add columns to an existing table.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(products)").fetchall()}
+        if "item_types_version" not in cols:
+            conn.execute("ALTER TABLE products ADD COLUMN item_types_version INTEGER")
 
 
 def _read_schema_sql() -> str:
@@ -383,6 +421,10 @@ def _row_to_state(row: sqlite3.Row) -> ProductState:
         product_url=str(row["product_url"]),
         content_hash=str(row["content_hash"]),
         normalizer_version=int(cast(int, row["normalizer_version"])),
+        item_types_version=(
+            int(cast(int, row["item_types_version"]))
+            if row["item_types_version"] is not None else None
+        ),
         last_seen_in_sitemap_at=_iso_to_dt(cast("str | None", row["last_seen_in_sitemap_at"])),
         last_fetch_success_at=_iso_to_dt(cast("str | None", row["last_fetch_success_at"])),
         last_indexed_at=_iso_to_dt(cast("str | None", row["last_indexed_at"])),

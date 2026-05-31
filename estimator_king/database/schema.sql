@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS products (
 
     content_hash   TEXT NOT NULL,
     normalizer_version INTEGER NOT NULL,
+    item_types_version INTEGER,
 
     last_seen_in_sitemap_at TEXT,
     last_fetch_success_at   TEXT,
@@ -35,3 +36,11 @@ CREATE TABLE IF NOT EXISTS crawl_queue (
     UNIQUE(store_id, product_url)
 );
 CREATE INDEX IF NOT EXISTS idx_crawl_queue_store_id ON crawl_queue(store_id, id);
+
+CREATE TABLE IF NOT EXISTS item_type_cache (
+    text_hash          TEXT PRIMARY KEY,
+    text_sample        TEXT NOT NULL,
+    item_type          TEXT NOT NULL,
+    item_types_version INTEGER NOT NULL,
+    created_at         TEXT NOT NULL
+);
