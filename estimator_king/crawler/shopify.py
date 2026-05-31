@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol, cast
 
 from .html_extractor import extract_detail_sections as extract_html_details
@@ -27,6 +28,18 @@ def _clean_body_html(html: str) -> str:
         tag.decompose()
     result = md.markdownify(str(soup), heading_style="ATX")
     return result.strip()
+
+
+def _parse_published_at(product: dict[str, object]) -> int:
+    """Epoch seconds from product.published_at, falling back to created_at, else 0."""
+    for key in ("published_at", "created_at"):
+        raw = product.get(key)
+        if isinstance(raw, str) and raw.strip():
+            try:
+                return int(datetime.fromisoformat(raw).timestamp())
+            except ValueError:
+                continue
+    return 0
 
 
 class ShopifyProductError(Exception):
@@ -111,6 +124,7 @@ def _build_snapshot_from_product_json(
         description=description,
         variants=variants,
         html_details=html_details,
+        published_at=_parse_published_at(product),
     )
 
 
@@ -150,5 +164,6 @@ def _build_snapshot(json_text: str, html_text: str, canonical_url: str) -> Produ
         description=snapshot.description,
         variants=snapshot.variants,
         html_details=snapshot.html_details,
+        published_at=snapshot.published_at,
         content_hash=content_hash,
     )

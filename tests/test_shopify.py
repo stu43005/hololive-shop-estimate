@@ -14,6 +14,8 @@ import pytest
 from estimator_king.crawler.async_http_client import ClientError, ServerError
 from estimator_king.crawler.shopify import (
     ShopifyJSONError,
+    _build_snapshot,
+    ProductSnapshotWithHash,
     fetch_product,
 )
 from estimator_king.crawler.snapshot import compute_content_hash
@@ -207,3 +209,39 @@ def test_fetch_product_allows_null_body_html_and_variants():
     assert snapshot.variants == []
     assert snapshot.html_details == {}
     assert getattr(snapshot, "content_hash") == compute_content_hash(snapshot)
+
+
+def _product_json(**extra) -> str:
+    product = {
+        "id": 123,
+        "title": "Test Product",
+        "body_html": "<p>desc</p>",
+        "variants": [{"id": 1, "title": "グッズ / Item A", "price": "500", "sku": None}],
+    }
+    product.update(extra)
+    return json.dumps({"product": product})
+
+
+def test_published_at_parsed_to_epoch():
+    snap = _build_snapshot(
+        _product_json(published_at="2023-06-30T19:00:07+09:00"), "<html></html>", "http://x/products/123"
+    )
+    # 2023-06-30T19:00:07+09:00 == 2023-06-30T10:00:07Z == 1688119207
+    assert snap.published_at == 1688119207
+
+
+def test_published_at_falls_back_to_created_at_then_zero():
+    snap_created = _build_snapshot(
+        _product_json(created_at="2023-06-30T19:00:07+09:00"), "<html></html>", "http://x/products/123"
+    )
+    assert snap_created.published_at == 1688119207
+    snap_none = _build_snapshot(_product_json(), "<html></html>", "http://x/products/123")
+    assert snap_none.published_at == 0
+
+
+def test_snapshot_with_hash_constructs_with_published_at():
+    obj = ProductSnapshotWithHash(
+        product_id=1, title="t", description="d", variants=[], html_details={},
+        published_at=42, content_hash="abc",
+    )
+    assert obj.published_at == 42 and obj.content_hash == "abc"
