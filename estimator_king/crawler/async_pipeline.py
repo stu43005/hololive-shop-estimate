@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from estimator_king.config_schema import CrawlerPolicy, ProxyConfig
     from estimator_king.database.repository import ProductStateRepository
     from estimator_king.llm.embeddings import EmbeddingProvider
+    from estimator_king.llm.typing_provider import TypingProvider
     from estimator_king.vectorstore.store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,10 @@ async def async_process_queue(
     embedder: EmbeddingProvider,
     vector_store: VectorStore,
     *,
+    typing_provider: TypingProvider,
+    talents: frozenset[str],
+    item_types: list[str],
+    item_types_version: int,
     proxy: ProxyConfig | None = None,
 ) -> PipelineResult:
     entries = state_repo.peek_all(store_id)
@@ -57,6 +62,8 @@ async def async_process_queue(
                 sync_result = await asyncio.to_thread(
                     sync_products, [(product_url, snapshot)], store_id,
                     state_repo, embedder, vector_store,
+                    typing_provider=typing_provider, talents=talents,
+                    item_types=item_types, item_types_version=item_types_version,
                 )
                 state_repo.delete_queue_entry(entry_id)
                 result.created += sync_result.created
