@@ -125,5 +125,6 @@ def test_run_crawl_exits_1_on_cycle_exception():
 
 
 def test_run_crawl_no_dify_client_constructed():
-    """The refactored __main__ must NOT carry a DifyKBClient symbol."""
+    """The refactored __main__ must NOT carry DifyKBClient nor the renamed run_bot."""
     assert not hasattr(m, "DifyKBClient")
+    assert not hasattr(m, "run_bot")  # renamed to run_service in this task

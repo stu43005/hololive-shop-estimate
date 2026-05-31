@@ -51,3 +51,29 @@ def test_build_providers_raises_when_embedding_key_missing():
         mock_cfg = _make_cfg(embedding_api_key=empty_key)
         with pytest.raises(MissingEmbeddingKey):
             build_providers(mock_cfg)
+
+
+def test_serve_shares_one_vector_store_between_scheduler_and_bot():
+    """serve injects the SAME vector_store into CrawlScheduler and build_bot."""
+    from unittest.mock import AsyncMock
+    import asyncio as _asyncio
+    from estimator_king import runtime
+
+    providers = Providers(embedder=MagicMock(), vector_store=MagicMock(), chat=MagicMock())
+    fake_bot = MagicMock()
+    fake_bot.start = AsyncMock()
+    cfg = MagicMock()
+    cfg.discord_token = "tok"
+
+    with patch("estimator_king.runtime.build_providers", return_value=providers), \
+         patch("estimator_king.runtime._background_tasks", set()), \
+         patch("estimator_king.runtime.CrawlScheduler") as MockSched, \
+         patch("estimator_king.runtime.build_bot", return_value=fake_bot) as mock_build_bot, \
+         patch("estimator_king.runtime.asyncio.create_task"), \
+         patch("estimator_king.runtime.asyncio.get_running_loop"):
+        _asyncio.run(runtime.serve(cfg, guild_id=None))
+
+    sched_vs = MockSched.call_args.args[3]          # CrawlScheduler(config, db, embedder, vector_store)
+    bot_vs = mock_build_bot.call_args.kwargs["vector_store"]
+    assert sched_vs is bot_vs is providers.vector_store
+    fake_bot.start.assert_awaited_once()

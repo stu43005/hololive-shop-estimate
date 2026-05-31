@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from estimator_king.__main__ import parse_args, run_bot, run_crawl
+from estimator_king.__main__ import parse_args, run_service, run_crawl
 from estimator_king.runtime import MissingEmbeddingKey, Providers
 
 
@@ -161,27 +161,27 @@ def test_run_crawl_config_load_failure_exits_1():
 # run_bot() — routing + token handling (mocked)
 # ---------------------------------------------------------------------------
 
-def test_run_bot_routes_to_bot_runner_with_token_override():
-    """run_bot() applies --token override and dispatches to bot_runner.run_bot."""
+def test_run_service_routes_to_serve_with_token_override():
+    """run_service applies --token override and dispatches to runtime.serve."""
     mock_cfg = MagicMock()
     mock_cfg.discord_token = "cfg-token"
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
-         patch("estimator_king.__main__.bot_runner.run_bot", new_callable=MagicMock) as mock_run_bot, \
+         patch("estimator_king.__main__.serve", new_callable=MagicMock) as mock_serve, \
          patch("estimator_king.__main__.asyncio.run") as mock_asyncio_run:
-        run_bot(MagicMock(config="stores.yaml", token="cli-token", guild_id=123))
+        run_service(MagicMock(config="stores.yaml", db=None, token="cli-token", guild_id=123))
 
     assert mock_cfg.discord_token == "cli-token"
-    mock_run_bot.assert_called_once_with(mock_cfg, guild_id=123)
-    mock_asyncio_run.assert_called_once_with(mock_run_bot.return_value)
+    mock_serve.assert_called_once_with(mock_cfg, guild_id=123)
+    mock_asyncio_run.assert_called_once_with(mock_serve.return_value)
 
 
-def test_run_bot_exits_1_when_token_missing():
-    """run_bot() exits 1 when no token is provided and config has none."""
+def test_run_service_exits_1_when_token_missing():
+    """run_service exits 1 when no token is provided and config has none."""
     mock_cfg = MagicMock()
     mock_cfg.discord_token = None
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg):
         with pytest.raises(SystemExit) as exc:
-            run_bot(MagicMock(config="stores.yaml", token=None, guild_id=None))
+            run_service(MagicMock(config="stores.yaml", db=None, token=None, guild_id=None))
     assert exc.value.code == 1
 
 

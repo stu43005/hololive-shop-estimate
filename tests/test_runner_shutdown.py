@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from estimator_king.bot import runner
+from estimator_king import runtime as runner
 
 
 class _FakeBot:

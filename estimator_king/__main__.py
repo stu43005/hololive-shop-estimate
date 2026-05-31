@@ -13,8 +13,7 @@ from typing import Optional, Sequence
 
 from estimator_king.config_schema import AppConfig
 from estimator_king.crawler.cycle import run_crawl_cycle
-from estimator_king.runtime import build_providers, MissingEmbeddingKey
-from estimator_king.bot import runner as bot_runner
+from estimator_king.runtime import serve, build_providers, MissingEmbeddingKey
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +84,11 @@ def run_crawl(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
-def run_bot(args: argparse.Namespace) -> None:
-    """Load config, apply token override, then start the bot via bot_runner.run_bot.
+def run_service(args: argparse.Namespace) -> None:
+    """Run the long-lived service (bot + in-process crawl scheduler).
 
-    Exit codes: config load failure -> 1; missing discord token -> 1.
+    Exit codes: config load failure -> 1; missing discord token -> 1;
+    missing embedding key (from serve/build_providers) -> 1.
     KeyboardInterrupt exits quietly.
     """
     try:
@@ -96,16 +96,16 @@ def run_bot(args: argparse.Namespace) -> None:
     except Exception as e:
         sys.stderr.write(f"Error: Failed to load config: {e}\n")
         sys.exit(1)
-
     if args.token is not None:
         config.discord_token = args.token
-
     if not config.discord_token:
         sys.stderr.write("Error: --token required or set DISCORD_BOT_TOKEN / DISCORD_TOKEN\n")
         sys.exit(1)
-
     try:
-        asyncio.run(bot_runner.run_bot(config, guild_id=args.guild_id))
+        asyncio.run(serve(config, guild_id=args.guild_id))
+    except MissingEmbeddingKey:
+        sys.stderr.write("Error: OPENAI_API_KEY (or EMBEDDING_API_KEY) is required\n")
+        sys.exit(1)
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
 
@@ -134,7 +134,7 @@ def _main() -> None:
     if args.command == "crawl":
         run_crawl(args)
     elif args.command == "run":
-        run_bot(args)
+        run_service(args)
 
 
 if __name__ == "__main__":
