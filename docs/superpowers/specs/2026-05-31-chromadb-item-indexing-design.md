@@ -127,14 +127,14 @@ class ProductItem:
 
 ### 5.3 命名規則（`item_name`）
 
-先定義 **product 主要 token 集合**：`product_title` 經 `_normalize_text` 正規化、切 token 後，保留長度 ≥ 2 全形字（或 ≥ 2 個碼位）的 token 所成集合（濾掉單字符雜訊）。判定依序套用：
+命名規則依序套用以下判定（殘餘＝§5.2 剝除 option 前綴後的標題；合併項則 name 來源見各分支）：
 
 - **整個 product 合併成單一 item 時**（§5.2 去重後 `items` 只剩 1 筆，且該筆 `len(source_variant_ids) ≥ 2`）：`item_name = product_title`（product 標題即品項名，例：Blue Journey ×23 → 「3Dアクリルスタンド Blue Journey衣装ver.」）。
 - **variant 殘餘為純選項值時**（剝除前綴後殘餘判定為 size／顏色而非品項描述）：`item_name = f"{product_title} {殘餘}"`。判定條件（OR）：
   - 殘餘以 `_normalize_text` 正規化後（全形空白→半形）以 `str` 計長度 `< 4`（涵蓋「M」「XL」「黒 M」等短選項值）；**或**
   - 殘餘命中 size／規格 pattern：`re.search(r"(^|[\s/])(XX?[SML]|[SML]|フリー)?サイズ|^(XX?[SML]|[SML])([\s/]|$)|フリーサイズ", 殘餘)`（涵蓋「Lサイズ」「XLサイズ」「フリーサイズ」「M」等）。
 
-  例：「黒　M」長度短 → 落此分支 →「ぶいすぽっ！オリジナルTシャツ 黒 M」。
+  例：「黒　M」命中**長度條件**（`_normalize_text` 後為「黒 M」，len 3 < 4；非 size pattern）→ 落此分支 →「ぶいすぽっ！オリジナルTシャツ 黒 M」。
   - **不再以「與 product 標題 token 交集為空」單獨觸發**（實測會對活動／生日商品誤觸發：活動名與品項名本就無共同 token，導致 `イオフィカラー ショルダーバッグ` 被誤併成 `…誕生日記念2022 イオフィカラー ショルダーバッグ`，反而把活動名灌回品項名、重新引入 talent/活動名主導）。
 - **其餘**（混合品項、各自獨立）：`item_name = 剝除前綴後的殘餘標題`。
 
