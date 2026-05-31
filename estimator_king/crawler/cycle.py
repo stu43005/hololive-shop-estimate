@@ -11,29 +11,28 @@ from estimator_king.crawler.async_pipeline import async_process_queue
 from estimator_king.crawler.pipeline import enqueue_oldest_products, populate_queue_from_sitemap
 from estimator_king.crawler.sitemap import SitemapEnumerator
 from estimator_king.database.repository import ProductStateRepository
-from estimator_king.llm.typing_provider import TypingProvider
 from estimator_king.sync.inactive import mark_inactive_products
 
 if TYPE_CHECKING:
     from estimator_king.config_schema import AppConfig
     from estimator_king.llm.embeddings import EmbeddingProvider
+    from estimator_king.llm.typing_provider import TypingProvider
     from estimator_king.vectorstore.store import VectorStore
 
 logger = logging.getLogger(__name__)
 
 
 async def run_crawl_cycle(
-    config: AppConfig,
+    config: "AppConfig",
     db_path: str,
-    embedder: EmbeddingProvider,
-    vector_store: VectorStore,
+    embedder: "EmbeddingProvider",
+    vector_store: "VectorStore",
+    typing_provider: "TypingProvider",
     *,
     force_refetch: bool = False,
 ) -> dict[str, int]:
     counters = {"discovered": 0, "fetched_ok": 0, "created": 0, "updated": 0,
                 "skipped": 0, "inactive": 0, "errors": 0}
-
-    typing_provider = TypingProvider(config.build_provider_config())
 
     with ProductStateRepository(db_path) as repo:
         async with AsyncHTTPClient(config.crawler, proxy=config.proxy) as sitemap_client:
