@@ -23,3 +23,8 @@ class ProviderConfig:
     chat_base_url: str | None = None
     chat_model: str = "gpt-4o"
     chat_structured_output: bool = True
+
+    # Typing (item-type classification; small/cheap model)
+    typing_model: str = "gpt-4o-mini"
+    typing_base_url: str | None = None   # cascade: typing → chat → openai
+    typing_api_key: str = ""             # cascade: typing → chat → openai
