@@ -38,6 +38,14 @@ class FakeEmbedder:
         return [0.1, 0.2, 0.3, 0.4]
 
 
+class FakeTypingProvider:
+    """Always returns 'その他' (no LLM call)."""
+
+    def classify_via_llm(self, text: str, item_types: list[str]) -> str:
+        _ = text, item_types
+        return "その他"
+
+
 class FakeChat:
     """Returns a canned EstimateBatch regardless of the prompt."""
 
@@ -103,7 +111,8 @@ def test_estimate_products_returns_batch(
     names = ["Holo T-Shirt", "Acrylic Stand"]
     chat = FakeChat(_estimate_batch(names))
 
-    estimator = Estimator(embedder, chat, real_vector_store, top_k=3)  # pyright: ignore[reportArgumentType]
+    estimator = Estimator(embedder, chat, real_vector_store, FakeTypingProvider(),  # pyright: ignore[reportArgumentType]
+                          item_types=[], item_types_version=1, top_k=3)
     batch = estimator.estimate_products(names, "discord-1")
 
     assert len(batch.estimates) == len(names)
@@ -119,9 +128,12 @@ def test_estimate_products_with_pre_seeded_store(
     # Seed one document into the real vector store.
     embedding: list[float] = embedder.embed_documents(["dummy"])[0]
     metadata: dict[str, Any] = {
-        "title": "Reference Acrylic Stand",
+        "item_name": "Reference Acrylic Stand",
+        "item_type": "アクリルスタンド",
         "price_jpy": 3300,
         "store_id": "hololive",
+        "published_at": 0,
+        "detail_snippet": "",
     }
     real_vector_store.upsert(
         id="hololive:999",
@@ -132,7 +144,8 @@ def test_estimate_products_with_pre_seeded_store(
 
     names = ["Acrylic Stand"]
     chat = FakeChat(_estimate_batch(names))
-    estimator = Estimator(embedder, chat, real_vector_store, top_k=5)  # pyright: ignore[reportArgumentType]
+    estimator = Estimator(embedder, chat, real_vector_store, FakeTypingProvider(),  # pyright: ignore[reportArgumentType]
+                          item_types=[], item_types_version=1, top_k=5)
 
     batch = estimator.estimate_products(names, "discord-42")
 
@@ -149,7 +162,8 @@ def test_format_estimates_renders_discord_embeds(
     """format_estimates produces valid discord.Embed objects with price info."""
     names = ["Voice Pack", "Tapestry"]
     chat = FakeChat(_estimate_batch(names))
-    estimator = Estimator(embedder, chat, real_vector_store)  # pyright: ignore[reportArgumentType]
+    estimator = Estimator(embedder, chat, real_vector_store, FakeTypingProvider(),  # pyright: ignore[reportArgumentType]
+                          item_types=[], item_types_version=1)
 
     batch = estimator.estimate_products(names, "discord-99")
     embeds = format_estimates(batch)
@@ -176,7 +190,8 @@ def test_estimator_empty_names_returns_empty_batch(
 ) -> None:
     """Estimator.estimate_products([]) returns an empty EstimateBatch without calling chat."""
     chat = FakeChat(_estimate_batch([]))
-    estimator = Estimator(embedder, chat, real_vector_store)  # pyright: ignore[reportArgumentType]
+    estimator = Estimator(embedder, chat, real_vector_store, FakeTypingProvider(),  # pyright: ignore[reportArgumentType]
+                          item_types=[], item_types_version=1)
 
     batch = estimator.estimate_products([], "discord-0")
 
