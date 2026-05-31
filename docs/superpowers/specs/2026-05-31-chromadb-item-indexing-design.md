@@ -300,6 +300,15 @@ def get_by_product(self, store_id: str, product_id: str) -> list[QueryHit]:
 
 逐行（per-line）檢索；`CHUNK_SIZE` 僅為 chat 呼叫批次，維持不變。
 
+**`_Hit` Protocol 擴充**：step 2 去重需 `hit.id`、step 3 需 `hit.distance`，但現有 `_Hit` Protocol（[estimator.py:32](../../../estimator_king/bot/estimator.py)）只宣告 `metadata`。須擴充為下列（對齊 `QueryHit`，[store.py:12](../../../estimator_king/vectorstore/store.py)），否則 `h.id`／`h.distance` 觸發 `reportAttributeAccessIssue`、未過 §15 prod 0-error 型別閘：
+
+```python
+class _Hit(Protocol):
+    id: str
+    metadata: dict[str, Any]
+    distance: float
+```
+
 ### 9.1 每行流程（取代 `_estimate_chunk` 內的單一 query）
 
 1. `types = typing.classify_query(line, item_types=self._item_types, item_types_version=self._item_types_version, typing_provider=self._typing_provider, repository=None)`（0..N 個類型；bot 端無 repository → 第二層不快取）。`Estimator` 於建構時收下 `typing_provider`、`item_types`、`item_types_version`、`recency_weight`（§10.2），分別存為 `self._typing_provider`／`self._item_types`／`self._item_types_version`／`self._recency_weight`。
