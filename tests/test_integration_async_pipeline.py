@@ -41,19 +41,33 @@ class FakeEmbedder:
         return [0.1, 0.2]
 
 
+class FakeTypingProvider:
+    def classify_via_llm(self, text: str, item_types: list[str]) -> str:
+        _ = (text, item_types)
+        return "その他"
+
+
 class FakeVectorStore:
     """Records upsert calls so tests can assert on them."""
 
     def __init__(self) -> None:
         self.upserts: list[str] = []
+        self._meta: dict[str, dict[str, Any]] = {}
 
     def upsert(self, id: str, document: str, embedding: list[float],
                metadata: dict[str, Any]) -> None:
-        _ = (document, embedding, metadata)
+        _ = (document, embedding)
         self.upserts.append(id)
+        self._meta[id] = dict(metadata)
 
     def delete(self, ids: list[str]) -> None:
         _ = ids
+
+    def get_by_product(self, store_id: str, product_id: str) -> list[Any]:
+        from estimator_king.vectorstore.store import QueryHit
+        return [QueryHit(id=i, document="", metadata=m, distance=0.0)
+                for i, m in self._meta.items()
+                if m.get("store_id") == store_id and m.get("product_id") == product_id]
 
     def query(self, embedding: list[float], n_results: int,
               where: dict[str, Any] | None = None) -> list[Any]:
@@ -115,7 +129,7 @@ def test_run_cycle_indexes_pre_seeded_urls(db_path: str) -> None:
         patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=fake_fetch),
     ):
         counters = asyncio.run(
-            run_crawl_cycle(_config(), db_path, embedder, vs)  # pyright: ignore[reportArgumentType]
+            run_crawl_cycle(_config(), db_path, embedder, vs, FakeTypingProvider())
         )
 
     # Both products should have been processed and upserted.
@@ -123,8 +137,10 @@ def test_run_cycle_indexes_pre_seeded_urls(db_path: str) -> None:
     assert counters["created"] == 2
     assert counters["errors"] == 0
 
-    expected_keys = {f"{STORE_ID}:{pid_a}", f"{STORE_ID}:{pid_b}"}
-    assert set(vs.upserts) == expected_keys
+    # Per-item vector IDs: {store_id}:{product_id}:{item_slug}
+    assert any(i.startswith(f"{STORE_ID}:{pid_a}:") for i in vs.upserts)
+    assert any(i.startswith(f"{STORE_ID}:{pid_b}:") for i in vs.upserts)
+    assert len(vs.upserts) >= 2
 
     # Stored URL must be the fetched handle URL, not a fabricated numeric one.
     with ProductStateRepository(db_path) as repo:
@@ -153,7 +169,7 @@ def test_run_cycle_skips_unchanged_products_on_second_run(db_path: str) -> None:
         patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=fake_fetch),
     ):
         counters1 = asyncio.run(
-            run_crawl_cycle(_config(), db_path, embedder, vs)  # pyright: ignore[reportArgumentType]
+            run_crawl_cycle(_config(), db_path, embedder, vs, FakeTypingProvider())
         )
 
     assert counters1["created"] == 1
@@ -170,7 +186,7 @@ def test_run_cycle_skips_unchanged_products_on_second_run(db_path: str) -> None:
         patch("estimator_king.crawler.async_pipeline.fetch_product", side_effect=fake_fetch),
     ):
         counters2 = asyncio.run(
-            run_crawl_cycle(_config(), db_path, embedder, vs)  # pyright: ignore[reportArgumentType]
+            run_crawl_cycle(_config(), db_path, embedder, vs, FakeTypingProvider())
         )
 
     assert counters2["fetched_ok"] == 1

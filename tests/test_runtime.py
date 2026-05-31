@@ -17,20 +17,23 @@ def _make_cfg(*, embedding_api_key="sk-test"):
 
 
 def test_build_providers_without_chat_skips_chat_provider():
-    """Default (with_chat=False): embedder + vector_store built, chat stays None."""
+    """Default (with_chat=False): embedder + vector_store + typing_provider built, chat stays None."""
     mock_cfg = _make_cfg()
     with patch("estimator_king.runtime.EmbeddingProvider") as mock_ep, \
          patch("estimator_king.runtime.VectorStore") as mock_vs, \
+         patch("estimator_king.runtime.TypingProvider") as mock_tp, \
          patch("estimator_king.runtime.ChatProvider") as mock_chat:
         providers = build_providers(mock_cfg)
 
     assert isinstance(providers, Providers)
     mock_ep.assert_called_once_with(mock_cfg.build_provider_config.return_value)
     mock_vs.assert_called_once_with(mock_cfg.chroma_path)
+    mock_tp.assert_called_once_with(mock_cfg.build_provider_config.return_value)
     mock_chat.assert_not_called()
     assert providers.chat is None
     assert providers.embedder is mock_ep.return_value
     assert providers.vector_store is mock_vs.return_value
+    assert providers.typing_provider is mock_tp.return_value
 
 
 def test_build_providers_with_chat_builds_chat_provider():
@@ -38,6 +41,7 @@ def test_build_providers_with_chat_builds_chat_provider():
     mock_cfg = _make_cfg()
     with patch("estimator_king.runtime.EmbeddingProvider"), \
          patch("estimator_king.runtime.VectorStore"), \
+         patch("estimator_king.runtime.TypingProvider"), \
          patch("estimator_king.runtime.ChatProvider") as mock_chat:
         providers = build_providers(mock_cfg, with_chat=True)
 
@@ -59,7 +63,7 @@ def test_serve_shares_one_vector_store_between_scheduler_and_bot():
     import asyncio as _asyncio
     from estimator_king import runtime
 
-    providers = Providers(embedder=MagicMock(), vector_store=MagicMock(), chat=MagicMock())
+    providers = Providers(embedder=MagicMock(), vector_store=MagicMock(), typing_provider=MagicMock(), chat=MagicMock())
     fake_bot = MagicMock()
     fake_bot.start = AsyncMock()
     cfg = MagicMock()

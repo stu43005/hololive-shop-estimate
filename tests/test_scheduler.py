@@ -10,12 +10,12 @@ from estimator_king.config_schema import AppConfig, CrawlerPolicy, Store
 async def test_run_once_calls_cycle(monkeypatch):
     calls = []
 
-    async def fake_cycle(config, db_path, embedder, vector_store, *, force_refetch=False):
+    async def fake_cycle(config, db_path, embedder, vector_store, typing_provider, *, force_refetch=False):
         calls.append(db_path)
         return {"errors": 0}
 
     monkeypatch.setattr("estimator_king.crawler.scheduler.run_crawl_cycle", fake_cycle)
-    sched = CrawlScheduler(config=object(), db_path="db", embedder=object(), vector_store=object())
+    sched = CrawlScheduler(config=object(), db_path="db", embedder=object(), vector_store=object(), typing_provider=object())
 
     await sched.run_once()
 
@@ -36,7 +36,7 @@ async def test_run_once_is_reentrancy_guarded(monkeypatch):
         return {"errors": 0}
 
     monkeypatch.setattr("estimator_king.crawler.scheduler.run_crawl_cycle", fake_cycle)
-    sched = CrawlScheduler(config=object(), db_path="db", embedder=object(), vector_store=object())
+    sched = CrawlScheduler(config=object(), db_path="db", embedder=object(), vector_store=object(), typing_provider=object())
 
     first = asyncio.create_task(sched.run_once())
     await started.wait()
@@ -53,7 +53,7 @@ async def test_run_once_swallows_cycle_errors(monkeypatch):
         raise RuntimeError("cycle failed")
 
     monkeypatch.setattr("estimator_king.crawler.scheduler.run_crawl_cycle", boom)
-    sched = CrawlScheduler(config=object(), db_path="db", embedder=object(), vector_store=object())
+    sched = CrawlScheduler(config=object(), db_path="db", embedder=object(), vector_store=object(), typing_provider=object())
 
     await sched.run_once()  # must not raise
 
@@ -75,7 +75,8 @@ async def test_run_forever_propagates_cancellation(monkeypatch):
 
     monkeypatch.setattr("estimator_king.crawler.scheduler.run_crawl_cycle", fake_cycle)
     sched = CrawlScheduler(
-        config=_schedulable_config(), db_path="db", embedder=object(), vector_store=object()
+        config=_schedulable_config(), db_path="db", embedder=object(), vector_store=object(),
+        typing_provider=object(),
     )
 
     task = asyncio.create_task(sched.run_forever())

@@ -135,7 +135,7 @@ def test_run_crawl_success_prints_json_and_exits_0(capsys):
     mock_cfg = _make_cfg()
     counters = {"discovered": 5, "fetched_ok": 5, "created": 2,
                 "updated": 1, "skipped": 2, "inactive": 0, "errors": 0}
-    providers = Providers(embedder=MagicMock(), vector_store=MagicMock(), chat=None)
+    providers = Providers(embedder=MagicMock(), vector_store=MagicMock(), typing_provider=MagicMock(), chat=None)
     with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
          patch("estimator_king.__main__.build_providers", return_value=providers), \
          patch("estimator_king.__main__.run_crawl_cycle", new_callable=MagicMock), \

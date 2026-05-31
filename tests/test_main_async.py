@@ -23,7 +23,7 @@ def _make_cfg(*, db="./estimator_king.db"):
 
 
 def _make_providers():
-    return Providers(embedder=MagicMock(), vector_store=MagicMock(), chat=None)
+    return Providers(embedder=MagicMock(), vector_store=MagicMock(), typing_provider=MagicMock(), chat=None)
 
 
 def test_run_crawl_passes_providers_to_cycle():
