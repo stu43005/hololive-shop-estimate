@@ -72,6 +72,23 @@ def test_creates_one_vector_per_item_with_own_price():
     repo.close()
 
 
+def test_same_name_different_price_variants_do_not_collide():
+    repo, vs = _repo(), FakeVectorStore()
+    snap = ProductSnapshot(
+        product_id=10, title="P", description="",
+        variants=[
+            ProductVariant(variant_id=1, title="グッズ / アクリルスタンド", price="500"),
+            ProductVariant(variant_id=2, title="グッズ / アクリルスタンド", price="700"),
+        ],
+        html_details={},
+    )
+    _sync(repo, vs, snap)
+    # Distinct ids (price folded into the slug) -> both prices indexed.
+    assert len(vs.docs) == 2
+    assert sorted(m["price_jpy"] for _, m in vs.docs.values()) == [500, 700]
+    repo.close()
+
+
 def test_unchanged_product_skips_reembed():
     repo, vs = _repo(), FakeVectorStore()
     _sync(repo, vs, _snap())

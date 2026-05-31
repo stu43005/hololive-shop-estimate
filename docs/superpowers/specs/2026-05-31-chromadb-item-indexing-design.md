@@ -71,7 +71,7 @@ class ProductItem:
 
 ### 4.2 每 item 向量
 
-- **向量 ID**：`f"{store_id}:{product_id}:{item_slug}"`。`item_slug` = 對 `item_name` 套用 `crawler/snapshot.py::_normalize_text`（decode HTML entities + collapse whitespace）後取 SHA-256 前 16 hex，確保同一 product 內穩定且不撞號。`_normalize_text` 目前為 `snapshot.py` 的 module-private 函式，實作時提升為可被 `items.py` import（移除底線或於 `snapshot.py` 匯出）。
+- **向量 ID**：`f"{store_id}:{product_id}:{item_slug}"`。`item_slug` = 對 `normalize_text(item_name) + "\x1f" + price_jpy` 取 SHA-256 前 16 hex（價格併入避免同 product 內「同名不同價」的非合併 variant 撞號／互相覆寫）。`normalize_text` 為 `crawler/snapshot.py` 規則（decode HTML entities + collapse whitespace）。`_normalize_text` 目前為 `snapshot.py` 的 module-private 函式，實作時提升為可被 `items.py` import（移除底線或於 `snapshot.py` 匯出）。
 - **embedding 文字**（§5.2）。
 - **metadata**：
   - `store_id: str`

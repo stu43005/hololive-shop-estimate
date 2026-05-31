@@ -50,8 +50,11 @@ class SyncResult:
     failed_ids: list[str] = field(default_factory=list)
 
 
-def _item_slug(item_name: str) -> str:
-    return hashlib.sha256(normalize_text(item_name).encode("utf-8")).hexdigest()[:16]
+def _item_slug(item_name: str, price_jpy: int) -> str:
+    # Include price so two non-merged variants in one product that share an
+    # identical residual name but differ in price get distinct ids (no overwrite).
+    payload = f"{normalize_text(item_name)}\x1f{price_jpy}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _format_item_document(item: ProductItem, item_type: str) -> str:
@@ -160,7 +163,7 @@ def _rebuild_product_items(
         )
         document = _format_item_document(item, item_type)
         item_hash = _item_hash(document, item.price_jpy, item_type)
-        item_id = f"{store_id}:{product_id}:{_item_slug(item.item_name)}"
+        item_id = f"{store_id}:{product_id}:{_item_slug(item.item_name, item.price_jpy)}"
         desired_ids.add(item_id)
         if existing.get(item_id) == item_hash:
             continue  # unchanged item — skip re-embed
