@@ -91,7 +91,7 @@ async def run_bot(config: AppConfig, *, guild_id: Optional[int]) -> None:
     from estimator_king.llm.chat import ChatProvider
     from estimator_king.vectorstore.store import VectorStore
     from estimator_king.bot.estimator import Estimator
-    from estimator_king.bot.scheduler import CrawlScheduler
+    from estimator_king.crawler.scheduler import CrawlScheduler
 
     provider_config = config.build_provider_config()
     if not provider_config.embedding_api_key:
