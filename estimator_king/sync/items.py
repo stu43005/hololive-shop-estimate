@@ -47,7 +47,7 @@ def _price_to_int(price: str) -> int | None:
 
 
 def _meaningful_tokens(text: str) -> list[str]:
-    return [t for t in normalize_text(text).split() if len(t) >= 2]
+    return [t for t in normalize_text(text).split() if len(t) >= 2]  # drop single-char tokens (CJK particles/punctuation noise)
 
 
 def _canonical_key(residual: str, talents: frozenset[str]) -> tuple[str, list[str]]:
@@ -62,9 +62,9 @@ def _canonical_key(residual: str, talents: frozenset[str]) -> tuple[str, list[st
     return " ".join(kept), removed
 
 
-def _is_option_value(residual: str, product_title: str) -> bool:  # noqa: ARG001
+def _is_option_value(residual: str) -> bool:
     norm = normalize_text(residual)
-    return len(norm) < 4 or bool(_SIZE_RE.search(norm))
+    return len(norm) < 4 or bool(_SIZE_RE.search(norm))  # too short to be a standalone item name (size/color option like "黒 M")
 
 
 def _extract_snippet(item_name: str, html_details: dict[str, str], talents: frozenset[str]) -> str:
@@ -86,11 +86,11 @@ def _extract_snippet(item_name: str, html_details: dict[str, str], talents: froz
                 continue
             score = 0
             for core in cores:
-                if len(core) >= 4 and core in seg:
+                if len(core) >= 4 and core in seg:  # ignore trivially short cores to avoid false matches
                     score = max(score, len(core))
             if score == 0:
                 overlap = len(item_tokens & set(_meaningful_tokens(seg)))
-                if overlap >= 2:
+                if overlap >= 2:  # require ≥2 shared tokens for a fallback match
                     score = overlap
             if score > best_score:
                 best_score = score
@@ -146,6 +146,7 @@ def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> li
                                            variant_ids=[vid], talents=[]))
 
     # Step 4: naming (three branches) + snippet.
+    # whole product collapsed to one item -> name it by the product title
     whole_product_single = (
         len(raw_items) == 1 and raw_items[0].residual is None and len(raw_items[0].variant_ids) >= 2
     )
@@ -153,7 +154,7 @@ def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> li
     for ri in raw_items:
         if ri.residual is None or whole_product_single:
             name = snapshot.title
-        elif _is_option_value(ri.residual, snapshot.title):
+        elif _is_option_value(ri.residual):
             name = f"{snapshot.title} {normalize_text(ri.residual)}".strip()
         else:
             name = ri.residual
