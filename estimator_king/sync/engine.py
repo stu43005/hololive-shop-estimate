@@ -1,19 +1,22 @@
-"""Sync engine: format products, embed, and upsert into the vector store.
-
-sync_products is the single writer of product rows on the success path.
+"""Sync engine: decompose products into items, classify, embed, and upsert one
+vector per item. sync_products is the single writer of product rows on success.
 """
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Iterable, Protocol
+from typing import Iterable, Protocol, Sequence
 
 from estimator_king.crawler.snapshot import (
     NORMALIZER_VERSION,
     ProductSnapshot,
     compute_content_hash,
+    normalize_text,
 )
 from estimator_king.database.repository import ProductState, ProductStateRepository
+from estimator_king.sync.items import ProductItem, decompose_items
+from estimator_king.sync.typing import classify_item
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +25,20 @@ class _Embedder(Protocol):
     def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
 
 
+class _VectorStoreHit(Protocol):
+    id: str
+    metadata: dict[str, object]
+
+
 class _VectorStore(Protocol):
     def upsert(self, id: str, document: str, embedding: list[float],
                metadata: dict[str, object]) -> None: ...
+    def delete(self, ids: list[str]) -> None: ...
+    def get_by_product(self, store_id: str, product_id: str) -> Sequence[_VectorStoreHit]: ...
+
+
+class _TypingProvider(Protocol):
+    def classify_via_llm(self, text: str, item_types: list[str]) -> str: ...
 
 
 @dataclass
@@ -36,42 +50,20 @@ class SyncResult:
     failed_ids: list[str] = field(default_factory=list)
 
 
-def _min_variant_price(snapshot: ProductSnapshot) -> int:
-    prices: list[int] = []
-    for variant in snapshot.variants:
-        try:
-            prices.append(int(float(variant.price)))
-        except (TypeError, ValueError):
-            continue
-    return min(prices) if prices else 0
+def _item_slug(item_name: str) -> str:
+    return hashlib.sha256(normalize_text(item_name).encode("utf-8")).hexdigest()[:16]
 
 
-def _format_product_document(
-    snapshot: ProductSnapshot, store_id: str, product_url: str
-) -> tuple[str, str, dict[str, object]]:
-    document_name = f"{store_id}:{snapshot.product_id} - {snapshot.title}"
-    parts: list[str] = [f"# {snapshot.title}", ""]
-    if snapshot.description.strip():
-        parts.extend([snapshot.description, ""])
-    if snapshot.variants:
-        parts.extend(["## Variants", "", "| Title | Price |", "|-------|-------|"])
-        for variant in snapshot.variants:
-            parts.append(f"| {variant.title} | {variant.price} |")
-        parts.append("")
-    for section_name, section_content in snapshot.html_details.items():
-        if section_content.strip():
-            parts.extend([f"## {section_name}", "", section_content, ""])
-    text_content = "\n".join(parts).rstrip()
+def _format_item_document(item: ProductItem, item_type: str) -> str:
+    parts = [f"{item_type} {item.item_name}", "", f"# {item.product_title}"]
+    if item.detail_snippet.strip():
+        parts.extend(["", item.detail_snippet])
+    return "\n".join(parts).rstrip()
 
-    metadata: dict[str, object] = {
-        "store_id": store_id,
-        "product_id": str(snapshot.product_id),
-        "product_url": product_url,
-        "content_hash": compute_content_hash(snapshot),
-        "title": snapshot.title,
-        "price_jpy": _min_variant_price(snapshot),
-    }
-    return document_name, text_content, metadata
+
+def _item_hash(document: str, price_jpy: int, item_type: str) -> str:
+    payload = f"{document}\x1f{price_jpy}\x1f{item_type}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def sync_products(
@@ -80,6 +72,11 @@ def sync_products(
     repository: ProductStateRepository,
     embedder: _Embedder,
     vector_store: _VectorStore,
+    *,
+    typing_provider: _TypingProvider,
+    talents: frozenset[str],
+    item_types: list[str],
+    item_types_version: int,
 ) -> SyncResult:
     result = SyncResult()
     for product_url, snapshot in items:
@@ -88,13 +85,14 @@ def sync_products(
         content_hash = compute_content_hash(snapshot)
         state = repository.get_by_external_key(external_key)
 
-        # Sitemap-tracking fields carried forward so the fetch never clobbers them.
         seen_at = state.last_seen_in_sitemap_at if state else now
         sitemap_misses = state.consecutive_sitemap_misses if state else 0
 
         unchanged = (
             state is not None
             and state.content_hash == content_hash
+            and state.normalizer_version == NORMALIZER_VERSION
+            and state.item_types_version == item_types_version
             and state.last_indexed_at is not None
         )
 
@@ -103,21 +101,19 @@ def sync_products(
             if unchanged:
                 result.skipped += 1
             else:
-                _name, text, metadata = _format_product_document(
-                    snapshot, store_id, product_url
+                _rebuild_product_items(
+                    snapshot, store_id, product_url, repository, embedder,
+                    vector_store, typing_provider, talents, item_types, item_types_version,
                 )
-                embedding = embedder.embed_documents([text])[0]
-                vector_store.upsert(external_key, text, embedding, metadata)
                 last_indexed_at = now
                 if state is None:
                     result.created += 1
                 else:
                     result.updated += 1
-        except Exception:  # embedding/vector failure: fire-and-forget
+        except Exception:  # embedding/vector/typing failure: fire-and-forget
             logger.exception("Sync failed for %s", external_key)
             result.failed += 1
             result.failed_ids.append(external_key)
-            # last_indexed_at stays at the previous value (not advanced)
 
         repository.upsert(
             ProductState(
@@ -127,6 +123,7 @@ def sync_products(
                 product_url=product_url,
                 content_hash=content_hash,
                 normalizer_version=NORMALIZER_VERSION,
+                item_types_version=item_types_version,
                 last_seen_in_sitemap_at=seen_at,
                 last_fetch_success_at=now,
                 last_indexed_at=last_indexed_at,
@@ -135,3 +132,53 @@ def sync_products(
             )
         )
     return result
+
+
+def _rebuild_product_items(
+    snapshot: ProductSnapshot,
+    store_id: str,
+    product_url: str,
+    repository: ProductStateRepository,
+    embedder: _Embedder,
+    vector_store: _VectorStore,
+    typing_provider: _TypingProvider,
+    talents: frozenset[str],
+    item_types: list[str],
+    item_types_version: int,
+) -> None:
+    product_id = str(snapshot.product_id)
+    existing = {h.id: str(h.metadata.get("item_hash", "")) for h in
+                vector_store.get_by_product(store_id, product_id)}
+
+    decomposed = decompose_items(snapshot, talents=talents)
+    desired_ids: set[str] = set()
+    for item in decomposed:
+        item_type = classify_item(
+            f"{item.item_name} {item.product_title}", item_types=item_types,
+            item_types_version=item_types_version, typing_provider=typing_provider,
+            repository=repository,
+        )
+        document = _format_item_document(item, item_type)
+        item_hash = _item_hash(document, item.price_jpy, item_type)
+        item_id = f"{store_id}:{product_id}:{_item_slug(item.item_name)}"
+        desired_ids.add(item_id)
+        if existing.get(item_id) == item_hash:
+            continue  # unchanged item — skip re-embed
+        embedding = embedder.embed_documents([document])[0]
+        metadata: dict[str, object] = {
+            "store_id": store_id,
+            "product_id": product_id,
+            "product_url": product_url,
+            "product_title": item.product_title,
+            "item_name": item.item_name,
+            "item_type": item_type,
+            "price_jpy": item.price_jpy,
+            "published_at": item.published_at,
+            "detail_snippet": item.detail_snippet,
+            "item_hash": item_hash,
+        }
+        vector_store.upsert(item_id, document, embedding, metadata)
+
+    stale = [vid for vid in existing if vid not in desired_ids]
+    if stale:
+        vector_store.delete(stale)
