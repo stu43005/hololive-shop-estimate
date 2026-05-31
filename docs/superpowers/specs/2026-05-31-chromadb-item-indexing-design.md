@@ -178,15 +178,16 @@ class ProductItem:
 def classify_item(text, *, item_types, item_types_version, typing_provider, repository) -> str:
     """索引端：必回傳單一類型字串（零命中時最終為 'その他'，永不 None）。"""
 
-def classify_query(text, *, item_types, item_types_version, typing_provider, repository) -> list[str]:
+def classify_query(text, *, item_types, item_types_version, typing_provider, repository=None) -> list[str]:
     """查詢端：回傳 0..N 個類型；第一層多重命中時全數保留供 §9 各查一遍；
-    第一層零命中時呼叫第二層得單一類型，包成單元素 list；該類型為 'その他' 時回傳空 list（不做類型過濾，只走純 embedding）。"""
+    第一層零命中時呼叫第二層得單一類型，包成單元素 list；該類型為 'その他' 時回傳空 list（不做類型過濾，只走純 embedding）。
+    repository=None（bot 查詢路徑無 ProductStateRepository）時第二層跳過快取 get/put，直接呼叫 classify_via_llm。"""
 ```
 
 兩者共用內部分層：
 
 - **第一層（零 LLM）**：對 `text`（item 端＝品項名＋product 標題；query 端＝查詢行）做受控詞彙 `item_types` **最長匹配**（詞彙詞為子字串）。命中集合：`classify_query` 保留全部命中；`classify_item` 取最長一個。恰好命中 → 直接用，**不**進第二層、**不**寫快取（決定性、無需快取）。
-- **第二層（小模型 fallback）**：第一層**零命中**（`classify_item` 亦含多重命中需收斂）時：先查快取（§6.3，key 含 `item_types_version`）；命中即用。未命中則呼叫 `typing_provider.classify_via_llm(text, item_types)`（§10.1），輸出以 `item_types` 後驗證，不在表內者一律歸 `その他`，並寫入快取。
+- **第二層（小模型 fallback）**：第一層**零命中**（`classify_item` 亦含多重命中需收斂）時：若 `repository` 非 None 先查快取（§6.3，key 含 `item_types_version`），命中即用；未命中（或 `repository=None`）則呼叫 `typing_provider.classify_via_llm(text, item_types)`（§10.1），輸出以 `item_types` 後驗證，不在表內者一律歸 `その他`，`repository` 非 None 時寫入快取。（`classify_item` 索引端一律有 `repository`；`classify_query` bot 端為 None → 不快取。）
 - **None 協調**：`classify_item` 最終一律有值（`その他` 為下限），與 §4.2「`item_type` 為單一純量字串」一致；`classify_query` 以**空 list** 表示「不過濾」，無 `None`。
 
 ### 6.3 類型快取表 `item_type_cache`（新增於 `estimator_king/database/schema.sql`）
@@ -299,7 +300,7 @@ def get_by_product(self, store_id: str, product_id: str) -> list[QueryHit]:
 
 ### 9.1 每行流程（取代 `_estimate_chunk` 內的單一 query）
 
-1. `types = typing.classify_query(line)`（0..N 個類型）。
+1. `types = typing.classify_query(line, item_types=self._item_types, item_types_version=self._item_types_version, typing_provider=self._typing_provider, repository=None)`（0..N 個類型；bot 端無 repository → 第二層不快取）。`Estimator` 於建構時收下 `typing_provider`、`item_types`、`item_types_version`（§10.2）。
 2. 檢索並合併（去重 by 向量 ID，保留最小 distance 者）：
    - 對 `types` 中每個類型各做一次 `vector_store.query(emb, n_results=estimator_top_k, where={"item_type": T})`；
    - 另做一次 `vector_store.query(emb, n_results=estimator_top_k)`（純 embedding，不過濾）；
@@ -419,7 +420,7 @@ estimator:
 ```
 
 - typing env（`TYPING_MODEL`／`TYPING_BASE_URL`／`TYPING_API_KEY`）於 `load_config` 以 `os.getenv` 讀入 `AppConfig.typing_*` 欄位（同 §10.1，AppConfig 亦新增對應 `typing_model: str = "gpt-4o-mini"`、`typing_base_url: str | None = None`、`typing_api_key: str | None = None`）。
-- 注入：`Estimator.__init__`（[estimator.py:44](../../../estimator_king/bot/estimator.py)，已有 `top_k=10`）新增 `recency_weight: float = 0.05` 與查詢端 typing 所需的 `typing_provider`。唯一實例化點在 **`build_bot`（[bot/runner.py:45](../../../estimator_king/bot/runner.py)）**（非 `runtime`），該處持有 `config`：改為 `Estimator(embedder, chat, vector_store, typing_provider, top_k=config.estimator_top_k, recency_weight=config.estimator_recency_weight)`。`decompose_items`／索引端 typing 的 `talents`／`item_types`／`item_types_version` 走 §7.4 的 crawl 呼叫鏈。
+- 注入：`Estimator.__init__`（[estimator.py:44](../../../estimator_king/bot/estimator.py)，已有 `top_k=10`）新增 `typing_provider`、`item_types: list[str]`、`item_types_version: int`、`recency_weight: float = 0.05`（查詢端 §9.1 step 1 `classify_query` 需要前三者；bot 端 `repository=None` 不需 repo）。唯一實例化點在 **`build_bot`（[bot/runner.py:45](../../../estimator_king/bot/runner.py)）**（非 `runtime`），該處持有 `config` 與 `providers.typing`：改為 `Estimator(embedder, chat, vector_store, typing_provider, item_types=config.item_types, item_types_version=config.item_types_version, top_k=config.estimator_top_k, recency_weight=config.estimator_recency_weight)`。`decompose_items`／索引端 typing 的 `talents`／`item_types`／`item_types_version` 走 §7.4 的 crawl 呼叫鏈。`build_bot` 需新增 `typing_provider` 參數，由 `serve` 傳入 `providers.typing`（§10.3）。
 - `AppConfig.validate` 為結構驗證；`item_types`／`talents` 允許為空（空 `talents` → 不去重；空 `item_types` → 第一層永不命中、全走第二層或 `その他`），不在 `validate` 強制。
 
 ### 10.3 `build_providers`／`Providers` 擴充（[runtime.py](../../../estimator_king/runtime.py)）
@@ -462,7 +463,7 @@ estimator:
   - `detail_snippet` 擷取：section 含「・<品項名> …」時取對應規格行；無對應行時為空字串（不退回整段 description）。
 - `tests/test_typing.py`：第一層最長匹配（唯一命中／多重命中／零命中）；`classify_item` 零命中→第二層→`その他`（永不 None）；`classify_query` 多重命中回多元素、`その他`→空 list；第二層後驗證歸 `その他`；快取命中不呼叫 `classify_via_llm`（fake provider 計數，含 `item_types_version` 失效）。
 - `tests/test_engine_items.py`：逐 item upsert；過時 item 向量刪除；`item_hash` 相同略過重嵌；gating key（含 `item_types_version`）。
-- `tests/test_estimator.py`：逐行多類型各查 + 純查合併去重（同 ID 保留最小 distance）；零類型只純查；recency rerank 排序（fake hits 帶 `published_at`）；recency 邊界：候選含 `published_at==0` 時該項 `recency_norm=0` 且不參與 min/max、`>0` 候選 < 2 時退化純相似度；脈絡行格式（含 `0` → `?` 日期）。
+- `tests/test_estimator.py`：`Estimator` 以注入的 `item_types`/`item_types_version`/fake `typing_provider` 及 `repository=None` 呼叫 `classify_query`（驗證關鍵字參數）；逐行多類型各查 + 純查合併去重（同 ID 保留最小 distance）；零類型只純查；recency rerank 排序（fake hits 帶 `published_at`）；recency 邊界：候選含 `published_at==0` 時該項 `recency_norm=0` 且不參與 min/max、`>0` 候選 < 2 時退化純相似度；脈絡行格式（含 `0` → `?` 日期）。
 - `tests/test_config_schema.py`：`load_config` 解析 `item_types`／`item_types_version`／`talents`／`estimator.top_k`／`estimator.recency_weight`（含預設值回落）；typing env cascade 經 `build_provider_config`。
 - `tests/test_runtime.py`／`tests/test_scheduler.py`：`build_providers` 產出含 `typing` 的 `Providers`；`CrawlScheduler.__init__` 接 `typing_provider` 並於 `run_once` 轉傳給 `run_crawl_cycle`（serve 索引端接線；fake provider 驗證傳遞）。
 - `tests/test_shopify.py`（或既有）：`published_at` 解析（ISO8601 → epoch、缺失回落 `created_at`、再缺 `0`）；`ProductSnapshotWithHash` 帶 `published_at` 仍可 import/建構（驗證 dataclass 排序修正）。
