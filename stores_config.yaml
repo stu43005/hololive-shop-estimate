@@ -49,11 +49,34 @@ crawler:
 proxy:
   # Enable/disable proxy support
   enabled: false
-  
+
   # HTTP proxy (populated from environment if enabled)
   # Uses HTTP_PROXY env var, falls back to empty string
   http_proxy: ""
-  
+
   # HTTPS proxy (populated from environment if enabled)
   # Uses HTTPS_PROXY env var, falls back to empty string
   https_proxy: ""
+
+item_types:
+  - タペストリー
+  - アクリルスタンド
+  - アクリルキーホルダー
+  - 缶バッジ
+  - ぬいぐるみ
+  - キーホルダー
+  - ネックレス
+  - ポーチ
+  - ボイス
+  - Tシャツ
+  - タオル
+item_types_version: 1
+
+talents:
+  - 博衣こより
+  - 白銀ノエル
+  - 尾丸ポルカ
+
+estimator:
+  top_k: 10
+  recency_weight: 0.05
