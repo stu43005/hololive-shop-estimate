@@ -391,7 +391,10 @@ size/variant differs; low = only cross-type or weak matches.
 ```
 
 - env：`TYPING_MODEL`、`TYPING_BASE_URL`、`TYPING_API_KEY` 於 `load_config`（[config_schema.py:181](../../../estimator_king/config_schema.py)）以 `os.getenv` 讀入 `AppConfig.typing_*`；cascade（未設定回落 chat，再回落 openai）在 `build_provider_config` 組 `ProviderConfig` 時套用（見 §10.2）。
-- 新增 `TypingProvider`（`estimator_king/llm/typing_provider.py`）：建構子 `TypingProvider(config: ProviderConfig)`（持有以 `typing_api_key`/`typing_base_url` 建的 OpenAI client 與 `typing_model`）。唯一方法 `classify_via_llm(text: str, item_types: list[str]) -> str`：以 §6.5 prompt（`{item_types}` 代入）呼叫 `typing_model`，json_object 模式取 `item_type` 字串回傳（後驗證在 §6.2 module 函式做，與 [llm/chat.py](../../../estimator_king/llm/chat.py) 的 fallback 模式一致，相容 ollama）。`TypingProvider` **不**持有 `item_types`／不碰快取——兩層編排與快取由 §6.2 module 函式負責。
+- 新增 `TypingProvider`（`estimator_king/llm/typing_provider.py`）：建構子 `TypingProvider(config: ProviderConfig)` **只存 `config`，不立即建 OpenAI client**。OpenAI client 於首次 `classify_via_llm` 呼叫時 **lazy 建構**（以 `typing_api_key`/`typing_base_url`/`typing_model`，建後快取於實例）。
+  - **為何 lazy（阻斷級理由）**：`build_providers` 對 crawl 與 serve 皆無條件建 `TypingProvider`（§10.3）。crawl 路徑常只設 `EMBEDDING_API_KEY`（local-embed split／ollama），此時 `typing_api_key` cascade 後為 `""`，**eager** `OpenAI(api_key="")` 會 raise `OpenAIError` 使 `crawl` exit 1——這正是姊妹設計 `decouple-bot-crawl` 已以 `with_chat=False` 堵掉的回歸（[runtime.py](../../../estimator_king/runtime.py) 對 `ChatProvider` 同理）。lazy 建構讓 crawl 穩態（第一層受控詞彙命中即零 LLM）永不觸發 client 建構。
+  - 唯一方法 `classify_via_llm(text: str, item_types: list[str]) -> str`：lazy 取得 client，以 §6.5 prompt（`{item_types}` 代入）呼叫 `typing_model`，json_object 模式取 `item_type` 字串回傳（後驗證在 §6.2 module 函式做，與 [llm/chat.py](../../../estimator_king/llm/chat.py) 的 fallback 模式一致，相容 ollama）。
+  - `TypingProvider` **不**持有 `item_types`／不碰快取——兩層編排與快取由 §6.2 module 函式負責。
 
 - `build_provider_config`（[config_schema.py:146](../../../estimator_king/config_schema.py)）新增傳入：`typing_model=self.typing_model`、`typing_base_url=self.typing_base_url or self.chat_base_url or self.openai_base_url`、`typing_api_key=self.typing_api_key or self.chat_api_key or self.openai_api_key or ""`。
 
@@ -437,7 +440,7 @@ estimator:
 ### 10.3 `build_providers`／`Providers` 擴充（[runtime.py](../../../estimator_king/runtime.py)）
 
 - `Providers` 容器新增 `typing: TypingProvider`（crawl 與 serve 皆需）。
-- `build_providers(config, *, with_chat=...)` 在建 `embedder`／`vector_store` 後，以 `config.build_provider_config()` 產出的 `ProviderConfig`（含 §10.1 typing 欄位）建構 `TypingProvider` 放入容器。
+- `build_providers(config, *, with_chat=...)` 在建 `embedder`／`vector_store` 後，以 `config.build_provider_config()` 產出的 `ProviderConfig`（含 §10.1 typing 欄位）**無條件**建構 `TypingProvider` 放入容器。無條件建構安全，因 `TypingProvider.__init__` 不建 client（lazy，§10.1）——即使 crawl 路徑 `typing_api_key=""` 也不會在此 raise。
 - CLI `crawl` 路徑：`__main__` 的 crawl 指令傳 `providers.typing` 給 `run_crawl_cycle`（§7.4）。
 - serve 路徑有**兩條**接線（[runtime.py:114](../../../estimator_king/runtime.py) `serve`）：
   - 查詢端（index 已建好的向量）：`build_bot` 接 `providers.typing` → 注入 `Estimator`（§10.2）。
@@ -459,7 +462,7 @@ estimator:
 
 ## 13. 錯誤處理
 
-- **typing 小模型失敗**：第二層呼叫例外時，記錄並回傳 `その他`（不阻斷索引／查詢）。索引端沿用 [sync/engine.py](../../../estimator_king/sync/engine.py) 既有「embed/vector 失敗 fire-and-forget、不前進 `last_indexed_at`」策略。
+- **typing 小模型失敗**：第二層的 `classify_via_llm`（含 lazy client 建構，§10.1）任何例外（含空 key 的 `OpenAIError`、網路、解析）由 §6.2 module 函式 catch，記錄並回傳 `その他`（不阻斷索引／查詢）。索引端沿用 [sync/engine.py](../../../estimator_king/sync/engine.py) 既有「embed/vector 失敗 fire-and-forget、不前進 `last_indexed_at`」策略。
 - **去重輸入異常**（價格無法解析）：該 variant 比照 ¥0 規則略過。
 - **`published_at` 缺失**：metadata 記 `0`；recency rerank 時不參與 `min_pub`／`max_pub`、`recency_norm` 固定為 `0`（無加成），規則見 §9.1 step 3。
 - **查詢端類型過濾後零命中**：純 embedding 查詢必定執行，保證脈絡不空。
@@ -476,7 +479,7 @@ estimator:
 - `tests/test_engine_items.py`：逐 item upsert；過時 item 向量刪除；`item_hash` 相同略過重嵌；gating key（含 `item_types_version`）。
 - `tests/test_estimator.py`：`Estimator` 以注入的 `item_types`/`item_types_version`/fake `typing_provider` 及 `repository=None` 呼叫 `classify_query`（驗證關鍵字參數）；逐行多類型各查 + 純查合併去重（同 ID 保留最小 distance）；零類型只純查；recency rerank 排序（fake hits 帶 `published_at`）；recency 邊界：候選含 `published_at==0` 時該項 `recency_norm=0` 且不參與 min/max、`>0` 候選 < 2 時退化純相似度；脈絡行格式（含 `0` → `?` 日期）。
 - `tests/test_config_schema.py`：`load_config` 解析 `item_types`／`item_types_version`／`talents`／`estimator.top_k`／`estimator.recency_weight`（含預設值回落）；typing env cascade 經 `build_provider_config`。
-- `tests/test_runtime.py`／`tests/test_scheduler.py`：`build_providers` 產出含 `typing` 的 `Providers`；`CrawlScheduler.__init__` 接 `typing_provider` 並於 `run_once` 轉傳給 `run_crawl_cycle`（serve 索引端接線；fake provider 驗證傳遞）。
+- `tests/test_runtime.py`／`tests/test_scheduler.py`：`build_providers` 產出含 `typing` 的 `Providers`；空 `typing_api_key`（僅設 `EMBEDDING_API_KEY`）時 `build_providers` 不 raise（lazy client，§10.1）、crawl 第一層命中路徑不建 client；`CrawlScheduler.__init__` 接 `typing_provider` 並於 `run_once` 轉傳給 `run_crawl_cycle`（serve 索引端接線；fake provider 驗證傳遞）。
 - `tests/test_shopify.py`（或既有）：`published_at` 解析（ISO8601 → epoch、缺失回落 `created_at`、再缺 `0`）；`ProductSnapshotWithHash` 帶 `published_at` 仍可 import/建構（驗證 dataclass 排序修正）。
 - 驗證工具鏈（[CLAUDE.md](../../../CLAUDE.md)）：`.venv/bin/basedpyright estimator_king`（prod 0 error）、`uvx ruff check`、相關 `pytest -o addopts=""`。
 
