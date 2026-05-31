@@ -13,8 +13,7 @@ from typing import Optional, Sequence
 
 from estimator_king.config_schema import AppConfig
 from estimator_king.crawler.cycle import run_crawl_cycle
-from estimator_king.llm.embeddings import EmbeddingProvider
-from estimator_king.vectorstore.store import VectorStore
+from estimator_king.runtime import build_providers, MissingEmbeddingKey
 from estimator_king.bot import runner as bot_runner
 
 logger = logging.getLogger(__name__)
@@ -68,16 +67,15 @@ def run_crawl(args: argparse.Namespace) -> None:
 
     if args.db is not None:
         config.database_path = args.db
-    provider_config = config.build_provider_config()
-    if not provider_config.embedding_api_key:
+    try:
+        providers = build_providers(config)
+    except MissingEmbeddingKey:
         logger.error("OPENAI_API_KEY (or EMBEDDING_API_KEY) is required")
         sys.exit(2)
-
-    embedder = EmbeddingProvider(provider_config)
-    vector_store = VectorStore(config.chroma_path)
     try:
         counters = asyncio.run(
-            run_crawl_cycle(config, config.database_path, embedder, vector_store,
+            run_crawl_cycle(config, config.database_path,
+                            providers.embedder, providers.vector_store,
                             force_refetch=args.force_refetch))
     except Exception as e:
         logger.error("Crawler failed: %s", e)
