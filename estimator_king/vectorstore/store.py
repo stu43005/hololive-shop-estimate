@@ -54,6 +54,24 @@ class VectorStore:
         if ids:
             _ = self._collection.delete(ids=ids)
 
+    def get_by_product(self, store_id: str, product_id: str) -> list[QueryHit]:
+        result = self._collection.get(
+            where={"$and": [{"store_id": store_id}, {"product_id": product_id}]},
+            include=["documents", "metadatas"],
+        )
+        ids = result.get("ids") or []
+        documents = result.get("documents") or []
+        metadatas = result.get("metadatas") or []
+        return [
+            QueryHit(
+                id=ids[i],
+                document=(documents[i] if i < len(documents) else "") or "",
+                metadata=dict(metadatas[i] or {}) if i < len(metadatas) else {},
+                distance=0.0,
+            )
+            for i in range(len(ids))
+        ]
+
     def query(
         self,
         embedding: list[float],
