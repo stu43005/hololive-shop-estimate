@@ -186,8 +186,10 @@ def classify_query(text, *, item_types, item_types_version, typing_provider, rep
 
 兩者共用內部分層：
 
-- **第一層（零 LLM）**：對 `text`（item 端＝品項名＋product 標題；query 端＝查詢行）做受控詞彙 `item_types` **最長匹配**（詞彙詞為子字串）。命中集合：`classify_query` 保留全部命中；`classify_item` 取最長一個。恰好命中 → 直接用，**不**進第二層、**不**寫快取（決定性、無需快取）。
-- **第二層（小模型 fallback）**：第一層**零命中**（`classify_item` 亦含多重命中需收斂）時：若 `repository` 非 None 先查快取（§6.3，key 含 `item_types_version`），命中即用；未命中（或 `repository=None`）則呼叫 `typing_provider.classify_via_llm(text, item_types)`（§10.1），輸出以 `item_types` 後驗證，不在表內者一律歸 `その他`，`repository` 非 None 時寫入快取。（`classify_item` 索引端一律有 `repository`；`classify_query` bot 端為 None → 不快取。）
+- **第一層（零 LLM、決定性）**：對 `text`（item 端＝品項名＋product 標題；query 端＝查詢行）做受控詞彙 `item_types` **最長匹配**（詞彙詞為子字串）。命中（≥1 個）→ 直接用，**不**進第二層、**不**寫快取：
+  - `classify_item`：多重命中時取**最長**一個（決定性收斂，不呼叫 LLM）。
+  - `classify_query`：保留**全部**命中（供 §9 各查一遍）。
+- **第二層（小模型 fallback）**：**僅當第一層零命中**時觸發：若 `repository` 非 None 先查快取（§6.3，key 含 `item_types_version`），命中即用；未命中（或 `repository=None`）則呼叫 `typing_provider.classify_via_llm(text, item_types)`（§10.1），輸出以 `item_types` 後驗證，不在表內者一律歸 `その他`，`repository` 非 None 時寫入快取。（`classify_item` 索引端一律有 `repository`；`classify_query` bot 端為 None → 不快取。）
 - **None 協調**：`classify_item` 最終一律有值（`その他` 為下限），與 §4.2「`item_type` 為單一純量字串」一致；`classify_query` 以**空 list** 表示「不過濾」，無 `None`。
 
 ### 6.3 類型快取表 `item_type_cache`（新增於 `estimator_king/database/schema.sql`）
@@ -300,7 +302,7 @@ def get_by_product(self, store_id: str, product_id: str) -> list[QueryHit]:
 
 ### 9.1 每行流程（取代 `_estimate_chunk` 內的單一 query）
 
-1. `types = typing.classify_query(line, item_types=self._item_types, item_types_version=self._item_types_version, typing_provider=self._typing_provider, repository=None)`（0..N 個類型；bot 端無 repository → 第二層不快取）。`Estimator` 於建構時收下 `typing_provider`、`item_types`、`item_types_version`（§10.2）。
+1. `types = typing.classify_query(line, item_types=self._item_types, item_types_version=self._item_types_version, typing_provider=self._typing_provider, repository=None)`（0..N 個類型；bot 端無 repository → 第二層不快取）。`Estimator` 於建構時收下 `typing_provider`、`item_types`、`item_types_version`、`recency_weight`（§10.2），分別存為 `self._typing_provider`／`self._item_types`／`self._item_types_version`／`self._recency_weight`。
 2. 檢索並合併（去重 by 向量 ID，保留最小 distance 者）：
    - 對 `types` 中每個類型各做一次 `vector_store.query(emb, n_results=estimator_top_k, where={"item_type": T})`；
    - 另做一次 `vector_store.query(emb, n_results=estimator_top_k)`（純 embedding，不過濾）；
@@ -317,7 +319,7 @@ def get_by_product(self, store_id: str, product_id: str) -> list[QueryHit]:
    - `min_pub`／`max_pub` 取自**本次候選集合中 `published_at > 0`** 的項（排除缺失值，非全 collection）。
    - 缺失（`published_at == 0`）的候選其 `recency_norm` 固定為 `0`（無 recency 加成），且不參與 `min_pub`／`max_pub` 計算——避免缺失值（1970）把分母撐大、稀釋真實日期的 recency 訊號。
    - 當 `published_at > 0` 的候選 < 2 個（無法形成區間）或 `max_pub == min_pub` 時，全體 `recency_norm = 0`（避免除零，退化為純相似度排序）。
-   - `λ = estimator_recency_weight`（§10，預設小值，僅在相似度接近時影響排序）。
+   - `λ = self._recency_weight`（建構時由 `config.estimator_recency_weight` 注入，§10.2；預設小值，僅在相似度接近時影響排序）。
 4. 組脈絡行（讀新 metadata 鍵，**不再讀**舊 `title`）：`- {item_name} | {item_type} | ¥{price_jpy} | {YYYY-MM} | {store_id}`；其中 `YYYY-MM` 由 `published_at` 換算（`0` → 顯示 `?`）。若 `detail_snippet` 非空，再接一行縮排的規格片段（截斷至約 120 全形字）。讓 chat model 能依規格（size／材質）對齊比價，而非只靠品項名。
 
 ### 9.2 size 註記
