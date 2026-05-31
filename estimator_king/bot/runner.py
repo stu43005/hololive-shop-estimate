@@ -48,6 +48,8 @@ def build_bot(
         embedder, chat, vector_store, typing_provider,
         item_types=config.item_types,
         item_types_version=config.item_types_version,
+        top_k=config.estimator_top_k,
+        recency_weight=config.estimator_recency_weight,
     )
     bot = create_bot()
     tree = setup_commands(bot, config, estimator)
