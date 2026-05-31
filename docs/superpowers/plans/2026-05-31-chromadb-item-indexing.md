@@ -46,6 +46,30 @@
 
 ---
 
+## Existing Tests Broken by Signature Changes (MUST update in the listed task)
+
+Several signature changes break **pre-existing** tests. Each is handled inside the task that makes the change (also called out below so nothing is missed). The full suite (Task 21) must stay green.
+
+A shared minimal fake is used wherever a `TypingProvider` is needed in these updates:
+
+```python
+class FakeTypingProvider:
+    def classify_via_llm(self, text, item_types):
+        return "その他"
+```
+
+| Existing test file | Breaks because | Fix (in Task) |
+|---|---|---|
+| `tests/test_sync_engine.py`, `tests/test_sync_engine_logging.py` | Test the **old** product-level `sync_products` + removed `_format_product_document`/`_min_variant_price` | **Task 10:** `git rm` both (obsolete; superseded by `tests/test_engine_items.py`). Port the "Sync failed for %s" exception-log assertion into `test_engine_items.py` if you want to keep it. |
+| `tests/test_async_pipeline.py` (all `async_process_queue(...)` call sites), `tests/test_async_pipeline_logging.py` | `async_process_queue` gains required kw-only `typing_provider`/`talents`/`item_types`/`item_types_version` | **Task 11:** add `typing_provider=FakeTypingProvider(), talents=frozenset(), item_types=[], item_types_version=0` to **every** call. |
+| `tests/test_crawl_cycle.py` (3 calls), `tests/test_integration_async_pipeline.py` (3 calls) | `run_crawl_cycle` gains positional `typing_provider` (5th arg, before `*`) | **Task 12:** insert `FakeTypingProvider()` as the 5th positional arg in every call. |
+| `tests/test_scheduler.py` (4 `CrawlScheduler(...)` + `fake_cycle` signature) | `CrawlScheduler.__init__` gains required `typing_provider`; `run_once` passes it positionally to `run_crawl_cycle` | **Task 13:** add `typing_provider=object()` to the 4 constructions; change `fake_cycle` to `async def fake_cycle(config, db_path, embedder, vector_store, typing_provider, *, force_refetch=False)`. |
+| `tests/test_runtime.py`, `tests/test_main_async.py`, `tests/test_cli.py` (`Providers(...)`) | `Providers` gains required `typing` field | **Task 14:** add `typing=MagicMock()` (or a `FakeTypingProvider()`) to every `Providers(...)` construction. Positional-index assertions on the `CrawlScheduler(...)`/`run_crawl_cycle(...)` mocks still hold (vector_store stays `args[3]`, `typing_provider` is keyword/5th-positional). |
+| `tests/test_e2e_mocked.py` (4 `Estimator(...)` + pre-seeded metadata) | `Estimator.__init__` new signature; `_format_reference` reads new metadata keys | **Task 16:** add `FakeTypingProvider()` + `item_types=[...], item_types_version=1` to the 4 calls; change the pre-seeded vector metadata from `{title, price_jpy, store_id}` to the new schema (`item_name, item_type, price_jpy, published_at, store_id, detail_snippet`) and assert on `item_name`. |
+| `tests/test_estimator_logging.py` (`Estimator(...)` + chunk-debug log assertions) | new `Estimator` signature; rewrite keeps the per-chunk `logger.debug` line so the assertion survives | **Task 16:** fix the constructor call; the rewritten `estimate_products` (below) **retains** the `chunk %d/%d: %d products` debug line so `test_chunk_debug_and_done_info` still passes. |
+
+---
+
 ## Task 1: Expose `normalize_text` and add `published_at` to ProductSnapshot
 
 **Files:**
@@ -497,19 +521,12 @@ def test_product_state_carries_item_types_version():
 def test_type_cache_roundtrip_and_list_other():
     repo = _repo()
     assert repo.get_cached_type("hash-a") is None
-    repo.put_cached_type("hash-a", "ぬいぐるみ", 1)
-    repo.put_cached_type("hash-b", "その他", 1)
+    repo.put_cached_type("hash-a", "ぬいぐるみ", 1, text_sample="もちもちぬいぐるみ")
+    repo.put_cached_type("hash-b", "その他", 1, text_sample="謎の物体")
     assert repo.get_cached_type("hash-a") == "ぬいぐるみ"
-    assert repo.list_other_typed(10) == ["hash-b"] or repo.list_other_typed(10) == []  # see note
+    # list_other_typed returns readable text samples (not hashes) for vocab review.
+    assert repo.list_other_typed(10) == ["謎の物体"]
     repo.close()
-```
-
-> Note on `list_other_typed`: it lists the cache *text_hash* values typed as `その他`. The test accepts either the hash list or empty depending on whether sample text is stored; the implementation below stores only `text_hash`, so adjust the assertion in Step 3 to match the actual return (we store and return `text_hash`).
-
-Replace the last assertion's note by making it concrete — change the test's final assertion to:
-
-```python
-    assert repo.list_other_typed(10) == ["hash-b"]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -527,11 +544,12 @@ In `estimator_king/database/schema.sql`, add `item_types_version INTEGER` to the
     item_types_version INTEGER,
 ```
 
-Add the cache table at the end of the file:
+Add the cache table at the end of the file. It stores the **normalized text sample** (not just the hash) so `list_other_typed` can surface human-readable items for vocabulary review (spec §6.4):
 
 ```sql
 CREATE TABLE IF NOT EXISTS item_type_cache (
     text_hash          TEXT PRIMARY KEY,
+    text_sample        TEXT NOT NULL,
     item_type          TEXT NOT NULL,
     item_types_version INTEGER NOT NULL,
     created_at         TEXT NOT NULL
@@ -626,24 +644,27 @@ And the params tuple (insert `item_types_version` right after `state.normalizer_
             ).fetchone()
             return None if row is None else str(row["item_type"])
 
-    def put_cached_type(self, text_hash: str, item_type: str, version: int) -> None:
+    def put_cached_type(self, text_hash: str, item_type: str, version: int,
+                        text_sample: str) -> None:
         with self._lock:
             _ = self.connection.execute(
-                "INSERT INTO item_type_cache (text_hash, item_type, item_types_version, created_at)"
-                " VALUES (?, ?, ?, ?)"
+                "INSERT INTO item_type_cache (text_hash, text_sample, item_type, item_types_version, created_at)"
+                " VALUES (?, ?, ?, ?, ?)"
                 " ON CONFLICT(text_hash) DO UPDATE SET"
-                " item_type=excluded.item_type, item_types_version=excluded.item_types_version",
-                (text_hash, item_type, int(version), _dt_to_iso(_utc_now())),
+                " text_sample=excluded.text_sample, item_type=excluded.item_type,"
+                " item_types_version=excluded.item_types_version",
+                (text_hash, text_sample, item_type, int(version), _dt_to_iso(_utc_now())),
             )
 
     def list_other_typed(self, limit: int) -> list[str]:
+        """Distinct readable item texts classified as 'その他', for vocab review (§6.4)."""
         with self._lock:
             rows = self.connection.execute(
-                "SELECT text_hash FROM item_type_cache WHERE item_type = 'その他'"
-                " ORDER BY created_at DESC LIMIT ?",
+                "SELECT DISTINCT text_sample FROM item_type_cache WHERE item_type = 'その他'"
+                " ORDER BY text_sample LIMIT ?",
                 (int(limit),),
             ).fetchall()
-            return [str(r["text_hash"]) for r in rows]
+            return [str(r["text_sample"]) for r in rows]
 ```
 
 - [ ] **Step 5: Run test to verify it passes**
@@ -667,11 +688,11 @@ git commit -m "feat(db): item_types_version column + idempotent migration; item_
 
 **Files:**
 - Modify: `estimator_king/config_schema.py`
-- Test: `tests/test_config_schema.py` (existing — add cases)
+- Test: `tests/test_config_schema.py` (create — `tests/test_config.py` already exists with a different one-arg `_write_yaml`; a separate file avoids the helper-name collision)
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/test_config_schema.py`:
+Create `tests/test_config_schema.py`:
 
 ```python
 import os
@@ -688,6 +709,10 @@ def _write_yaml(tmp_path, body: str) -> str:
 
 def test_load_config_parses_typing_and_estimator_sections(tmp_path, monkeypatch):
     monkeypatch.delenv("TYPING_MODEL", raising=False)
+    monkeypatch.delenv("TYPING_API_KEY", raising=False)
+    monkeypatch.delenv("TYPING_BASE_URL", raising=False)
+    monkeypatch.delenv("CHAT_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     path = _write_yaml(tmp_path, """
         stores:
@@ -869,7 +894,17 @@ def test_themed_series_not_merged_even_at_same_price():
     ])
     items = decompose_items(snap, talents=TALENTS)
     names = sorted(i.item_name for i in items)
-    assert names == ["Start your Journey ポーチ", "Start your Journey プレート"]
+    # Codepoint sort: プ (U+30D7) < ポ (U+30DD).
+    assert names == ["Start your Journey プレート", "Start your Journey ポーチ"]
+
+
+def test_unparseable_price_variant_is_dropped():
+    snap = _snap("P", [
+        ("グッズ / 謎の値段", "N/A"),
+        ("グッズ / アクリルスタンド", "500"),
+    ])
+    items = decompose_items(snap, talents=TALENTS)
+    assert [i.item_name for i in items] == ["アクリルスタンド"]
 
 
 def test_short_option_value_prepends_product_title():
@@ -1114,8 +1149,6 @@ git commit -m "feat(sync): decompose_items with talent-gated dedup, naming, snip
 Create `tests/test_typing.py`:
 
 ```python
-import hashlib
-
 from estimator_king.sync.typing import classify_item, classify_query
 
 ITEM_TYPES = ["ぬいぐるみ", "キーホルダー", "ポーチ", "タオル"]
@@ -1138,7 +1171,7 @@ class FakeRepo:
     def get_cached_type(self, h):
         return self.store.get(h)
 
-    def put_cached_type(self, h, t, v):
+    def put_cached_type(self, h, t, v, text_sample):
         self.store[h] = t
 
 
@@ -1237,7 +1270,8 @@ class _TypingProvider(Protocol):
 
 class _Cache(Protocol):
     def get_cached_type(self, text_hash: str) -> str | None: ...
-    def put_cached_type(self, text_hash: str, item_type: str, version: int) -> None: ...
+    def put_cached_type(self, text_hash: str, item_type: str, version: int,
+                        text_sample: str) -> None: ...
 
 
 def _vocab_hits(text: str, item_types: list[str]) -> list[str]:
@@ -1269,7 +1303,7 @@ def _llm_classify(
     if result not in item_types:
         result = OTHER
     if repository is not None:
-        repository.put_cached_type(key, result, version)
+        repository.put_cached_type(key, result, version, normalize_text(text))
     return result
 
 
@@ -1697,7 +1731,15 @@ def _rebuild_product_items(
 Run: `.venv/bin/python -m pytest tests/test_engine_items.py -v -o addopts=""`
 Expected: PASS.
 
-- [ ] **Step 5: Type-check, lint, commit**
+- [ ] **Step 5: Remove obsolete product-level tests**
+
+`tests/test_sync_engine.py` and `tests/test_sync_engine_logging.py` test the **old** product-level `sync_products` and the removed `_format_product_document`/`_min_variant_price` — they no longer apply. The new behavior is covered by `tests/test_engine_items.py`. If you want to keep the "Sync failed for %s" exception-log assertion, port that one test into `test_engine_items.py` first.
+
+```bash
+git rm tests/test_sync_engine.py tests/test_sync_engine_logging.py
+```
+
+- [ ] **Step 6: Type-check, lint, commit**
 
 ```bash
 .venv/bin/basedpyright estimator_king
@@ -1762,11 +1804,11 @@ async def async_process_queue(
                 )
 ```
 
-- [ ] **Step 3: Update existing test call (if any) and run**
+- [ ] **Step 3: Update existing test calls (per migration table) and run**
 
-If `tests/test_async_pipeline.py` calls `async_process_queue`, add the new keyword args (`typing_provider=FakeTypingProvider(), talents=frozenset(), item_types=[], item_types_version=0`) with a local `FakeTypingProvider` exposing `classify_via_llm`.
+Add a module-level `FakeTypingProvider` (shared fake) to `tests/test_async_pipeline.py` and `tests/test_async_pipeline_logging.py`, then add the new keyword args (`typing_provider=FakeTypingProvider(), talents=frozenset(), item_types=[], item_types_version=0`) to **every** `async_process_queue(...)` call in both files.
 
-Run: `.venv/bin/python -m pytest tests/test_async_pipeline.py -v -o addopts=""`
+Run: `.venv/bin/python -m pytest tests/test_async_pipeline.py tests/test_async_pipeline_logging.py -v -o addopts=""`
 Expected: PASS.
 
 - [ ] **Step 4: Type-check, lint, commit**
@@ -1774,7 +1816,7 @@ Expected: PASS.
 ```bash
 .venv/bin/basedpyright estimator_king
 uvx ruff check estimator_king
-git add estimator_king/crawler/async_pipeline.py tests/test_async_pipeline.py
+git add estimator_king/crawler/async_pipeline.py tests/test_async_pipeline.py tests/test_async_pipeline_logging.py
 git commit -m "feat(crawler): thread typing_provider/talents/item_types through async_process_queue"
 ```
 
@@ -1784,7 +1826,7 @@ git commit -m "feat(crawler): thread typing_provider/talents/item_types through 
 
 **Files:**
 - Modify: `estimator_king/crawler/cycle.py`
-- Test: `tests/test_cycle.py` (existing — update call if present)
+- Test: `tests/test_crawl_cycle.py`, `tests/test_integration_async_pipeline.py` (existing — update calls per the migration table)
 
 - [ ] **Step 1: Implement**
 
@@ -1822,11 +1864,11 @@ async def run_crawl_cycle(
                         proxy=config.proxy)
 ```
 
-- [ ] **Step 2: Run existing cycle tests; update calls**
+- [ ] **Step 2: Update existing test calls (per migration table)**
 
-If `tests/test_cycle.py` calls `run_crawl_cycle`, insert a fake typing provider positional arg (`..., vector_store, FakeTypingProvider(), force_refetch=...)`).
+Add a module-level `FakeTypingProvider` (the shared fake) and insert `FakeTypingProvider()` as the 5th positional arg into every `run_crawl_cycle(...)` call in `tests/test_crawl_cycle.py` (3 calls) and `tests/test_integration_async_pipeline.py` (3 calls), e.g. `run_crawl_cycle(cfg, db_path, embedder, vector_store, FakeTypingProvider(), force_refetch=...)`.
 
-Run: `.venv/bin/python -m pytest tests/test_cycle.py -v -o addopts=""`
+Run: `.venv/bin/python -m pytest tests/test_crawl_cycle.py tests/test_integration_async_pipeline.py -v -o addopts=""`
 Expected: PASS.
 
 - [ ] **Step 3: Type-check, lint, commit**
@@ -1834,7 +1876,7 @@ Expected: PASS.
 ```bash
 .venv/bin/basedpyright estimator_king
 uvx ruff check estimator_king
-git add estimator_king/crawler/cycle.py tests/test_cycle.py
+git add estimator_king/crawler/cycle.py tests/test_crawl_cycle.py tests/test_integration_async_pipeline.py
 git commit -m "feat(crawler): pass typing_provider into run_crawl_cycle and down to async_process_queue"
 ```
 
@@ -1844,11 +1886,11 @@ git commit -m "feat(crawler): pass typing_provider into run_crawl_cycle and down
 
 **Files:**
 - Modify: `estimator_king/crawler/scheduler.py`
-- Test: `tests/test_scheduler.py` (existing — update) or create.
+- Test: `tests/test_scheduler.py` (existing — add the new test below AND update the 4 existing `CrawlScheduler(...)` calls + `fake_cycle` signature per the migration table)
 
-- [ ] **Step 1: Write/adjust the failing test**
+- [ ] **Step 1: Add the new failing test**
 
-Create or append `tests/test_scheduler.py`:
+Append to `tests/test_scheduler.py`:
 
 ```python
 import asyncio
@@ -1914,6 +1956,10 @@ In `run_once`, pass it through:
 ```
 
 > The test passes `embedder=object()` / `vector_store=object()` as keyword args; keep `__init__` parameter names `embedder`, `vector_store`, `typing_provider`.
+
+- [ ] **Step 3b: Update the 4 pre-existing tests (per migration table)**
+
+In `tests/test_scheduler.py`, add `typing_provider=object()` to the 4 existing `CrawlScheduler(...)` constructions, and change the pre-existing `fake_cycle` (the one at the top of the file, not the new test's) to accept `typing_provider` positionally: `async def fake_cycle(config, db_path, embedder, vector_store, typing_provider, *, force_refetch=False)`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -2021,12 +2067,19 @@ Expected: PASS.
 
 > `build_bot` gains its `typing_provider` parameter in Task 17; if running tasks strictly in order, this serve call references a not-yet-added param. Implement Task 17's `build_bot` signature change together with this step if your tooling type-checks across modules before Task 17. (Subagent-driven execution applies tasks sequentially and runs the full suite at the end; the `serve` body is not exercised by Step 3's unit test.)
 
-- [ ] **Step 5: Type-check, lint, commit**
+- [ ] **Step 5: Update existing `Providers(...)` constructions (per migration table)**
+
+`Providers` now has a required `typing` field. Add `typing=MagicMock()` (import `from unittest.mock import MagicMock` where needed) to every `Providers(...)` construction in `tests/test_runtime.py`, `tests/test_main_async.py`, and `tests/test_cli.py`. Positional-index assertions on the patched `CrawlScheduler`/`run_crawl_cycle` mocks still hold (`vector_store` stays `args[3]`).
+
+Run: `.venv/bin/python -m pytest tests/test_runtime.py tests/test_main_async.py tests/test_cli.py -v -o addopts=""`
+Expected: PASS.
+
+- [ ] **Step 6: Type-check, lint, commit**
 
 ```bash
 .venv/bin/basedpyright estimator_king
 uvx ruff check estimator_king
-git add estimator_king/runtime.py tests/test_runtime.py
+git add estimator_king/runtime.py tests/test_runtime.py tests/test_main_async.py tests/test_cli.py
 git commit -m "feat(runtime): add typing to Providers; wire typing_provider into scheduler and build_bot"
 ```
 
@@ -2050,17 +2103,19 @@ In `estimator_king/__main__.py`, update the `run_crawl_cycle(...)` call in `run_
                             force_refetch=args.force_refetch))
 ```
 
-- [ ] **Step 2: Run CLI tests**
+- [ ] **Step 2: Run CLI + main tests**
 
-Run: `.venv/bin/python -m pytest tests/test_cli.py -v -o addopts=""`
-Expected: PASS (adjust any monkeypatched `run_crawl_cycle` fake to accept the extra positional `typing_provider`).
+`run_crawl` now passes `providers.typing` as the 5th positional arg. In `tests/test_main_async.py` / `tests/test_cli.py`, `run_crawl_cycle` is patched with a `MagicMock`, so the extra positional arg is absorbed; positional-index assertions (`args[1]` db_path, `args[2]` embedder, `args[3]` vector_store) are unchanged and still hold. The `Providers(...)` constructions in these files are already fixed in Task 14.
+
+Run: `.venv/bin/python -m pytest tests/test_cli.py tests/test_main_async.py -v -o addopts=""`
+Expected: PASS.
 
 - [ ] **Step 3: Type-check, lint, commit**
 
 ```bash
 .venv/bin/basedpyright estimator_king
 uvx ruff check estimator_king
-git add estimator_king/__main__.py tests/test_cli.py
+git add estimator_king/__main__.py
 git commit -m "feat(cli): pass providers.typing into run_crawl_cycle on the crawl command"
 ```
 
@@ -2070,7 +2125,7 @@ git commit -m "feat(cli): pass providers.typing into run_crawl_cycle on the craw
 
 **Files:**
 - Modify: `estimator_king/bot/estimator.py`
-- Test: `tests/test_estimator.py` (existing — replace/extend)
+- Test: `tests/test_estimator.py` (replace/extend), `tests/test_estimator_logging.py` (fix constructor), `tests/test_e2e_mocked.py` (fix constructor + pre-seeded metadata) — per migration table
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2274,9 +2329,12 @@ class Estimator:
             return EstimateBatch(estimates=[])
         logger.info("estimate request from %s for %d products", user_id, len(product_names))
         start = time.monotonic()
+        total_chunks = (len(product_names) + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE
         all_estimates: list[ProductEstimate] = []
         for start_idx in range(0, len(product_names), self.CHUNK_SIZE):
             chunk = product_names[start_idx:start_idx + self.CHUNK_SIZE]
+            logger.debug("chunk %d/%d: %d products",
+                         start_idx // self.CHUNK_SIZE + 1, total_chunks, len(chunk))
             batch = self._estimate_chunk(chunk)
             all_estimates.extend(batch.estimates)
         reconciled = self._reconcile(product_names, all_estimates)
@@ -2371,12 +2429,20 @@ class Estimator:
 Run: `.venv/bin/python -m pytest tests/test_estimator.py -v -o addopts=""`
 Expected: PASS.
 
-- [ ] **Step 5: Type-check, lint, commit**
+- [ ] **Step 5: Update existing estimator tests (per migration table)**
+
+- `tests/test_estimator_logging.py`: add the new `Estimator(...)` args (`FakeTypingProvider()`, `item_types=[...]`, `item_types_version=1`) to its construction. The rewritten `estimate_products` keeps the `chunk %d/%d: %d products` debug line, so `test_chunk_debug_and_done_info` still passes unchanged.
+- `tests/test_e2e_mocked.py`: add the new `Estimator(...)` args to all 4 constructions (add a `FakeTypingProvider`); change the pre-seeded vector metadata in `test_estimate_products_with_pre_seeded_store` from `{title, price_jpy, store_id}` to `{item_name, item_type, price_jpy, published_at, store_id, detail_snippet}` and assert on the `item_name` value (the new `_format_reference` reads `item_name`, not `title`).
+
+Run: `.venv/bin/python -m pytest tests/test_estimator_logging.py tests/test_e2e_mocked.py -v -o addopts=""`
+Expected: PASS.
+
+- [ ] **Step 6: Type-check, lint, commit**
 
 ```bash
 .venv/bin/basedpyright estimator_king
 uvx ruff check estimator_king
-git add estimator_king/bot/estimator.py tests/test_estimator.py
+git add estimator_king/bot/estimator.py tests/test_estimator.py tests/test_estimator_logging.py tests/test_e2e_mocked.py
 git commit -m "feat(estimator): per-line type-aware retrieval, recency rerank, reconciliation, GPT-5.4 prompt"
 ```
 
@@ -2386,7 +2452,7 @@ git commit -m "feat(estimator): per-line type-aware retrieval, recency rerank, r
 
 **Files:**
 - Modify: `estimator_king/bot/runner.py`
-- Test: `tests/test_runner.py` (existing — adjust if it builds the bot)
+- Test: none directly — no existing test constructs `build_bot` (verified). The serve-path wiring that calls `build_bot(..., typing_provider=...)` is covered by `tests/test_runtime.py` (Task 14, which patches `build_bot`). The `Estimator(...)` construction inside `build_bot` is exercised indirectly; its unit behavior is covered by Task 16's `tests/test_estimator.py`.
 
 - [ ] **Step 1: Implement**
 
@@ -2421,17 +2487,17 @@ def build_bot(
         top_k=config.estimator_top_k, recency_weight=config.estimator_recency_weight)
 ```
 
-- [ ] **Step 2: Run tests**
+- [ ] **Step 2: Run the runtime + runner-related tests**
 
-Run: `.venv/bin/python -m pytest tests/test_runner.py -v -o addopts=""`
-Expected: PASS (update any `build_bot(...)` call in the test to pass `typing_provider=FakeTypingProvider()`).
+Run: `.venv/bin/python -m pytest tests/test_runtime.py tests/test_runner_shutdown.py tests/test_runner_logging.py -v -o addopts=""`
+Expected: PASS (no `build_bot(...)` call sites need editing — verified).
 
 - [ ] **Step 3: Type-check, lint, commit**
 
 ```bash
 .venv/bin/basedpyright estimator_king
 uvx ruff check estimator_king
-git add estimator_king/bot/runner.py tests/test_runner.py
+git add estimator_king/bot/runner.py
 git commit -m "feat(bot): build_bot injects typing_provider + config tuning into Estimator"
 ```
 
@@ -2441,11 +2507,11 @@ git commit -m "feat(bot): build_bot injects typing_provider + config tuning into
 
 **Files:**
 - Modify: `estimator_king/bot/commands.py`
-- Test: `tests/test_commands.py` (existing — add cases)
+- Test: `tests/test_bot_commands.py` (existing — add cases)
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/test_commands.py`:
+Append to `tests/test_bot_commands.py`:
 
 ```python
 from estimator_king.bot.commands import format_estimates
@@ -2476,7 +2542,7 @@ def test_trailing_dash_in_rationale_not_stripped():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `.venv/bin/python -m pytest tests/test_commands.py -v -o addopts=""`
+Run: `.venv/bin/python -m pytest tests/test_bot_commands.py -v -o addopts=""`
 Expected: FAIL — "page i/total" wrong; trailing dash stripped.
 
 - [ ] **Step 3: Implement**
@@ -2515,7 +2581,7 @@ Remove the now-unused `full_content` line if it is no longer referenced (it was 
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `.venv/bin/python -m pytest tests/test_commands.py -v -o addopts=""`
+Run: `.venv/bin/python -m pytest tests/test_bot_commands.py -v -o addopts=""`
 Expected: PASS.
 
 - [ ] **Step 5: Type-check, lint, commit**
@@ -2523,7 +2589,7 @@ Expected: PASS.
 ```bash
 .venv/bin/basedpyright estimator_king
 uvx ruff check estimator_king
-git add estimator_king/bot/commands.py tests/test_commands.py
+git add estimator_king/bot/commands.py tests/test_bot_commands.py
 git commit -m "fix(bot): correct format_estimates page denominator and use removesuffix for separator"
 ```
 
