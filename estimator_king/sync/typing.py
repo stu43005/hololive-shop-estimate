@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from estimator_king.crawler.snapshot import normalize_text
 
@@ -23,7 +23,7 @@ OTHER = "その他"
 @dataclass(frozen=True)
 class TypeDecision:
     item_type: str
-    source: str  # "vocab" | "cache" | "llm"
+    source: Literal["vocab", "cache", "llm"]
 
 
 class _TypingProvider(Protocol):
@@ -51,7 +51,7 @@ def _cache_key(text: str, version: int) -> str:
 def _llm_classify(
     text: str, item_types: list[str], version: int,
     typing_provider: _TypingProvider, repository: _Cache | None,
-) -> tuple[str, str]:
+) -> tuple[str, Literal["cache", "llm"]]:
     key = _cache_key(text, version)
     if repository is not None:
         cached = repository.get_cached_type(key)
