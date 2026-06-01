@@ -144,6 +144,7 @@ item_types:
   - トレーナー
   - ボクサーパンツ
   - パンツ
+  - 卓上カレンダー
 # Bump when the list changes to force re-classification on the next crawl.
 item_types_version: 2
 
