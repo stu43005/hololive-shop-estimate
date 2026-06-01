@@ -51,8 +51,7 @@ def _snap(pid):
     )
 
 
-def test_queue_start_heartbeat_and_done_logged(repo, caplog):
-    n = async_pipeline._PROGRESS_LOG_EVERY + 5
+def _run(repo, caplog, n):
     for pid in range(1, n + 1):
         repo.enqueue_url("hololive", f"https://x/products/{pid}")
 
@@ -70,12 +69,44 @@ def test_queue_start_heartbeat_and_done_logged(repo, caplog):
                 FakeEmbedder(), FakeVectorStore(),
                 typing_provider=FakeTypingProvider(), talents=frozenset(),
                 item_types=[], item_types_version=0))
-
-    assert result.processed == n
     msgs = [
         r.getMessage() for r in caplog.records
         if r.name == "estimator_king.crawler.async_pipeline" and r.levelno == logging.INFO
     ]
+    return result, msgs
+
+
+def test_queue_start_heartbeat_and_done_logged(repo, caplog):
+    n = async_pipeline._PROGRESS_LOG_EVERY + 5
+    result, msgs = _run(repo, caplog, n)
+
+    assert result.processed == n
     assert any(f"queue: {n} entries to process" in m for m in msgs)
     assert any("progress:" in m and f"/{n} processed" in m for m in msgs)
     assert any("done: created=" in m for m in msgs)
+
+
+def test_heartbeat_and_done_append_aggregates(repo, caplog):
+    n = async_pipeline._PROGRESS_LOG_EVERY + 5
+    result, msgs = _run(repo, caplog, n)
+
+    # each product yields 1 item, item_types=[] -> LLM source on every item.
+    assert result.items == n
+    assert result.typing_llm == n
+    assert result.embed_indexed == n
+
+    heartbeat = [m for m in msgs if "progress:" in m]
+    assert heartbeat
+    hb = heartbeat[0]
+    assert "\n" in hb  # single multi-line record
+    assert "items" in hb
+    assert "excluded" in hb
+    assert "detail hit:" in hb
+    assert "typing:" in hb and "(vocab)" in hb and "(cache)" in hb and "(llm)" in hb
+    assert "embed indexed:" in hb
+
+    done = [m for m in msgs if "done: created=" in m]
+    assert done
+    dn = done[0]
+    assert f"{n} items" in dn  # final cumulative total
+    assert "embed indexed:" in dn

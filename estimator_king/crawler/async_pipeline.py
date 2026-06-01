@@ -21,6 +21,18 @@ logger = logging.getLogger(__name__)
 _PROGRESS_LOG_EVERY = 20
 
 
+def _aggregate_lines(result: "PipelineResult") -> str:
+    # Store-level summary always shows all five lines (zero values included),
+    # unlike the per-product tree which omits a zero "excluded" clause.
+    return (
+        f"\n  {result.items} items"
+        f"\n  {result.excluded} excluded"
+        f"\n  detail hit: {result.detail_hits}"
+        f"\n  typing: {result.typing_vocab}(vocab) {result.typing_cache}(cache) {result.typing_llm}(llm)"
+        f"\n  embed indexed: {result.embed_indexed}"
+    )
+
+
 @dataclass
 class PipelineResult:
     processed: int = 0
@@ -29,6 +41,13 @@ class PipelineResult:
     created: int = 0
     updated: int = 0
     sync_skipped: int = 0
+    items: int = 0
+    excluded: int = 0
+    detail_hits: int = 0
+    typing_vocab: int = 0
+    typing_cache: int = 0
+    typing_llm: int = 0
+    embed_indexed: int = 0
 
 
 async def async_process_queue(
@@ -42,6 +61,7 @@ async def async_process_queue(
     talents: frozenset[str],
     item_types: list[str],
     item_types_version: int,
+    log_item_trees: bool = False,
     proxy: ProxyConfig | None = None,
 ) -> PipelineResult:
     entries = state_repo.peek_all(store_id)
@@ -64,16 +84,25 @@ async def async_process_queue(
                     state_repo, embedder, vector_store,
                     typing_provider=typing_provider, talents=talents,
                     item_types=item_types, item_types_version=item_types_version,
+                    log_item_trees=log_item_trees,
                 )
                 state_repo.delete_queue_entry(entry_id)
                 result.created += sync_result.created
                 result.updated += sync_result.updated
                 result.sync_skipped += sync_result.skipped
+                result.items += sync_result.items
+                result.excluded += sync_result.excluded
+                result.detail_hits += sync_result.detail_hits
+                result.typing_vocab += sync_result.typing_vocab
+                result.typing_cache += sync_result.typing_cache
+                result.typing_llm += sync_result.typing_llm
+                result.embed_indexed += sync_result.embed_indexed
                 result.processed += 1
                 if result.processed % _PROGRESS_LOG_EVERY == 0:
                     logger.info(
-                        "store=%s progress: %d/%d processed",
+                        "store=%s progress: %d/%d processed%s",
                         store_id, result.processed, len(entries),
+                        _aggregate_lines(result),
                     )
             except Exception as exc:
                 logger.exception("Error processing %s (url=%s)", entry_id, product_url)
@@ -103,7 +132,8 @@ async def async_process_queue(
         await asyncio.gather(*workers)
 
     logger.info(
-        "store=%s done: created=%d updated=%d skipped=%d failed=%d",
+        "store=%s done: created=%d updated=%d skipped=%d failed=%d%s",
         store_id, result.created, result.updated, result.sync_skipped, result.failed,
+        _aggregate_lines(result),
     )
     return result
