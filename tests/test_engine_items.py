@@ -126,3 +126,46 @@ def test_stale_item_vector_deleted_when_variant_removed():
     _sync(repo, vs, snap2)
     assert len(vs.docs) == 1
     repo.close()
+
+
+def test_sync_result_aggregates_on_create():
+    repo, vs = _repo(), FakeVectorStore()
+    res = _sync(repo, vs, _snap())
+    assert res.items == 2
+    assert res.excluded == 0
+    assert res.detail_hits == 0  # _snap has no html_details
+    assert res.typing_vocab == 2  # both names are unique vocab hits
+    assert res.typing_cache == 0
+    assert res.typing_llm == 0
+    assert res.embed_indexed == 2
+    repo.close()
+
+
+def test_unchanged_sync_has_zero_aggregates():
+    repo, vs = _repo(), FakeVectorStore()
+    _sync(repo, vs, _snap())
+    res = _sync(repo, vs, _snap())
+    assert res.skipped == 1
+    assert res.items == 0
+    assert res.excluded == 0
+    assert res.detail_hits == 0
+    assert res.typing_vocab == 0
+    assert res.embed_indexed == 0
+    repo.close()
+
+
+def test_failed_sync_has_zero_aggregates():
+    class BoomEmbedder:
+        def embed_documents(self, texts):
+            raise RuntimeError("boom")
+
+    repo, vs = _repo(), FakeVectorStore()
+    res = sync_products(
+        [("http://x/products/10", _snap())], "hololive", repo,
+        BoomEmbedder(), vs, typing_provider=FakeTypingProvider(), talents=TALENTS,
+        item_types=ITEM_TYPES, item_types_version=1)
+    assert res.failed == 1
+    assert res.items == 0
+    assert res.embed_indexed == 0
+    assert res.typing_vocab == 0
+    repo.close()
