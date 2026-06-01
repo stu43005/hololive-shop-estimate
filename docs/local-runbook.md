@@ -52,40 +52,13 @@ cp .env.example .env
 
 Then edit `.env` with your actual values. The file is already in `.gitignore` — it will never be committed.
 
-### 3.2 `.env` File Reference
+### 3.2 `.env` Reference
 
-```dotenv
-# ── Provider ──────────────────────────────────────────────────
-OPENAI_API_KEY=sk-...
-# OPENAI_BASE_URL=https://api.openai.com/v1   # override for ollama
-# EMBEDDING_MODEL=text-embedding-3-large
-# EMBEDDING_DIMENSIONS=1024
-# CHAT_MODEL=gpt-4o
-# CHAT_STRUCTURED_OUTPUT=true
-
-# ── Storage ───────────────────────────────────────────────────
-DATABASE_PATH=./estimator_king.db
-CHROMA_PATH=./chroma
-
-# ── Discord Bot ───────────────────────────────────────────────
-DISCORD_BOT_TOKEN=MTIzNDU2Nzg5MDEyMzQ1Njc4OQ.XXXXXX.XXXXXXXX
-```
-
-| Variable | Used By | Description |
-| -------- | ------- | ----------- |
-| `OPENAI_API_KEY` | Crawler + Bot | API key for the embedding and chat provider |
-| `OPENAI_BASE_URL` | Crawler + Bot | Override to `http://localhost:11434/v1` for ollama |
-| `EMBEDDING_MODEL` | Crawler | Model used to embed product descriptions (default `text-embedding-3-large`) |
-| `EMBEDDING_DIMENSIONS` | Crawler | Output vector dimensions (default `1024`) |
-| `CHAT_MODEL` | Bot | Chat model for `/estimate` (default `gpt-4o`) |
-| `CHAT_STRUCTURED_OUTPUT` | Bot | Set to `false` when the model does not support JSON schema |
-| `DATABASE_PATH` | Crawler | Path to SQLite database file (default `./estimator_king.db`) |
-| `CHROMA_PATH` | Crawler + Bot | ChromaDB persistence directory (default `./chroma`) |
-| `DISCORD_BOT_TOKEN` | Bot | Discord bot authentication token |
+[`.env.example`](../.env.example) is the authoritative reference — every variable, its default, and the provider fallback rules are documented inline there. Read those comments rather than a copy here. In short: `OPENAI_API_KEY` is required; the `EMBEDDING_*` / `CHAT_*` / `TYPING_*` keys and base URLs fall back to the `OPENAI_*` values when unset (point `OPENAI_BASE_URL` at ollama's `/v1` to swap providers), and `DATABASE_PATH` / `CHROMA_PATH` / `DISCORD_BOT_TOKEN` configure storage and the bot.
 
 ### 3.3 Loading `.env` into the Shell
 
-The application does **not** auto-load `.env` files. Use one of these approaches:
+The application does **not** auto-load `.env` files. Use one of these approaches once per shell session — later commands in this runbook assume `.env` is already loaded.
 
 **Option A — Shell `source` (recommended)**
 
@@ -95,7 +68,7 @@ source .env
 set +a
 ```
 
-Run this in every new terminal session before executing the crawler or bot. You can add it to a wrapper script (see Section 6).
+Run this in every new terminal session before executing the crawler or bot.
 
 **Option B — `direnv` (automatic)**
 
@@ -114,11 +87,9 @@ Variables load automatically when you `cd` into the project directory.
 
 ### 4.1 Basic Execution
 
-```bash
-# Load env vars first (if not using direnv)
-set -a; source .env; set +a
+After loading `.env` (see §3.3):
 
-# Run crawler with default config
+```bash
 .venv/bin/python -m estimator_king crawl --config stores_config.yaml
 ```
 
@@ -128,9 +99,10 @@ set -a; source .env; set +a
 python -m estimator_king crawl [OPTIONS]
 
 Options:
-  --config PATH         Stores config YAML (default: stores_config.yaml)
-  --db PATH             SQLite database path (env: DATABASE_PATH, default: ./estimator_king.db)
-  --force-refetch       Re-fetch every product regardless of content hash
+  --config PATH     Stores config YAML (default: stores_config.yaml)
+  --log-level LVL   DEBUG | INFO | WARNING | ERROR | CRITICAL (default: INFO)
+  --db PATH         Override the database path from config / DATABASE_PATH
+  --force-refetch   Re-fetch every active product regardless of content hash
 ```
 
 CLI arguments override environment variables.
@@ -145,32 +117,7 @@ To trigger a full one-cycle backfill (re-fetch all products, regardless of the d
 .venv/bin/python -m estimator_king crawl --force-refetch
 ```
 
-### 4.4 Output
-
-- **Logs**: Printed to `stderr` (structured format: `timestamp [LEVEL] message`)
-- **Result JSON**: Printed to `stdout` on completion
-
-Example output (stdout):
-
-```json
-{
-  "discovered": 120,
-  "fetched_ok": 118,
-  "created": 15,
-  "updated": 3,
-  "skipped": 100,
-  "inactive": 0,
-  "errors": 2
-}
-```
-
-To capture the JSON result while still seeing logs:
-
-```bash
-.venv/bin/python -m estimator_king crawl --config stores_config.yaml > result.json
-```
-
-### 4.5 Database and Vector Store Location
+### 4.4 Database and Vector Store Location
 
 The crawler creates/updates:
 
@@ -181,7 +128,7 @@ To inspect the database:
 
 ```bash
 sqlite3 estimator_king.db ".tables"
-sqlite3 estimator_king.db "SELECT COUNT(*) FROM product_state;"
+sqlite3 estimator_king.db "SELECT COUNT(*) FROM products;"
 ```
 
 ---
@@ -190,11 +137,9 @@ sqlite3 estimator_king.db "SELECT COUNT(*) FROM product_state;"
 
 ### 5.1 Basic Execution
 
-```bash
-# Load env vars first
-set -a; source .env; set +a
+After loading `.env` (see §3.3):
 
-# Run bot
+```bash
 .venv/bin/python -m estimator_king run
 ```
 
@@ -204,8 +149,11 @@ set -a; source .env; set +a
 python -m estimator_king run [OPTIONS]
 
 Options:
-  --token TOKEN      Discord bot token (env: DISCORD_BOT_TOKEN, required)
-  --guild-id ID      Guild ID for fast command sync (optional)
+  --config PATH    Stores config YAML (default: stores_config.yaml)
+  --log-level LVL  DEBUG | INFO | WARNING | ERROR | CRITICAL (default: INFO)
+  --db PATH        Override the database path from config / DATABASE_PATH
+  --token TOKEN    Discord bot token (env: DISCORD_BOT_TOKEN / DISCORD_TOKEN)
+  --guild-id ID    Guild ID for fast command sync (optional, omit for global sync)
 ```
 
 ### 5.3 Development vs Production Sync
@@ -230,45 +178,13 @@ Press `Ctrl+C` in the terminal. The bot handles `SIGINT` gracefully.
 
 ---
 
-## 6. Convenience Wrapper Scripts
+## 6. Smoke Tests & Verification
 
-### `run-crawler.sh`
+### 6.1 Verify Provider Connectivity
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-set -a; source "$(dirname "$0")/.env"; set +a
-
-.venv/bin/python -m estimator_king crawl --config stores_config.yaml "$@"
-```
-
-### `run-bot.sh`
+With `.env` loaded (§3.3):
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-set -a; source "$(dirname "$0")/.env"; set +a
-
-.venv/bin/python -m estimator_king run "$@"
-```
-
-Make them executable:
-
-```bash
-chmod +x run-crawler.sh run-bot.sh
-```
-
-> These scripts are optional — you don't need to commit them. They're a convenience for local development.
-
----
-
-## 7. Smoke Tests & Verification
-
-### 7.1 Verify Provider Connectivity
-
-```bash
-set -a; source .env; set +a
-
 curl -s -o /dev/null -w "%{http_code}" \
   "${OPENAI_BASE_URL:-https://api.openai.com}/v1/models" \
   -H "Authorization: Bearer ${OPENAI_API_KEY}"
@@ -276,24 +192,11 @@ curl -s -o /dev/null -w "%{http_code}" \
 
 **Expected**: `200`
 
-### 7.2 Dry-Run Crawler
+### 6.2 Verify Bot Token
 
-Run the crawler and check the JSON output:
-
-```bash
-.venv/bin/python -m estimator_king crawl --config stores_config.yaml 2>crawler.log | python -m json.tool
-```
-
-Verify:
-- `discovered > 0` — sitemap enumeration worked
-- `errors` is 0 or low — no systemic failures
-- Check `crawler.log` for detailed per-store results
-
-### 7.3 Verify Bot Token
+With `.env` loaded (§3.3):
 
 ```bash
-set -a; source .env; set +a
-
 curl -s -o /dev/null -w "%{http_code}" \
   "https://discord.com/api/v10/users/@me" \
   -H "Authorization: Bot ${DISCORD_BOT_TOKEN}"
@@ -301,7 +204,7 @@ curl -s -o /dev/null -w "%{http_code}" \
 
 **Expected**: `200`
 
-### 7.4 Unit Tests
+### 6.3 Unit Tests
 
 ```bash
 .venv/bin/python -m pytest -q --tb=short
@@ -309,7 +212,7 @@ curl -s -o /dev/null -w "%{http_code}" \
 
 ---
 
-## 8. Re-index Procedure
+## 7. Re-index Procedure
 
 A re-index re-fetches every product and rebuilds the vector index (this consumes embedding API quota):
 
@@ -324,17 +227,11 @@ To only repair prices crawled in the wrong currency (before the `?currency=JPY` 
 
 ---
 
-## 9. Troubleshooting
+## 8. Troubleshooting
 
 ### Crawler: `OPENAI_API_KEY environment variable required`
 
-Environment variables are not loaded. Ensure you ran:
-
-```bash
-set -a; source .env; set +a
-```
-
-Verify with: `echo $OPENAI_API_KEY`
+Environment variables are not loaded. Load `.env` as shown in §3.3, then verify with `echo $OPENAI_API_KEY`.
 
 ### Crawler: `Failed to enumerate sitemap for <store_id>`
 
@@ -366,11 +263,11 @@ ps aux | grep estimator_king
 
 ### ChromaDB: `dimension mismatch` or `collection already exists with different metadata`
 
-The existing ChromaDB collection was created with a different embedding model or dimensions. Run the re-index procedure (Section 8).
+The existing ChromaDB collection was created with a different embedding model or dimensions. Run the re-index procedure (Section 7).
 
 ---
 
-## 10. Comparison: Local vs Kubernetes
+## 9. Comparison: Local vs Kubernetes
 
 | Aspect | Local (this runbook) | Kubernetes ([ops-runbook.md](ops-runbook.md)) |
 | ------ | -------------------- | --------------------------------------------- |
