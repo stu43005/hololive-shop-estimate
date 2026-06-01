@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass
 from typing import Protocol
 
 from estimator_king.crawler.snapshot import normalize_text
@@ -17,6 +18,12 @@ from estimator_king.crawler.snapshot import normalize_text
 logger = logging.getLogger(__name__)
 
 OTHER = "その他"
+
+
+@dataclass(frozen=True)
+class TypeDecision:
+    item_type: str
+    source: str  # "vocab" | "cache" | "llm"
 
 
 class _TypingProvider(Protocol):
@@ -44,12 +51,12 @@ def _cache_key(text: str, version: int) -> str:
 def _llm_classify(
     text: str, item_types: list[str], version: int,
     typing_provider: _TypingProvider, repository: _Cache | None,
-) -> str:
+) -> tuple[str, str]:
     key = _cache_key(text, version)
     if repository is not None:
         cached = repository.get_cached_type(key)
         if cached is not None:
-            return cached
+            return cached, "cache"
     try:
         result = typing_provider.classify_via_llm(text, item_types)
     except Exception:
@@ -59,18 +66,20 @@ def _llm_classify(
         result = OTHER
     if repository is not None:
         repository.put_cached_type(key, result, version, normalize_text(text))
-    return result
+    return result, "llm"
 
 
 def classify_item(
     text: str, *, item_types: list[str], item_types_version: int,
     typing_provider: _TypingProvider, repository: _Cache | None,
-) -> str:
+) -> TypeDecision:
     hits = _vocab_hits(text, item_types)
     if len(hits) == 1:
-        return hits[0]
+        return TypeDecision(hits[0], "vocab")
     # zero or multiple hits -> LLM picks exactly one (cached on the index side).
-    return _llm_classify(text, item_types, item_types_version, typing_provider, repository)
+    item_type, source = _llm_classify(
+        text, item_types, item_types_version, typing_provider, repository)
+    return TypeDecision(item_type, source)
 
 
 def classify_query(
@@ -80,5 +89,6 @@ def classify_query(
     hits = _vocab_hits(text, item_types)
     if hits:
         return hits  # one or many -> query each; no LLM
-    result = _llm_classify(text, item_types, item_types_version, typing_provider, repository)
-    return [] if result == OTHER else [result]
+    item_type, _ = _llm_classify(
+        text, item_types, item_types_version, typing_provider, repository)
+    return [] if item_type == OTHER else [item_type]
