@@ -6,11 +6,17 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, cast
+from urllib.parse import urlsplit, urlunsplit
 
 from .html_extractor import extract_detail_sections as extract_html_details
 from .snapshot import ProductSnapshot, ProductVariant, compute_content_hash
 
 logger = logging.getLogger(__name__)
+
+# Shopify Markets returns the JSON `.json` endpoint's prices in a geo/locale-detected
+# currency. Pin every product fetch to JPY via the `currency` query param, which
+# overrides cookie/geo detection. The system is JPY-only (ProductItem.price_jpy).
+_FORCE_CURRENCY = "JPY"
 
 
 class _AsyncGetter(Protocol):
@@ -129,13 +135,17 @@ def _build_snapshot_from_product_json(
 
 
 async def fetch_product(url: str, client: _AsyncGetter) -> ProductSnapshot:
-    canonical_url = url.strip()
-    if not canonical_url:
+    raw = url.strip()
+    if not raw:
         raise ValueError("url must be a non-empty string")
-    if canonical_url.endswith(".json"):
-        canonical_url = canonical_url[: -len(".json")]
-    canonical_url = canonical_url.rstrip("/")
-    json_url = canonical_url + ".json"
+    parts = urlsplit(raw)
+    path = parts.path
+    if path.endswith(".json"):
+        path = path[: -len(".json")]
+    path = path.rstrip("/")
+    # Drop any existing query/fragment so we never build a malformed double-query URL.
+    canonical_url = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    json_url = f"{canonical_url}.json?currency={_FORCE_CURRENCY}"
 
     json_text = await client.get(json_url)
     html_text = await client.get(canonical_url)

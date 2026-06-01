@@ -8,6 +8,7 @@
 import asyncio
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -29,7 +30,7 @@ class _FakeAsyncClient:
         self._html_exc = html_exc
 
     async def get(self, url: str) -> str:
-        if url.endswith(".json"):
+        if urlsplit(url).path.endswith(".json"):
             if self._json_exc is not None:
                 raise self._json_exc
             return self._json_text
@@ -245,3 +246,49 @@ def test_snapshot_with_hash_constructs_with_published_at():
         published_at=42, content_hash="abc",
     )
     assert obj.published_at == 42 and obj.content_hash == "abc"
+
+
+class _RecordingAsyncClient:
+    def __init__(self, *, json_text: str, html_text: str):
+        self._json_text = json_text
+        self._html_text = html_text
+        self.requested_urls: list[str] = []
+
+    async def get(self, url: str) -> str:
+        self.requested_urls.append(url)
+        if urlsplit(url).path.endswith(".json"):
+            return self._json_text
+        return self._html_text
+
+
+def test_fetch_product_forces_jpy_currency_on_json_url():
+    json_text = _read_fixture("product_json_hololive.json")
+    html_text = _read_fixture("product_html_hololive_basic.html")
+    client = _RecordingAsyncClient(json_text=json_text, html_text=html_text)
+
+    asyncio.run(fetch_product("https://shop.hololivepro.com/products/sample", client))
+
+    # fetch_product issues exactly two GETs in a fixed order: json_url then canonical_url.
+    # Assert exact equality (not membership) so a malformed/double-query URL or any stray
+    # request would fail the test.
+    assert client.requested_urls == [
+        "https://shop.hololivepro.com/products/sample.json?currency=JPY",
+        "https://shop.hololivepro.com/products/sample",
+    ]
+
+
+def test_fetch_product_strips_existing_query_before_forcing_currency():
+    json_text = _read_fixture("product_json_hololive.json")
+    html_text = _read_fixture("product_html_hololive_basic.html")
+    client = _RecordingAsyncClient(json_text=json_text, html_text=html_text)
+
+    asyncio.run(
+        fetch_product("https://shop.hololivepro.com/products/sample.json?foo=bar", client)
+    )
+
+    # The pre-existing ?foo=bar must be stripped before appending ?currency=JPY; assert
+    # exact equality to guarantee no malformed double-query URL slips through.
+    assert client.requested_urls == [
+        "https://shop.hololivepro.com/products/sample.json?currency=JPY",
+        "https://shop.hololivepro.com/products/sample",
+    ]
