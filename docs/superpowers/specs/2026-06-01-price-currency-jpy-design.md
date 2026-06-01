@@ -53,8 +53,8 @@ vspo store（`vspo-comicmarket101`）行為一致：預設 `10000`/`JPY`、`?cur
 
 - 在模組層新增常數 `_FORCE_CURRENCY = "JPY"`。
 - `fetch_product` 建構 JSON 請求 URL 時，於 `.json` 後附加 `?currency=<_FORCE_CURRENCY>`，即請求 `f"{canonical_url}.json?currency=JPY"`。
-- HTML fetch（`canonical_url`，無 `.json`、無 query）**維持不變**：它只供商品詳情區塊（グッズ詳細等）抽取，不含 price，無需附加幣別參數。
-- `canonical_url` 在 `fetch_product` 中已先 strip 掉 `.json` 與結尾 `/`，因此附加 query 時不會與既有 query 衝突。
+- HTML fetch（`canonical_url`）**維持不變**：它只供商品詳情區塊（グッズ詳細等）抽取，不含 price，無需附加幣別參數。
+- **URL 正規化（邊界處理）**：`fetch_product` 目前對輸入 URL 只做 `strip()` → 去尾 `.json` → `rstrip("/")`，並未移除既有的 `?...` query string。實際資料流中，enqueue 的 `product_url` 來自 sitemap `<loc>`（經 `sitemap.py` 以 `/products/` 過濾），皆為無 query 的乾淨 canonical URL，故正常情況不會衝突。但為避免將來輸入帶 query 時產生 `…?foo=bar.json?currency=JPY` 這類畸形 URL，`fetch_product` 在去除 `.json`/尾斜線的同時，**須先以 `urllib.parse.urlsplit` 拆除任何既有 query/fragment**，僅保留 scheme+netloc+path 作為 `canonical_url`，再重建 `json_url`。
 
 ### 3.2 防禦性驗證（`_build_snapshot_from_product_json`）
 
@@ -64,7 +64,7 @@ vspo store（`vspo-comicmarket101`）行為一致：預設 `10000`/`JPY`、`?cur
 
 ### 3.3 失敗行為
 
-- `ShopifyJSONError` 由 `_build_snapshot` → `fetch_product` 上拋，被 crawl cycle 當成一次 fetch 失敗：`consecutive_failures` 累加，達 `inactive_failure_threshold` 才標記商品 inactive。
+- `ShopifyJSONError` 由 `_build_snapshot` → `fetch_product` 上拋，於 `crawler/async_pipeline.py` 的 `async_process_queue._handle`（`except Exception` 區塊）被捕捉：呼叫 `state_repo.increment_consecutive_failures(...)` 累加失敗次數並使 `result.failed` +1（後者再於 `cycle.py` 匯入 `counters["errors"]`）。`consecutive_failures` 達 `inactive_failure_threshold` 後，由跨 store inactive sweep 標記商品 inactive。
 - 因已強制 `?currency=JPY`，此驗證在正常情況不會觸發，屬 defense-in-depth；只有當 Shopify 行為改變、強制失效時才會攔截，避免錯誤幣別價格進入資料庫。
 
 ### 3.4 資料模型與 content hash
@@ -81,19 +81,30 @@ vspo store（`vspo-comicmarket101`）行為一致：預設 `10000`/`JPY`、`?cur
 
 ## 4. 測試
 
-新增單元測試（沿用既有 pytest 慣例與 fake getter 模式）：
+沿用既有 `tests/test_shopify.py` 的 pytest 慣例與 fake client 模式。新驗證會讓所有走 success path 的既有測試開始要求 `price_currency`，因此**除了新增測試，還必須一併更新既有測試資產**（以下為必做、非選擇性項目）。
 
-### `_build_snapshot_from_product_json` 幣別驗證
+### 4.1 既有測試資產更新（必做，否則既有測試會全數失敗）
+
+1. **JSON fixtures 補上 `price_currency`**：
+   - `tests/fixtures/product_json_hololive.json`：兩個 variant（目前 `price` 在 line 10、16）各補 `"price_currency": "JPY"`。
+   - `tests/fixtures/product_json_vspo.json`：variant（`price` 在 line 10）補 `"price_currency": "JPY"`。
+2. **inline helper 補上 `price_currency`**：`tests/test_shopify.py` 的 `_product_json()`（variant dict 在 line 219）於 variant 補 `"price_currency": "JPY"`。
+3. **`_FakeAsyncClient.get` 路由改為容忍 query string**：目前以 `url.endswith(".json")`（line 32）判斷是否為 JSON 請求；加上 `?currency=JPY` 後 JSON URL 不再以 `.json` 結尾，會誤路由。改為對 path 判斷，例如以 `urlsplit(url).path.endswith(".json")`（與 production 一致的拆解方式）判斷 JSON 分支，HTML 分支維持為其餘情況。
+4. 既有 `test_fetch_product_json_validation_errors_*` 的 parametrize 案例皆在 id/title/price/sku 階段先行失敗（早於幣別檢查，因幣別檢查置於 price 驗證之後），其斷言僅 `pytest.raises(ShopifyJSONError)`，不受影響、無需修改。
+
+### 4.2 新增：`_build_snapshot_from_product_json` 幣別驗證
 
 - `price_currency="JPY"`：正常建構 `ProductSnapshot`，variants 解析成功。
 - `price_currency="USD"`：`raise ShopifyJSONError`。
 - `price_currency` 欄位缺失：`raise ShopifyJSONError`。
 - `price_currency` 非字串（如 `null`/數字）：`raise ShopifyJSONError`。
 
-### `fetch_product` 強制幣別
+### 4.3 新增：`fetch_product` 強制幣別（URL 斷言）
 
-- 使用記錄被請求 URL 的 fake getter，斷言 JSON 請求的 URL 為 `…/products/<handle>.json?currency=JPY`。
-- 斷言 HTML 請求的 URL 維持為 `…/products/<handle>`（不含 `.json`、不含 `currency` query）。
+- 使用會逐筆記錄「被請求 URL」的 fake getter（例如收集到 list）。對 `fetch_product("https://shop.hololivepro.com/products/sample", client)`：
+  - 以**完整字串相等**斷言 JSON 請求 URL == `"https://shop.hololivepro.com/products/sample.json?currency=JPY"`（exact equality，確保 query 位置正確、無多餘參數、無畸形雙 query）。
+  - 以**完整字串相等**斷言 HTML 請求 URL == `"https://shop.hololivepro.com/products/sample"`（確保不含 `.json`、不含 `currency` query）。
+- 另加一例：輸入帶既有 query（如 `".../products/sample.json?foo=bar"`），斷言 JSON 請求 URL 仍為乾淨的 `".../products/sample.json?currency=JPY"`（驗證 §3.1 的 URL 正規化）。
 
 ## 5. 驗證 Toolchain
 
