@@ -220,12 +220,13 @@ def classify_item(
 - [ ] **Step 4: 跑測試確認通過**
 
 Run: `.venv/bin/python -m pytest tests/test_typing.py -v -o addopts=""`
-Expected: PASS（8 passed）
+Expected: PASS（7 passed）
 
 - [ ] **Step 5: 工具鏈驗證**
 
-Run: `.venv/bin/basedpyright estimator_king && uvx ruff check estimator_king tests`
-Expected: basedpyright 0 error、ruff clean
+Run: `.venv/bin/basedpyright estimator_king/sync/typing.py && uvx ruff check estimator_king tests`
+Expected: typing.py 0 error、ruff clean
+注意：完整 `.venv/bin/basedpyright estimator_king` 此時會在 `engine.py` 報型別錯誤——`classify_item` 已回 `TypeDecision`，但 engine.py 仍把回傳當 `str` 傳給 `_format_item_document`／`_item_hash`，要到 Task 3 才修。本 Task 僅檢查 `typing.py`（0 error）；完整 `estimator_king` 0-error 門檻在 Task 3 結尾達成。
 
 - [ ] **Step 6: Commit**
 
@@ -426,13 +427,13 @@ def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> De
 - [ ] **Step 4: 跑測試確認通過**
 
 Run: `.venv/bin/python -m pytest tests/test_items.py -v -o addopts=""`
-Expected: PASS（8 passed）
+Expected: PASS（7 passed）
 
 - [ ] **Step 5: 工具鏈驗證**
 
-Run: `.venv/bin/basedpyright estimator_king && uvx ruff check estimator_king tests`
-Expected: basedpyright 0 error、ruff clean
-注意：此步 `estimator_king/sync/engine.py` 仍以 list 方式使用 `decompose_items` 的結果，basedpyright 會在 engine.py 報型別錯誤——這是預期的，將在 Task 3 修復。若要單獨確認本 task 檔案，可改跑 `.venv/bin/basedpyright estimator_king/sync/items.py`（0 error）。完整 `estimator_king` 0-error 門檻在 Task 3 結尾達成。
+Run: `.venv/bin/basedpyright estimator_king/sync/items.py && uvx ruff check estimator_king tests`
+Expected: items.py 0 error、ruff clean
+注意：完整 `.venv/bin/basedpyright estimator_king` 此時會在 `engine.py` 報型別錯誤——`engine.py` 仍以 list 方式使用 `decompose_items` 的結果，將在 Task 3 修復。本 Task 僅檢查 `items.py`（0 error）；完整 `estimator_king` 0-error 門檻在 Task 3 結尾達成。
 
 - [ ] **Step 6: Commit**
 
