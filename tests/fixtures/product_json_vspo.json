@@ -8,7 +8,8 @@
         "id": 3000000001,
         "title": "One Size",
         "price": "2500",
-        "sku": "VSPO-ABC"
+        "sku": "VSPO-ABC",
+        "price_currency": "JPY"
       }
     ]
   }

@@ -217,7 +217,15 @@ def _product_json(**extra) -> str:
         "id": 123,
         "title": "Test Product",
         "body_html": "<p>desc</p>",
-        "variants": [{"id": 1, "title": "グッズ / Item A", "price": "500", "sku": None}],
+        "variants": [
+            {
+                "id": 1,
+                "title": "グッズ / Item A",
+                "price": "500",
+                "sku": None,
+                "price_currency": "JPY",
+            }
+        ],
     }
     product.update(extra)
     return json.dumps({"product": product})
@@ -246,6 +254,41 @@ def test_snapshot_with_hash_constructs_with_published_at():
         published_at=42, content_hash="abc",
     )
     assert obj.published_at == 42 and obj.content_hash == "abc"
+
+
+@pytest.mark.parametrize(
+    "currency_value",
+    ["USD", "EUR", 123, None],  # wrong currency, non-str, and missing (None)
+)
+def test_fetch_product_rejects_non_jpy_price_currency(currency_value):
+    html_text = _read_fixture("product_html_hololive_basic.html")
+    variant: dict[str, object] = {"id": 1, "title": "T", "price": "1000", "sku": None}
+    if currency_value is not None:
+        variant["price_currency"] = currency_value
+    product = {"id": 123, "title": "X", "body_html": "", "variants": [variant]}
+    client = _mk_client(
+        json_text=json.dumps({"product": product}), html_text=html_text
+    )
+    with pytest.raises(ShopifyJSONError):
+        _ = asyncio.run(fetch_product("https://shop.hololivepro.com/products/x", client))
+
+
+def test_fetch_product_accepts_jpy_price_currency():
+    html_text = _read_fixture("product_html_none.html")
+    variant = {
+        "id": 1,
+        "title": "T",
+        "price": "1000",
+        "sku": None,
+        "price_currency": "JPY",
+    }
+    product = {"id": 123, "title": "X", "body_html": "", "variants": [variant]}
+    client = _mk_client(
+        json_text=json.dumps({"product": product}), html_text=html_text
+    )
+    snapshot = asyncio.run(fetch_product("https://shop.hololivepro.com/products/x", client))
+    assert len(snapshot.variants) == 1
+    assert snapshot.variants[0].price == "1000"
 
 
 class _RecordingAsyncClient:

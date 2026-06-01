@@ -113,6 +113,12 @@ def _build_snapshot_from_product_json(
             raise ShopifyJSONError("shopify variant.title missing or not str")
         if not isinstance(price, str):
             raise ShopifyJSONError("shopify variant.price missing or not str")
+        price_currency = v_obj.get("price_currency")
+        if price_currency != _FORCE_CURRENCY:
+            raise ShopifyJSONError(
+                f"shopify variant.price_currency expected {_FORCE_CURRENCY!r}, "
+                f"got {price_currency!r}"
+            )
         if sku is not None and not isinstance(sku, str):
             raise ShopifyJSONError("shopify variant.sku must be str or null")
         variants.append(

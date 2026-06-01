@@ -8,13 +8,15 @@
         "id": 2000000001,
         "title": "Default Title",
         "price": "3500",
-        "sku": "Holo-001"
+        "sku": "Holo-001",
+        "price_currency": "JPY"
       },
       {
         "id": 2000000002,
         "title": "Limited",
         "price": "4500",
-        "sku": "Holo-001-L"
+        "sku": "Holo-001-L",
+        "price_currency": "JPY"
       }
     ]
   }
