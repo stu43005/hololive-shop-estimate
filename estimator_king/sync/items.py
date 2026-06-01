@@ -31,6 +31,13 @@ class ProductItem:
     published_at: int
 
 
+@dataclass(frozen=True)
+class DecomposeResult:
+    items: list[ProductItem]
+    excluded_set: int
+    excluded_zero: int
+
+
 def _strip_prefix(title: str) -> tuple[str, str | None]:
     """Return (residual, option_prefix) from a Shopify variant title 'X / Y'."""
     if " / " in title:
@@ -98,15 +105,19 @@ def _extract_snippet(item_name: str, html_details: dict[str, str], talents: froz
     return best
 
 
-def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> list[ProductItem]:
+def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> DecomposeResult:
     # Step 1+2: keep non-SET, non-zero variants as (residual, price_int, variant_id).
     kept: list[tuple[str, int, int]] = []
+    excluded_set = 0
+    excluded_zero = 0
     for v in snapshot.variants:
         residual, prefix = _strip_prefix(v.title)
         if prefix is not None and prefix.startswith("セット"):
+            excluded_set += 1
             continue
         price = _price_to_int(v.price)
         if price is None or price == 0:
+            excluded_zero += 1
             continue
         kept.append((residual, price, v.variant_id))
 
@@ -168,4 +179,5 @@ def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> li
             detail_snippet=_extract_snippet(name, snapshot.html_details, talents),
             published_at=snapshot.published_at,
         ))
-    return items
+    return DecomposeResult(
+        items=items, excluded_set=excluded_set, excluded_zero=excluded_zero)
