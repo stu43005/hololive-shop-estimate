@@ -182,6 +182,10 @@ On startup the bot's scheduler runs a crawl immediately (`run_on_start`). Becaus
 
 The vector ID scheme and document format changed (per-item vectors). After deploying, follow steps 1–3 above (scale down → clear `/data/chroma` → scale up). The SQLite DB does **not** need to be deleted for this migration — the schema migrates additively on startup. If you also changed `EMBEDDING_MODEL`/`EMBEDDING_DIMENSIONS` or bumped `item_types_version` in `stores_config.yaml`, clear both `chroma/` and `estimator_king.db` as shown above.
 
+### Wrong-currency prices
+
+The crawler pins Shopify prices to JPY (`?currency=JPY`) and validates each variant's `price_currency`. Prices crawled before this fix self-heal: the corrected price changes a product's content hash, so the next scheduled in-process crawl re-indexes it. No manual re-index is needed.
+
 ---
 
 ## 7. Smoke Tests & Verification

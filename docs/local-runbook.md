@@ -311,28 +311,16 @@ curl -s -o /dev/null -w "%{http_code}" \
 
 ## 8. Re-index Procedure
 
-Vectors from different embedding models or dimension settings are incompatible with each other.
-If you change `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS`, you must delete the ChromaDB directory
-and re-crawl all products from scratch:
+A re-index re-fetches every product and rebuilds the vector index (this consumes embedding API quota):
 
 ```bash
 rm -rf chroma/
 .venv/bin/python -m estimator_king crawl --force-refetch
 ```
 
-This will re-fetch every product and rebuild the vector index. Depending on the number of stores
-and products, this may take a while and consume embedding API quota.
+Delete `chroma/` first whenever the stored vectors are incompatible: changing `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS`, or the item-level indexing upgrade (the vector ID scheme and document format changed to per-item vectors). Bumping `item_types_version` in `stores_config.yaml` also forces a full re-index on the next crawl.
 
-### Re-index after the item-level indexing upgrade
-
-The vector ID scheme and document format changed (per-item vectors). After deploying:
-
-```bash
-rm -rf chroma/
-.venv/bin/python -m estimator_king crawl --force-refetch
-```
-
-Changing `EMBEDDING_MODEL`/`EMBEDDING_DIMENSIONS` or bumping `item_types_version` in `stores_config.yaml` also triggers a re-index.
+To only repair prices crawled in the wrong currency (before the `?currency=JPY` enforcement in `crawler/shopify.py`), run the same `crawl --force-refetch` **without** deleting `chroma/` — the corrected JPY price changes each product's content hash and re-indexes it. Natural daily crawls heal the catalog over time anyway.
 
 ---
 
