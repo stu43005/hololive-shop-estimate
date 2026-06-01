@@ -30,6 +30,7 @@ async def run_crawl_cycle(
     typing_provider: "TypingProvider",
     *,
     force_refetch: bool = False,
+    log_item_trees: bool = False,
 ) -> dict[str, int]:
     counters = {"discovered": 0, "fetched_ok": 0, "created": 0, "updated": 0,
                 "skipped": 0, "inactive": 0, "errors": 0}
@@ -61,7 +62,7 @@ async def run_crawl_cycle(
                         typing_provider=typing_provider, talents=config.talents,
                         item_types=config.item_types,
                         item_types_version=config.item_types_version,
-                        proxy=config.proxy)
+                        log_item_trees=log_item_trees, proxy=config.proxy)
                     counters["fetched_ok"] += result.processed
                     counters["created"] += result.created
                     counters["updated"] += result.updated

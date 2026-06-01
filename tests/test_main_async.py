@@ -58,6 +58,19 @@ def test_run_crawl_passes_force_refetch_to_cycle():
     assert mock_cycle.call_args.kwargs.get("force_refetch") is True
 
 
+def test_run_crawl_passes_log_item_trees_true_to_cycle():
+    mock_cfg = _make_cfg()
+    providers = _make_providers()
+    with patch("estimator_king.__main__.AppConfig.from_yaml", return_value=mock_cfg), \
+         patch("estimator_king.__main__.build_providers", return_value=providers), \
+         patch("estimator_king.__main__.run_crawl_cycle", new_callable=MagicMock) as mock_cycle, \
+         patch("estimator_king.__main__.asyncio.run", return_value={"errors": 0}):
+        with pytest.raises(SystemExit):
+            run_crawl(_make_args())
+
+    assert mock_cycle.call_args.kwargs.get("log_item_trees") is True
+
+
 def test_run_crawl_uses_db_path_from_config():
     mock_cfg = _make_cfg(db="/configured/path.db")
     providers = _make_providers()

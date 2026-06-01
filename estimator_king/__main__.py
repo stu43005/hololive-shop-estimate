@@ -72,11 +72,14 @@ def run_crawl(args: argparse.Namespace) -> None:
         logger.error("OPENAI_API_KEY (or EMBEDDING_API_KEY) is required")
         sys.exit(2)
     try:
+        # CLI crawl is interactive — emit per-product item trees (the
+        # background scheduler/run entry leaves this False and stays quiet).
         counters = asyncio.run(
             run_crawl_cycle(config, config.database_path,
                             providers.embedder, providers.vector_store,
                             providers.typing_provider,
-                            force_refetch=args.force_refetch))
+                            force_refetch=args.force_refetch,
+                            log_item_trees=True))
     except Exception as e:
         logger.error("Crawler failed: %s", e)
         sys.exit(1)
