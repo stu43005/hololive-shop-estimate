@@ -86,11 +86,13 @@ def test_fetch_product_forces_jpy_currency_on_json_url():
 
     asyncio.run(fetch_product("https://shop.hololivepro.com/products/sample", client))
 
-    assert (
-        "https://shop.hololivepro.com/products/sample.json?currency=JPY"
-        in client.requested_urls
-    )
-    assert "https://shop.hololivepro.com/products/sample" in client.requested_urls
+    # fetch_product issues exactly two GETs in a fixed order: json_url then canonical_url.
+    # Assert exact equality (not membership) so a malformed/double-query URL or any stray
+    # request would fail the test.
+    assert client.requested_urls == [
+        "https://shop.hololivepro.com/products/sample.json?currency=JPY",
+        "https://shop.hololivepro.com/products/sample",
+    ]
 
 
 def test_fetch_product_strips_existing_query_before_forcing_currency():
@@ -102,11 +104,12 @@ def test_fetch_product_strips_existing_query_before_forcing_currency():
         fetch_product("https://shop.hololivepro.com/products/sample.json?foo=bar", client)
     )
 
-    assert (
-        "https://shop.hololivepro.com/products/sample.json?currency=JPY"
-        in client.requested_urls
-    )
-    assert "https://shop.hololivepro.com/products/sample" in client.requested_urls
+    # The pre-existing ?foo=bar must be stripped before appending ?currency=JPY; assert
+    # exact equality to guarantee no malformed double-query URL slips through.
+    assert client.requested_urls == [
+        "https://shop.hololivepro.com/products/sample.json?currency=JPY",
+        "https://shop.hololivepro.com/products/sample",
+    ]
 ```
 
 - [ ] **Step 3：執行新測試，確認失敗**
