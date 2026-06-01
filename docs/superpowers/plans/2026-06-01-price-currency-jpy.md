@@ -379,9 +379,9 @@ commit message：`feat(crawl): validate shopify variant price_currency is JPY`
 
 - [ ] **Step 2：在 `docs/local-runbook.md` §8 Re-index Procedure 末尾新增小節**
 
-在 `docs/local-runbook.md` 的 `### Re-index after the item-level indexing upgrade` 小節之後新增：
+在 `docs/local-runbook.md` 的 `### Re-index after the item-level indexing upgrade` 小節之後新增（下方以四個 backtick 的外層 fence 包裹，內含一個三 backtick 的 `bash` 區塊；該 `bash` 區塊連同其關閉行皆屬於要貼入文件的內容）：
 
-```markdown
+````markdown
 ### Fixing prices crawled in the wrong currency
 
 Older crawl data may have stored non-JPY prices as if they were JPY (before the
@@ -395,7 +395,7 @@ catalog over several days. To fix every product at once:
 ```
 
 This does **not** require deleting `chroma/` — only the prices change.
-```
+````
 
 - [ ] **Step 3：在 `docs/ops-runbook.md` §6 Re-index Procedure 末尾新增小節**
 
