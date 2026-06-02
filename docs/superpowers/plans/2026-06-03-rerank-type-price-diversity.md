@@ -40,31 +40,44 @@
 
 - [ ] **Step 1: 寫失敗測試**
 
-在 `tests/test_config_schema.py` 的 `test_load_config_parses_typing_and_estimator_sections` 內，`estimator:` YAML 區塊補上兩鍵、並在斷言區新增兩行。把該函式的 YAML 與斷言改成：
+在 `tests/test_config_schema.py` 的 `test_load_config_parses_typing_and_estimator_sections` 做兩處 surgical 編輯（保留既有 `pc = cfg.build_provider_config()` 等尾端斷言，**勿整段替換**）。
+
+編輯 A — `estimator:` YAML heredoc 補上兩鍵，將：
 
 ```python
-    path = _write_yaml(tmp_path, """
-        stores:
-          - id: s
-            base_url: https://x
-            sitemap_url: https://x/sitemap.xml
-        item_types: [ぬいぐるみ, タオル]
-        item_types_version: 2
-        talents: [博衣こより, 白銀ノエル]
+        estimator:
+          top_k: 7
+          recency_weight: 0.1
+    """)
+```
+
+改為：
+
+```python
         estimator:
           top_k: 7
           recency_weight: 0.1
           diversity_weight: 0.2
           fetch_multiplier: 3
     """)
-    cfg = load_config(path)
-    assert cfg.item_types == ["ぬいぐるみ", "タオル"]
-    assert cfg.item_types_version == 2
-    assert cfg.talents == frozenset({"博衣こより", "白銀ノエル"})
+```
+
+編輯 B — 在 `estimator_recency_weight` 斷言後、`pc =` 之前插入兩行，將：
+
+```python
+    assert cfg.estimator_top_k == 7
+    assert cfg.estimator_recency_weight == 0.1
+    pc = cfg.build_provider_config()
+```
+
+改為：
+
+```python
     assert cfg.estimator_top_k == 7
     assert cfg.estimator_recency_weight == 0.1
     assert cfg.estimator_diversity_weight == 0.2
     assert cfg.estimator_fetch_multiplier == 3
+    pc = cfg.build_provider_config()
 ```
 
 並在 `test_load_config_defaults_when_sections_absent` 末尾（`assert cfg.estimator_recency_weight == 0.05` 之後）新增：
@@ -190,13 +203,14 @@ def test_same_type_different_price_not_penalized():
 
 def test_diversity_zero_degenerates_to_base_sort():
     # diversity=0 → 等同現有純 base 降冪排序（相似度序）
-    hits = [_hit("a", "ぬいぐるみ", 500, 0, 0.30),
-            _hit("b", "ぬいぐるみ", 500, 0, 0.10),
-            _hit("c", "ぬいぐるみ", 500, 0, 0.20)]
+    # 用多字元 id（"a"/"b"/"c" 會與 prompt header 子字串碰撞，str.index 會誤抓 header）
+    hits = [_hit("aaa", "ぬいぐるみ", 500, 0, 0.30),
+            _hit("bbb", "ぬいぐるみ", 500, 0, 0.10),
+            _hit("ccc", "ぬいぐるみ", 500, 0, 0.20)]
     chat = FakeChat([_est("x")])
     _estimator(RecordingVectorStore(hits), chat, top_k=3, diversity=0.0).estimate_products(["x"], "u")
     p = chat.last_user_prompt
-    assert p.index("b") < p.index("c") < p.index("a")
+    assert p.index("bbb") < p.index("ccc") < p.index("aaa")
 
 
 def test_diversity_tie_breaks_by_pool_order():
