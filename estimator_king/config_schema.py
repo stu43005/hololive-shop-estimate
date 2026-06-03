@@ -124,6 +124,8 @@ class AppConfig:
     talents: frozenset[str] = field(default_factory=frozenset)
     estimator_top_k: int = 10
     estimator_recency_weight: float = 0.05
+    estimator_diversity_weight: float = 0.05
+    estimator_fetch_multiplier: int = 2
 
     # Typing provider (credentials, from env)
     typing_model: str = "gpt-4o-mini"
@@ -285,6 +287,8 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         talents=frozenset(yaml_data.get("talents", []) or []),
         estimator_top_k=int(est.get("top_k", 10)),
         estimator_recency_weight=float(est.get("recency_weight", 0.05)),
+        estimator_diversity_weight=float(est.get("diversity_weight", 0.05)),
+        estimator_fetch_multiplier=int(est.get("fetch_multiplier", 2)),
         typing_model=os.getenv("TYPING_MODEL", "gpt-4o-mini"),
         typing_base_url=os.getenv("TYPING_BASE_URL"),
         typing_api_key=os.getenv("TYPING_API_KEY"),

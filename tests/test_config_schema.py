@@ -27,6 +27,8 @@ def test_load_config_parses_typing_and_estimator_sections(tmp_path, monkeypatch)
         estimator:
           top_k: 7
           recency_weight: 0.1
+          diversity_weight: 0.2
+          fetch_multiplier: 3
     """)
     cfg = load_config(path)
     assert cfg.item_types == ["ぬいぐるみ", "タオル"]
@@ -34,6 +36,8 @@ def test_load_config_parses_typing_and_estimator_sections(tmp_path, monkeypatch)
     assert cfg.talents == frozenset({"博衣こより", "白銀ノエル"})
     assert cfg.estimator_top_k == 7
     assert cfg.estimator_recency_weight == 0.1
+    assert cfg.estimator_diversity_weight == 0.2
+    assert cfg.estimator_fetch_multiplier == 3
     pc = cfg.build_provider_config()
     assert pc.typing_api_key == "k"
     assert pc.typing_model == "gpt-4o-mini"
@@ -53,3 +57,5 @@ def test_load_config_defaults_when_sections_absent(tmp_path, monkeypatch):
     assert cfg.talents == frozenset()
     assert cfg.estimator_top_k == 10
     assert cfg.estimator_recency_weight == 0.05
+    assert cfg.estimator_diversity_weight == 0.05
+    assert cfg.estimator_fetch_multiplier == 2
