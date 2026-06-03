@@ -20,9 +20,11 @@ class RecordingVectorStore:
     def __init__(self, hits):
         self._hits = hits
         self.where_calls = []
+        self.n_results_calls = []
 
     def query(self, embedding, n_results, where=None):
         self.where_calls.append(where)
+        self.n_results_calls.append(n_results)
         return list(self._hits)
 
 
@@ -49,10 +51,11 @@ def _est(name):
         rationale="r", reference_products=[])
 
 
-def _estimator(vs, chat, typing=None, top_k=10, recency=0.05, diversity=0.0):
+def _estimator(vs, chat, typing=None, top_k=10, recency=0.05, diversity=0.0, fetch_mult=1):
     return Estimator(FakeEmbedder(), chat, vs, typing_provider=(typing or FakeTypingProvider()),
                      item_types=["ぬいぐるみ"], item_types_version=1,
-                     top_k=top_k, recency_weight=recency, diversity_weight=diversity)
+                     top_k=top_k, recency_weight=recency,
+                     diversity_weight=diversity, fetch_multiplier=fetch_mult)
 
 
 def test_type_filtered_query_when_type_matched():
@@ -197,3 +200,27 @@ def test_diversity_tie_breaks_by_pool_order():
     _estimator(RecordingVectorStore(hits), chat, top_k=2, diversity=0.5).estimate_products(["x"], "u")
     p = chat.last_user_prompt
     assert p.index("first") < p.index("second")
+
+
+def test_fetch_multiplier_deepens_query_size():
+    vs = RecordingVectorStore([_hit("a", "ぬいぐるみ", 500, 0, 0.1)])
+    chat = FakeChat([_est("x")])
+    _estimator(vs, chat, top_k=10, fetch_mult=2).estimate_products(["x"], "u")
+    assert vs.n_results_calls and all(n == 20 for n in vs.n_results_calls)
+
+
+def test_fetch_multiplier_one_matches_top_k():
+    vs = RecordingVectorStore([_hit("a", "ぬいぐるみ", 500, 0, 0.1)])
+    chat = FakeChat([_est("x")])
+    _estimator(vs, chat, top_k=10, fetch_mult=1).estimate_products(["x"], "u")
+    assert vs.n_results_calls and all(n == 10 for n in vs.n_results_calls)
+
+
+def test_fetch_multiplier_still_sends_only_top_k_to_chat():
+    # 20 筆相異價格（鍵全相異 → 多樣性不收斂），加深後送進 chat 仍限 top_k 筆
+    hits = [_hit(f"h{i}", "ぬいぐるみ", 100 + i, 0, 0.10 + i * 0.01) for i in range(20)]
+    vs = RecordingVectorStore(hits)
+    chat = FakeChat([_est("x")])
+    _estimator(vs, chat, top_k=5, fetch_mult=2).estimate_products(["x"], "u")
+    ref_lines = [ln for ln in chat.last_user_prompt.splitlines() if ln.startswith("- h")]
+    assert len(ref_lines) == 5

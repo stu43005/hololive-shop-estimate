@@ -72,7 +72,8 @@ class Estimator:
                  typing_provider: _TypingProvider, *, item_types: list[str],
                  item_types_version: int, top_k: int = 10,
                  recency_weight: float = 0.05,
-                 diversity_weight: float = 0.05) -> None:
+                 diversity_weight: float = 0.05,
+                 fetch_multiplier: int = 2) -> None:
         self._embedder = embedder
         self._chat = chat
         self._vector_store = vector_store
@@ -82,6 +83,7 @@ class Estimator:
         self._top_k = top_k
         self._recency_weight = recency_weight
         self._diversity_weight = diversity_weight
+        self._fetch_multiplier = fetch_multiplier
 
     def estimate_products(self, product_names: list[str], user_id: str) -> EstimateBatch:
         if not product_names:
@@ -113,8 +115,9 @@ class Estimator:
             merged: dict[str, _Hit] = {}
             queries: list[dict[str, Any] | None] = [{"item_type": t} for t in types]
             queries.append(None)  # always one plain query
+            fetch_n = self._top_k * self._fetch_multiplier
             for where in queries:
-                for hit in self._vector_store.query(embedding, self._top_k, where=where):
+                for hit in self._vector_store.query(embedding, fetch_n, where=where):
                     prev = merged.get(hit.id)
                     if prev is None or hit.distance < prev.distance:
                         merged[hit.id] = hit
