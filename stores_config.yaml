@@ -274,3 +274,5 @@ talents:
 estimator:
   top_k: 10
   recency_weight: 0.05
+  diversity_weight: 0.05
+  fetch_multiplier: 2
