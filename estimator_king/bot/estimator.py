@@ -71,7 +71,8 @@ class Estimator:
     def __init__(self, embedder: _Embedder, chat: _Chat, vector_store: _VectorStore,
                  typing_provider: _TypingProvider, *, item_types: list[str],
                  item_types_version: int, top_k: int = 10,
-                 recency_weight: float = 0.05) -> None:
+                 recency_weight: float = 0.05,
+                 diversity_weight: float = 0.05) -> None:
         self._embedder = embedder
         self._chat = chat
         self._vector_store = vector_store
@@ -80,6 +81,7 @@ class Estimator:
         self._item_types_version = item_types_version
         self._top_k = top_k
         self._recency_weight = recency_weight
+        self._diversity_weight = diversity_weight
 
     def estimate_products(self, product_names: list[str], user_id: str) -> EstimateBatch:
         if not product_names:
@@ -134,7 +136,7 @@ class Estimator:
         max_pub = max(positive) if positive else 0
         span = max_pub - min_pub
 
-        def score(h: _Hit) -> float:
+        def base(h: _Hit) -> float:
             similarity = 1.0 - h.distance
             pub = int(h.metadata.get("published_at", 0) or 0)
             if span > 0 and pub > 0:
@@ -143,7 +145,27 @@ class Estimator:
                 recency = 0.0
             return similarity + self._recency_weight * recency
 
-        return sorted(hits, key=score, reverse=True)
+        def key_of(h: _Hit) -> tuple[str, int]:
+            return (str(h.metadata.get("item_type", "") or ""),
+                    int(h.metadata.get("price_jpy", 0) or 0))
+
+        base_by_id = {h.id: base(h) for h in hits}
+        selected: list[_Hit] = []
+        selected_keys: list[tuple[str, int]] = []
+        remaining = list(hits)
+        while remaining:
+            best_i = 0
+            best_score = float("-inf")
+            for i, h in enumerate(remaining):
+                dup = selected_keys.count(key_of(h))
+                adjusted = base_by_id[h.id] - self._diversity_weight * dup
+                if adjusted > best_score:
+                    best_score = adjusted
+                    best_i = i
+            picked = remaining.pop(best_i)
+            selected.append(picked)
+            selected_keys.append(key_of(picked))
+        return selected
 
     def _format_reference(self, hit: _Hit) -> str:
         m = hit.metadata

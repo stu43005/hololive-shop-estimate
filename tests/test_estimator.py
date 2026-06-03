@@ -49,10 +49,10 @@ def _est(name):
         rationale="r", reference_products=[])
 
 
-def _estimator(vs, chat, typing=None, top_k=10, recency=0.05):
+def _estimator(vs, chat, typing=None, top_k=10, recency=0.05, diversity=0.0):
     return Estimator(FakeEmbedder(), chat, vs, typing_provider=(typing or FakeTypingProvider()),
                      item_types=["ぬいぐるみ"], item_types_version=1,
-                     top_k=top_k, recency_weight=recency)
+                     top_k=top_k, recency_weight=recency, diversity_weight=diversity)
 
 
 def test_type_filtered_query_when_type_matched():
@@ -142,3 +142,58 @@ def test_surplus_estimate_dropped_with_warning(caplog):
     assert [e.product_name for e in batch.estimates] == ["line A"]
     assert batch.estimates[0].confidence == "low"
     assert any("dropped" in r.message for r in caplog.records)
+
+
+def test_diversity_promotes_distinct_keys_into_top_k():
+    # 3 筆同 (ぬいぐるみ,500)（相似度遞減）+ 1 筆不同價 + 1 筆不同類型
+    hits = [_hit("dup1", "ぬいぐるみ", 500, 0, 0.10),
+            _hit("dup2", "ぬいぐるみ", 500, 0, 0.11),
+            _hit("dup3", "ぬいぐるみ", 500, 0, 0.12),
+            _hit("diffprice", "ぬいぐるみ", 900, 0, 0.13),
+            _hit("difftype", "タオル", 500, 0, 0.14)]
+
+    base_chat = FakeChat([_est("x")])
+    _estimator(RecordingVectorStore(hits), base_chat, top_k=3, diversity=0.0).estimate_products(["x"], "u")
+    p0 = base_chat.last_user_prompt
+    # 無多樣性：純相似度序，top3 全是同鍵 dup1/dup2/dup3
+    assert "dup2" in p0 and "dup3" in p0
+    assert "diffprice" not in p0 and "difftype" not in p0
+
+    div_chat = FakeChat([_est("x")])
+    _estimator(RecordingVectorStore(hits), div_chat, top_k=3, diversity=0.05).estimate_products(["x"], "u")
+    p1 = div_chat.last_user_prompt
+    # 有多樣性：同鍵第 2/3 筆被推後，diffprice/difftype 進入 top3
+    assert "diffprice" in p1 and "difftype" in p1
+    assert "dup2" not in p1 and "dup3" not in p1
+
+
+def test_same_type_different_price_not_penalized():
+    # 同 item_type、價格各異 → 鍵不同 → 不互相懲罰，順序純由 base（相似度）決定
+    hits = [_hit("hi", "ぬいぐるみ", 500, 0, 0.10),
+            _hit("lo", "ぬいぐるみ", 900, 0, 0.20)]
+    chat = FakeChat([_est("x")])
+    _estimator(RecordingVectorStore(hits), chat, top_k=2, diversity=0.5).estimate_products(["x"], "u")
+    p = chat.last_user_prompt
+    assert p.index("hi") < p.index("lo")
+
+
+def test_diversity_zero_degenerates_to_base_sort():
+    # diversity=0 → 等同現有純 base 降冪排序（相似度序）
+    # 用多字元 id（"a"/"b"/"c" 會與 prompt header 子字串碰撞，str.index 會誤抓 header）
+    hits = [_hit("aaa", "ぬいぐるみ", 500, 0, 0.30),
+            _hit("bbb", "ぬいぐるみ", 500, 0, 0.10),
+            _hit("ccc", "ぬいぐるみ", 500, 0, 0.20)]
+    chat = FakeChat([_est("x")])
+    _estimator(RecordingVectorStore(hits), chat, top_k=3, diversity=0.0).estimate_products(["x"], "u")
+    p = chat.last_user_prompt
+    assert p.index("bbb") < p.index("ccc") < p.index("aaa")
+
+
+def test_diversity_tie_breaks_by_pool_order():
+    # base 相同、鍵不同 → 取候選池順序在前者（決定性）
+    hits = [_hit("first", "ぬいぐるみ", 500, 0, 0.10),
+            _hit("second", "タオル", 500, 0, 0.10)]
+    chat = FakeChat([_est("x")])
+    _estimator(RecordingVectorStore(hits), chat, top_k=2, diversity=0.5).estimate_products(["x"], "u")
+    p = chat.last_user_prompt
+    assert p.index("first") < p.index("second")
