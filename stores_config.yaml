@@ -145,8 +145,25 @@ item_types:
   - ボクサーパンツ
   - パンツ
   - 卓上カレンダー
+  - ぬいキーホルダー
+  - ぬいぐるみキーホルダー
+  - マルチポーチ
+  - フォンタブ
+  - ネックストラップ
+  - カードアルバム
+  - ボイスキーホルダー
+  - チェキ風カード
+  - アクリル色紙
+  - コードクリップ
+  - Album
+  - ルームライト
+  - ルームランプ
+  - エコバッグ
+  - 法被
+  - ワイドラバーマット
+  - ベースボールシャツ
 # Bump when the list changes to force re-classification on the next crawl.
-item_types_version: 2
+item_types_version: 3
 
 # Talent names (data-mined: single differing token across same-price variant
 # groups). Used for talent-gated dedup. Add new debuts here as needed.
