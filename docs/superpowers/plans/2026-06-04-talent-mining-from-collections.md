@@ -35,15 +35,10 @@
 在 `tests/test_mine_talents.py` 結尾追加（同時更新檔首 import）：
 
 ```python
-from scripts.mine_talents import (
-    extract_collection_handles,
-    filter_handles,
-    mine_talents,
-    normalize_talent_name,
-)
+from scripts.mine_talents import extract_collection_handles, mine_talents
 ```
 
-> 註：檔首原本是 `from scripts.mine_talents import mine_talents`，請替換為上面這段多重匯入（`filter_handles`、`normalize_talent_name` 供後續 Task 使用，先一併匯入避免重複改檔首）。
+> 註：檔首原本是 `from scripts.mine_talents import mine_talents`，請替換為上面這行（只加入本 Task 引入的名稱；後續 Task 2/3 會再漸進擴充此 import，確保每個 Task 的 Step 4 都能獨立通過）。
 
 追加測試：
 
@@ -62,7 +57,7 @@ def test_extract_collection_handles_picks_anchors_and_skips_images():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_mine_talents.py::test_extract_collection_handles_picks_anchors_and_skips_images -v -o addopts=""`
-Expected: FAIL with `ImportError: cannot import name 'extract_collection_handles'`（或 `filter_handles`/`normalize_talent_name`）
+Expected: FAIL with `ImportError: cannot import name 'extract_collection_handles'`
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -105,7 +100,17 @@ git commit -m "feat(mine-talents): add extract_collection_handles"
 
 - [ ] **Step 1: Write the failing test**
 
-追加：
+先把檔首 import 擴充為（加入 `filter_handles`）：
+
+```python
+from scripts.mine_talents import (
+    extract_collection_handles,
+    filter_handles,
+    mine_talents,
+)
+```
+
+再追加測試：
 
 ```python
 def test_filter_handles_drops_exact_and_prefix_matches():
@@ -166,7 +171,18 @@ git commit -m "feat(mine-talents): add filter_handles denylist"
 
 - [ ] **Step 1: Write the failing test**
 
-追加（注意 `如月　れん` 中間是全形空白 U+3000）：
+先把檔首 import 擴充為（加入 `normalize_talent_name`）：
+
+```python
+from scripts.mine_talents import (
+    extract_collection_handles,
+    filter_handles,
+    mine_talents,
+    normalize_talent_name,
+)
+```
+
+再追加測試（注意 `如月　れん` 中間是全形空白 U+3000）：
 
 ```python
 def test_normalize_talent_name_strips_all_whitespace():
@@ -410,7 +426,19 @@ def main() -> None:  # pragma: no cover
         print(f"  - {name}")
 ```
 
-同時更新檔首 docstring：把原本「Reads the live ChromaDB 'products' collection…」的說明改寫為描述新預設行為（從官方 collection 頁面抓取），並註明 `--chroma` 為舊路徑。範例 docstring：
+同時更新檔首 docstring。把現有 docstring（整段 old_string）：
+
+```python
+"""One-time talent-seed miner. Reads the live ChromaDB 'products' collection,
+finds tokens that vary as the single differing token within same-price variant
+groups (these are reliably talent names), and prints a YAML 'talents:' list for
+human review before adding to stores_config.yaml.
+
+Usage: .venv/bin/python -m scripts.mine_talents [chroma_path]
+"""
+```
+
+替換為：
 
 ```python
 """Talent-seed miner.
