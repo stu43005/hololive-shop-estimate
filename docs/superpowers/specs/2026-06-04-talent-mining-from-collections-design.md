@@ -33,7 +33,10 @@
   vspo：`all`、`goods`、`apparel`、`tapestry-poster`、`members`、`en-members`、
   `voice`…）→ 需以 denylist 過濾。此處列舉非窮舉：列表頁日後可能新增分類/團體
   handle，denylist 需隨之維護，而步驟 5 的人工審視是任何新洩漏的最終防線。
-- `requests` 已在 `requirements.txt`，且 `.venv` 可 import（`requests 2.32.5`）。
+- Shopify 的 `collections/<handle>.json` 端點在無延遲連發時大量回 HTTP 429
+  （實測 ~137 個連發約 43 個 429，且**無 `Retry-After` header**）；不處理會靜默
+  掉資料。故改用專案既有的 `AsyncHTTPClient`（含 `CrawlerPolicy` 限流 + 重試），
+  而非自行用 `requests` 連發。
 
 ## 範圍
 
@@ -57,7 +60,9 @@
    使之成為單一 token（`八雲 べに` → `八雲べに`）。
 5. **合併**：兩站抓到的 title 收進同一個 set，去重後排序，輸出單一全域 `talents:`
    清單（沿用現有結構）。
-6. **HTTP client**：使用 `requests`（同步），符合此一次性 CLI 腳本的性質。
+6. **HTTP client**：使用專案既有的 `AsyncHTTPClient` + `CrawlerPolicy`（async），
+   重用其限流 / 重試 / circuit breaker，避免自行用 `requests` 連發觸發 429 而靜默
+   掉資料。IO 函式因此為 async，`main()` 以 `asyncio.run` 驅動。
 
 ## 架構
 
@@ -123,25 +128,37 @@ STORE_SOURCES: tuple[StoreSource, ...] = (
 - 範例：`"八雲 べに"` → `"八雲べに"`；`"如月　れん"`（全形空白）→ `"如月れん"`；
   `"がうる・ぐら"` → `"がうる・ぐら"`（不變）。
 
-### IO 函式（`# pragma: no cover`）
+### IO 函式（`# pragma: no cover`，async）
 
-**`fetch_text(url: str) -> str`**：`requests.get(url, timeout=...)`，
-`raise_for_status()`，回傳 `resp.text`。
+HTTP 一律走專案既有的 `estimator_king.crawler.async_http_client.AsyncHTTPClient`
+（見 HTTP client 決策）。`AsyncHTTPClient.get(url) -> str` 內建依 `CrawlerPolicy`
+的限流（`rate_limit_rps` + jitter）、tenacity 重試（429/5xx，honor `Retry-After`，
+否則指數退避）、per-domain 並發與 circuit breaker，回傳 response text。
 
-**`fetch_collection_title(base_url: str, handle: str) -> str | None`**：
-GET `f"{base_url}/collections/{handle}.json"`，解析 JSON 取
-`payload["collection"]["title"]`；缺欄位或非 str 時回傳 `None`（容錯：個別
-collection 失敗不應中斷整體）。
+**`fetch_collection_title(client, base_url, handle) -> str | None`**：
+`await client.get(f"{base_url}/collections/{handle}.json")`，`json.loads` 後取
+`payload["collection"]["title"]`。錯誤處理：
+- `ClientError`（4xx，含 404/410，例如 `members.atom` 這種非 collection handle）
+  → 靜默回 `None`（屬正常的「找不到」）。
+- 其他 `AsyncHTTPClientError`（重試耗盡的 `RateLimitError`/`ServerError`、
+  `WAFBlockedError`、`CircuitBreakerOpenError`）→ 印 stderr 警告後回 `None`
+  （讓掉資料可見，不靜默）。
+- JSON 解析失敗 / 缺欄位 / 非 str → 回 `None`。
 
-**`mine_talents_from_stores(sources: tuple[StoreSource, ...]) -> set[str]`**：
-對每個 source：對每個 `listing_urls` 抓 HTML → `extract_collection_handles`
-聯集 → `filter_handles` → 對每個保留 handle `fetch_collection_title` →
-`normalize_talent_name` → 收進全域 set（跳過 `None`/空字串）。回傳合併 set。
+**`mine_talents_from_stores(sources, client) -> set[str]`**（async）：
+對每個 source：對每個 `listing_urls` `await client.get(...)` 取 HTML →
+`extract_collection_handles` 聯集 → `filter_handles` → 對每個保留 handle
+（`sorted`）`await fetch_collection_title` → `normalize_talent_name` → 收進
+全域 set（跳過 `None`/空字串）。回傳合併 set。listing 頁抓取**不**包 try/except，
+失敗（raise）即向上拋。
 
 ### CLI（`main()`）
 
-- 預設（無 `--chroma`）：`names = sorted(mine_talents_from_stores(STORE_SOURCES))`，
-  印出 `talents:` YAML 區塊（每行 `  - <name>`）。
+- 預設（無 `--chroma`）：`names = sorted(asyncio.run(_mine_from_stores()))`，
+  印出 `talents:` YAML 區塊（每行 `  - <name>`）。`_mine_from_stores()` 以
+  `AppConfig.from_yaml("stores_config.yaml")` 取得 `CrawlerPolicy`/`ProxyConfig`，
+  用 `async with AsyncHTTPClient(config.crawler, proxy=config.proxy)` 建 client，
+  再 `await mine_talents_from_stores(STORE_SOURCES, client)`。
 - `--chroma [path]`：走舊路徑
   `sorted(mine_talents(_load_docs_from_chroma(path)))`，path 預設 `"chroma"`。
 - 以 `argparse` 解析；舊行為（位置參數 `chroma_path`）改為 `--chroma` 的選用值。
@@ -154,7 +171,7 @@ collection 失敗不應中斷整體）。
 ## 資料流
 
 ```
-listing_urls ──fetch_text──▶ HTML
+listing_urls ──client.get──▶ HTML
                               │ extract_collection_handles (聯集多頁)
                               ▼
                           候選 handles
@@ -171,11 +188,16 @@ listing_urls ──fetch_text──▶ HTML
 
 ## 錯誤處理
 
-- 單一 collection `.json` 抓取或解析失敗：`fetch_collection_title` 回傳 `None`，
-  該 handle 略過，不中斷整體（容錯，符合「一次性探勘工具盡量多收」精神）。
-- 列表頁抓取失敗：直接拋出（列表頁是該站的根入口，失敗代表該站整批無法處理，
-  應讓使用者看到錯誤）。
+- 單一 collection：4xx（`ClientError`）→ 靜默 `None` 略過（正常的找不到）；其他
+  `AsyncHTTPClientError`（重試耗盡的限流/伺服器錯誤、WAF、circuit open）→ 印
+  stderr 警告後 `None` 略過（掉資料可見，不中斷整體）。
+- JSON 解析失敗 / 缺欄位 / 非 str → `None` 略過。
+- 列表頁抓取失敗：不攔截，直接拋出（列表頁是該站的根入口，失敗代表該站整批無法
+  處理，應讓使用者看到錯誤）。
 - 名稱正規化後為空字串：略過不收。
+- 限流：Shopify 的 `.json` 端點在連發時回 HTTP 429（無 `Retry-After`）。改用
+  `AsyncHTTPClient` 後，限流與重試由 `stores_config.yaml` 的 `CrawlerPolicy`
+  控制（預設 `rate_limit_rps: 1.5`、`max_retries: 3`），實測可完整取回兩站清單。
 
 ## 測試策略
 
