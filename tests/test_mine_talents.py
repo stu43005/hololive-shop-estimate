@@ -2,6 +2,7 @@ from scripts.mine_talents import (
     extract_collection_handles,
     filter_handles,
     mine_talents,
+    normalize_talent_name,
 )
 
 
@@ -39,3 +40,9 @@ def test_filter_handles_drops_exact_and_prefix_matches():
         ("hololive", "holostars"),
     )
     assert kept == {"azki"}
+
+
+def test_normalize_talent_name_strips_all_whitespace():
+    assert normalize_talent_name("八雲 べに") == "八雲べに"
+    assert normalize_talent_name("如月　れん") == "如月れん"
+    assert normalize_talent_name("がうる・ぐら") == "がうる・ぐら"

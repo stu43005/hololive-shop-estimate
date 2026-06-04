@@ -44,6 +44,15 @@ def filter_handles(
     return kept
 
 
+def normalize_talent_name(title: str) -> str:
+    """Collapse a collection title into a single whitespace-free token.
+
+    No-arg str.split() splits on all Unicode whitespace (ASCII space, U+3000
+    full-width space, tab, newline), so joining removes every kind of space.
+    """
+    return "".join(title.split())
+
+
 def mine_talents(
     docs: list[list[tuple[str, float]]], *, min_freq: int = 20
 ) -> set[str]:
