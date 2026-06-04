@@ -141,7 +141,7 @@ def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> De
             groups[key].append((residual, vid, removed))
         for key, group in groups.items():
             removed_any = any(r for _, _, r in group)
-            if len(group) >= 2 and key.strip() and removed_any:
+            if len(group) >= 2 and removed_any:
                 merged_talents: list[str] = []
                 for _, _, removed in group:
                     for t in removed:

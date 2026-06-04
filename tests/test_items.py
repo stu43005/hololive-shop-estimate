@@ -98,3 +98,49 @@ def test_voice_item_has_no_snippet():
     ], html_details={"グッズ詳細": "◇記念グッズ ・アクリルスタンド サイズ：H100"})
     result = decompose_items(snap, talents=TALENTS)
     assert result.items[0].detail_snippet == ""
+
+
+def test_pure_talent_enumeration_merges_to_product_title():
+    # Each variant residual is a bare talent name (empty canonical key) at one price.
+    snap = _snap("隣人ボイス2026", [
+        ("ボイス / さくらみこ", "140"),
+        ("ボイス / 白上フブキ", "140"),
+        ("ボイス / 博衣こより", "140"),
+    ])
+    result = decompose_items(snap, talents=TALENTS)
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.item_name == "隣人ボイス2026"  # named by product title (residual=None branch)
+    assert item.price_jpy == 140
+    assert len(item.source_variant_ids) == 3
+    assert set(item.talents) == {"さくらみこ", "白上フブキ", "博衣こより"}
+
+
+def test_empty_residual_without_talent_not_merged():
+    # Residual strips to "" but no talent removed -> removed_any False -> must NOT merge.
+    # Assert on item COUNT, not item_name: both empty-residual items get name == product
+    # title via _is_option_value("") (len("") < 4) -> f"{title} ".strip().
+    snap = _snap("グッズセット", [
+        ("グッズ / ", "500"),
+        ("グッズ / ", "500"),
+    ])
+    result = decompose_items(snap, talents=TALENTS)
+    assert len(result.items) == 2
+    assert all(len(i.source_variant_ids) == 1 for i in result.items)
+    assert all(i.item_name == "グッズセット" for i in result.items)
+
+
+def test_pure_talent_enumeration_coexists_with_distinct_item():
+    # Pure-talent voices (¥140) merge to product title; a non-talent item (¥500,
+    # non-empty key) stays separate and untouched.
+    snap = _snap("誕生日記念", [
+        ("ボイス / さくらみこ", "140"),
+        ("ボイス / 白上フブキ", "140"),
+        ("グッズ / アクリルスタンド", "500"),
+    ])
+    items = {i.item_name: i for i in decompose_items(snap, talents=TALENTS).items}
+    assert set(items) == {"誕生日記念", "アクリルスタンド"}
+    assert len(items["誕生日記念"].source_variant_ids) == 2
+    assert set(items["誕生日記念"].talents) == {"さくらみこ", "白上フブキ"}
+    assert items["アクリルスタンド"].price_jpy == 500
+    assert len(items["アクリルスタンド"].source_variant_ids) == 1
