@@ -1,15 +1,22 @@
-"""One-time talent-seed miner. Reads the live ChromaDB 'products' collection,
-finds tokens that vary as the single differing token within same-price variant
-groups (these are reliably talent names), and prints a YAML 'talents:' list for
-human review before adding to stores_config.yaml.
+"""Talent-seed miner.
 
-Usage: .venv/bin/python -m scripts.mine_talents [chroma_path]
+Default: fetch the authoritative talent display-name list from each store's
+official collection pages (hololive /pages/talent, vspo /collections/members
+and /collections/en-members), and print a YAML 'talents:' block for human
+review before updating stores_config.yaml.
+
+Legacy: `--chroma [PATH]` mines talent tokens heuristically from the live
+ChromaDB 'products' collection (single differing token within same-price
+variant groups).
+
+Usage:
+    .venv/bin/python -m scripts.mine_talents
+    .venv/bin/python -m scripts.mine_talents --chroma [chroma_path]
 """
 
 from __future__ import annotations
 
 import re
-import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import cast
@@ -176,7 +183,7 @@ def _load_docs_from_chroma(path: str) -> list[list[tuple[str, float]]]:  # pragm
     res = col.get(include=["documents"])
     row_re = re.compile(r"^\|\s*(.+?)\s*\|\s*([\d.]+)\s*\|$")
     out: list[list[tuple[str, float]]] = []
-    for doc in res["documents"]:
+    for doc in res["documents"] or []:
         variants: list[tuple[str, float]] = []
         for line in doc.splitlines():
             m = row_re.match(line)
@@ -188,11 +195,33 @@ def _load_docs_from_chroma(path: str) -> list[list[tuple[str, float]]]:  # pragm
 
 
 def main() -> None:  # pragma: no cover
-    path = sys.argv[1] if len(sys.argv) > 1 else "chroma"
-    talents = sorted(mine_talents(_load_docs_from_chroma(path)))
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Mine talent display names for stores_config.yaml."
+    )
+    _ = parser.add_argument(
+        "--chroma",
+        nargs="?",
+        const="chroma",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Use the legacy ChromaDB heuristic against the 'products' collection "
+            "at PATH (default 'chroma') instead of the live collection pages."
+        ),
+    )
+    args = parser.parse_args()
+    chroma_path = cast("str | None", args.chroma)
+
+    if chroma_path is not None:
+        names = sorted(mine_talents(_load_docs_from_chroma(chroma_path)))
+    else:
+        names = sorted(mine_talents_from_stores(STORE_SOURCES))
+
     print("talents:")
-    for t in talents:
-        print(f"  - {t}")
+    for name in names:
+        print(f"  - {name}")
 
 
 if __name__ == "__main__":  # pragma: no cover
