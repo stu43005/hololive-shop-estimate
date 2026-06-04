@@ -28,6 +28,22 @@ def extract_collection_handles(html: str) -> set[str]:
     return handles
 
 
+def filter_handles(
+    handles: set[str],
+    denylist_exact: frozenset[str],
+    denylist_prefixes: tuple[str, ...],
+) -> set[str]:
+    """Drop group/category handles by exact match or handle prefix."""
+    kept: set[str] = set()
+    for handle in handles:
+        if handle in denylist_exact:
+            continue
+        if any(handle.startswith(prefix) for prefix in denylist_prefixes):
+            continue
+        kept.add(handle)
+    return kept
+
+
 def mine_talents(
     docs: list[list[tuple[str, float]]], *, min_freq: int = 20
 ) -> set[str]:

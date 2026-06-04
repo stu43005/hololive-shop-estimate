@@ -1,4 +1,8 @@
-from scripts.mine_talents import extract_collection_handles, mine_talents
+from scripts.mine_talents import (
+    extract_collection_handles,
+    filter_handles,
+    mine_talents,
+)
 
 
 def test_mine_talents_returns_high_frequency_single_diff_tokens():
@@ -25,3 +29,13 @@ def test_extract_collection_handles_picks_anchors_and_skips_images():
     )
     handles = extract_collection_handles(html)
     assert handles == {"azki", "gawrgura"}
+
+
+def test_filter_handles_drops_exact_and_prefix_matches():
+    handles = {"azki", "hololive_gen0", "holostarsen", "all", "uproar"}
+    kept = filter_handles(
+        handles,
+        frozenset({"all", "uproar"}),
+        ("hololive", "holostars"),
+    )
+    assert kept == {"azki"}
