@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import sys
 from collections import Counter, defaultdict
+from typing import cast
 
 
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif")
@@ -20,7 +21,7 @@ _HANDLE_RE = re.compile(r'href="/collections/([a-z0-9._-]+)"')
 def extract_collection_handles(html: str) -> set[str]:
     """Extract collection handles from anchor hrefs, skipping CDN image paths."""
     handles: set[str] = set()
-    for handle in _HANDLE_RE.findall(html):
+    for handle in cast(list[str], _HANDLE_RE.findall(html)):
         if handle.endswith(_IMAGE_SUFFIXES):
             continue
         handles.add(handle)
