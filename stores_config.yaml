@@ -165,9 +165,11 @@ item_types:
 # Bump when the list changes to force re-classification on the next crawl.
 item_types_version: 3
 
-# Talent display names (mined from official store collection pages via
-# scripts/mine_talents.py). Used for talent-gated dedup. Re-run the miner
-# and replace this block when rosters change.
+# Talent display names for talent-gated dedup. Base list is mined from the
+# official store collection pages via scripts/mine_talents.py; graduated
+# talents (no collection, but still appear in product names) are added by
+# hand. When re-running the miner to replace this block, re-add the manual
+# graduates below: 夜空メル, 潤羽るしあ, 魔乃アロエ, 緋崎ガンマ.
 talents:
   - AZKi
   - IRyS
@@ -231,6 +233,7 @@ talents:
   - 夕刻ロベル
   - 夜乃くろむ
   - 夜十神封魔
+  - 夜空メル
   - 夢野あかり
   - 大神ミオ
   - 大空スバル
@@ -261,6 +264,7 @@ talents:
   - 沙花叉クロヱ
   - 涼上エリス
   - 湊あくあ
+  - 潤羽るしあ
   - 火威青
   - 猫又おかゆ
   - 猫汰つな
@@ -277,6 +281,7 @@ talents:
   - 紫咲シオン
   - 紫宮るな
   - 綺々羅々ヴィヴィ
+  - 緋崎ガンマ
   - 美暮ナリン
   - 羽継烏有
   - 胡桃のあ
@@ -301,6 +306,7 @@ talents:
   - 響咲リオナ
   - 風白ゆき
   - 風真いろは
+  - 魔乃アロエ
   - 鷹嶺ルイ
   - 黒刃アリヤ
   - 龍巻ちせ
