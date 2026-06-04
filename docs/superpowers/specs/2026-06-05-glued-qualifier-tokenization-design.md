@@ -51,7 +51,7 @@ def _canonical_key(residual: str, talents: frozenset[str]) -> tuple[str, list[st
 
 合併 item（去重分群後 `residual=None`）的名稱改為**共同部分（該組 canonical key）**，key 為空（整串皆 talent）時 fallback product 標題：
 
-- `_Item`（[items.py:129-134](../../../estimator_king/sync/items.py)）新增欄位 `key: str`：合併分支（[items.py:150-153](../../../estimator_king/sync/items.py)）填入該組 canonical key；非合併分支（[items.py:155-157](../../../estimator_king/sync/items.py)）填 `""`（未使用）。
+- `_Item`（[items.py:129-134](../../../estimator_king/sync/items.py)）新增欄位 `key: str`：合併分支（[items.py:150-153](../../../estimator_king/sync/items.py)）填入該組 canonical key；非合併分支（[items.py:154-157](../../../estimator_king/sync/items.py)）填 `""`（未使用）。
 - 命名分支（[items.py:165-171](../../../estimator_king/sync/items.py)）改為：
 
   ```python
@@ -65,7 +65,7 @@ def _canonical_key(residual: str, talents: frozenset[str]) -> tuple[str, list[st
       items.append(ProductItem(... item_name=name ...))
   ```
 
-- **移除 `whole_product_single`**（[items.py:160-163](../../../estimator_king/sync/items.py)）：其唯一效果是「整 product 合併時強制 product 標題命名」，現由上式「key 空 → product 標題」涵蓋；key 非空時改用共同部分（如 `Blue Journey衣装ver.`）。此為刻意的命名語義變更。
+- **移除 `whole_product_single`**（[items.py:161-163](../../../estimator_king/sync/items.py)）：其唯一效果是「整 product 合併時強制 product 標題命名」，現由上式「key 空 → product 標題」涵蓋；key 非空時改用共同部分（如 `Blue Journey衣装ver.`）。此為刻意的命名語義變更。
 - **不採用** `{product} / {key}` 形式，也不做子字串抑制：product 脈絡改由 §3.3 的參考行欄位提供，使 item_name 維持為純共同部分、避免 embedding 文件中 product 標題重複（[engine.py:84-88](../../../estimator_king/sync/engine.py) 的文件第 3 行已含 `# {product_title}`）。
 
 ### 3.3 Estimator 參考行加 product 名（[estimator.py:173-178](../../../estimator_king/bot/estimator.py)）
@@ -91,6 +91,7 @@ def _format_reference(self, hit: _Hit) -> str:
 
 - **item_name 必須帶共同部分以避免 slug 撞號**：item_id 為 `{store_id}:{product_id}:{slug(item_name, price)}`（[engine.py:77-80](../../../estimator_king/sync/engine.py)、[engine.py:240](../../../estimator_king/sync/engine.py)）。token 化修正後，同一 product 同價會有多個合併組（如 voice 的 `日本語`/`英語`/`インドネシア語` 同為 1000 円）。若全 fallback 成 product 標題則 slug 相同 → 互相覆寫。§3.2 以共同部分命名確保同 product 同價的不同合併組得到**相異 item_name → 相異 slug**，不撞號。
 - **key 空時的 fallback 安全**：同 product 內 key 空的合併組至多一個（key 空且同價即同組、已合併為一），fallback product 標題不致與其他 key 空組同價撞號。
+- **既有邊界（非本次引入、不處理）**：key 空的 fallback 與「空殘餘無 talent 的非合併項」（殘餘為空字串時 `_is_option_value("")` 為真、亦命名為 product 標題）理論上可在同 product 同價撞號。此為既有行為（現行碼的純-talent 合併與空殘餘非合併皆已命名為 product 標題），**非本次變更引入**，且需空殘餘 variant 方觸發，屬可接受的既有邊界，本案不處理。
 - **同價前提仍成立**：合併仍先按 price 分組（[items.py:125-127](../../../estimator_king/sync/items.py)），命名變更不影響分組。
 
 ## 5. 範圍
@@ -131,7 +132,7 @@ def _format_reference(self, hit: _Hit) -> str:
 
 ### 8.2 `tests/test_estimator.py`
 
-- **更新** `_hit`（[test_estimator.py:32-34](../../../tests/test_estimator.py)）的 metadata 加入 `"product_title": "P"`（或具代表性值）。
+- **更新** `_hit`（[test_estimator.py:31-34](../../../tests/test_estimator.py)）的 metadata 加入 `"product_title": "P"`（或具代表性值）。
 - **更新** 參考行斷言（[test_estimator.py:116](../../../tests/test_estimator.py)）為新格式，含 product_title 欄位，例：`"- itemX | ぬいぐるみ | P | ¥500 | ? | s"`。
 - 其餘 estimator 測試（rerank、對帳、多類型查詢等）不受影響。
 
