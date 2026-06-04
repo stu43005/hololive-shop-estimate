@@ -165,8 +165,9 @@ item_types:
 # Bump when the list changes to force re-classification on the next crawl.
 item_types_version: 3
 
-# Talent names (data-mined: single differing token across same-price variant
-# groups). Used for talent-gated dedup. Add new debuts here as needed.
+# Talent display names (mined from official store collection pages via
+# scripts/mine_talents.py). Used for talent-gated dedup. Re-run the miner
+# and replace this block when rosters change.
 talents:
   - AZKi
   - IRyS
@@ -194,12 +195,15 @@ talents:
   - ジュラルド・ティー・レクスフォード
   - セシリア・イマーグリーン
   - セレス・ファウナ
+  - ソラリリコ
   - ネリッサ・レイヴンクロフト
+  - ノワール・ヴェスパー
   - ハコス・ベールズ
   - パヴォリア・レイネ
   - フワワ・アビスガード
   - ベスティア・ゼータ
   - マキナ・X・フレオン
+  - マグニ・デズモンド
   - ムーナ・ホシノヴァ
   - モココ・アビスガード
   - ラオーラ・パンテーラ
@@ -213,6 +217,8 @@ talents:
   - 七詩ムメイ
   - 万象院ハッカ
   - 不知火フレア
+  - 九十九佐命
+  - 井月みちる
   - 儒烏風亭らでん
   - 兎咲ミミ
   - 兎田ぺこら
@@ -220,11 +226,11 @@ talents:
   - 千燈ゆうひ
   - 博衣こより
   - 古石ビジュー
+  - 地崎ジラ
   - 夏色まつり
   - 夕刻ロベル
   - 夜乃くろむ
   - 夜十神封魔
-  - 夜空メル
   - 夢野あかり
   - 大神ミオ
   - 大空スバル
@@ -244,12 +250,16 @@ talents:
   - 律可
   - 戌神ころね
   - 星街すいせい
+  - 春先のどか
   - 桃鈴ねね
+  - 桐生ココ
+  - 梅園ジュノ
   - 森カリオペ
   - 橘ひなの
   - 水宮枢
   - 水無世燐央
   - 沙花叉クロヱ
+  - 涼上エリス
   - 湊あくあ
   - 火威青
   - 猫又おかゆ
@@ -267,10 +277,11 @@ talents:
   - 紫咲シオン
   - 紫宮るな
   - 綺々羅々ヴィヴィ
-  - 緋崎ガンマ
+  - 美暮ナリン
   - 羽継烏有
   - 胡桃のあ
   - 花咲みやび
+  - 花園さやか
   - 花芽すみれ
   - 花芽なずな
   - 英リサ
@@ -282,11 +293,17 @@ talents:
   - 赤井はあと
   - 輪堂千速
   - 轟はじめ
+  - 銀城サイネ
+  - 鏡見キラ
   - 雪花ラミィ
+  - 青月レミア
   - 音乃瀬奏
   - 響咲リオナ
+  - 風白ゆき
   - 風真いろは
   - 鷹嶺ルイ
+  - 黒刃アリヤ
+  - 龍巻ちせ
 
 estimator:
   top_k: 10
