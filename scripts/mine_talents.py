@@ -38,7 +38,7 @@ def filter_handles(
     for handle in handles:
         if handle in denylist_exact:
             continue
-        if any(handle.startswith(prefix) for prefix in denylist_prefixes):
+        if handle.startswith(denylist_prefixes):
             continue
         kept.add(handle)
     return kept
