@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import sys
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from typing import cast
 
 
@@ -51,6 +52,93 @@ def normalize_talent_name(title: str) -> str:
     full-width space, tab, newline), so joining removes every kind of space.
     """
     return "".join(title.split())
+
+
+@dataclass(frozen=True)
+class StoreSource:
+    store_id: str
+    base_url: str  # no trailing slash
+    listing_urls: tuple[str, ...]
+    denylist_exact: frozenset[str]
+    denylist_prefixes: tuple[str, ...]
+
+
+STORE_SOURCES: tuple[StoreSource, ...] = (
+    StoreSource(
+        store_id="hololive",
+        base_url="https://shop.hololivepro.com",
+        listing_urls=("https://shop.hololivepro.com/pages/talent",),
+        denylist_exact=frozenset({
+            "all", "flow-glow", "friend-a", "uproar",
+            "shi-wu-suo-sutatuhu", "zu-ye-sheng",
+        }),
+        denylist_prefixes=("hololive", "holostars"),
+    ),
+    StoreSource(
+        store_id="vspo",
+        base_url="https://store.vspo.jp",
+        listing_urls=(
+            "https://store.vspo.jp/collections/members",
+            "https://store.vspo.jp/collections/en-members",
+        ),
+        denylist_exact=frozenset({
+            "all", "members", "en-members", "apparel", "goods", "others",
+            "digitalgoods", "event-goods", "goods-accessories",
+            "tapestry-poster", "voice",
+        }),
+        denylist_prefixes=(),
+    ),
+)
+
+
+def fetch_text(url: str) -> str:  # pragma: no cover
+    import requests
+
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    return resp.text
+
+
+def fetch_collection_title(base_url: str, handle: str) -> str | None:  # pragma: no cover
+    import requests
+
+    resp = requests.get(f"{base_url}/collections/{handle}.json", timeout=30)
+    if resp.status_code != 200:
+        return None
+    try:
+        payload = cast(object, resp.json())
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload_d = cast(dict[str, object], payload)
+    collection = payload_d.get("collection")
+    if not isinstance(collection, dict):
+        return None
+    collection_d = cast(dict[str, object], collection)
+    title = collection_d.get("title")
+    if not isinstance(title, str):
+        return None
+    return title
+
+
+def mine_talents_from_stores(sources: tuple[StoreSource, ...]) -> set[str]:  # pragma: no cover
+    names: set[str] = set()
+    for source in sources:
+        handles: set[str] = set()
+        for url in source.listing_urls:
+            handles |= extract_collection_handles(fetch_text(url))
+        kept = filter_handles(
+            handles, source.denylist_exact, source.denylist_prefixes
+        )
+        for handle in sorted(kept):
+            title = fetch_collection_title(source.base_url, handle)
+            if title is None:
+                continue
+            name = normalize_talent_name(title)
+            if name:
+                names.add(name)
+    return names
 
 
 def mine_talents(
