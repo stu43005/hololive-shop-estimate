@@ -53,8 +53,8 @@
    由人工把結果套用到 `stores_config.yaml` 並驗證。腳本**不**自動改寫 config。
 3. **過濾方式**：腳本內建 per-store denylist（精確 handle 集合 + handle 前綴）
    自動過濾團體/分類 collection。
-4. **名稱正規化**：去除 title 內部的 ASCII 半形空白與全形空白 `　`，使之成為單一
-   token（`八雲 べに` → `八雲べに`）。
+4. **名稱正規化**：去除 title 內所有空白（ASCII 半形、全形空白 `　`、tab、換行），
+   使之成為單一 token（`八雲 べに` → `八雲べに`）。
 5. **合併**：兩站抓到的 title 收進同一個 set，去重後排序，輸出單一全域 `talents:`
    清單（沿用現有結構）。
 6. **HTTP client**：使用 `requests`（同步），符合此一次性 CLI 腳本的性質。
