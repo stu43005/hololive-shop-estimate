@@ -39,7 +39,7 @@ if len(group) >= 2 and removed_any:
 
 ### 3.2 命名（無需修改）
 
-`residual=None` 的 item 在既有命名分支 [items.py:166-167](../../../estimator_king/sync/items.py) 已以 `snapshot.title`（product 標題）命名。空-key 合併產生的 item 即 `residual=None`，自動沿用此分支，**不需新增或修改命名邏輯**。`whole_product_single`（[items.py:161-163](../../../estimator_king/sync/items.py)）判定亦不需改動：整個 product 收斂為單一空-key 合併 item 時 `len(raw_items) == 1 and residual is None and len(variant_ids) >= 2` 成立，命名同樣落在 product 標題分支。
+命名分支為 [items.py:166](../../../estimator_king/sync/items.py) 的 `if ri.residual is None or whole_product_single:`。空-key 合併產生的 item 即 `residual=None`，**僅憑 `residual is None`（該條件第一項）即落入 `snapshot.title`（product 標題）命名分支，與 `whole_product_single` 無關**，故 **不需新增或修改命名邏輯**。`whole_product_single`（[items.py:161-163](../../../estimator_king/sync/items.py)）只影響「單一 `residual` 非空、但需以 product 標題覆寫」的情況，本變更不觸及該路徑，因此 `whole_product_single` 判定亦無需改動。
 
 ## 4. 安全性論證（不變式）
 
@@ -47,7 +47,7 @@ if len(group) >= 2 and removed_any:
 
 1. **同價是合併前提**：分組第一層按 price（[items.py:125-127](../../../estimator_king/sync/items.py)），canonical key 分群只在同一 price 的成員內進行（[items.py:137-141](../../../estimator_king/sync/items.py)）。不同價格不可能進同一群組；合併 item 的 `price_jpy` 為該群組共同價格，對組內每筆皆正確。即使發生非預期合併，價格不失真。
 
-2. **空-key 群組只收得到「全 talent 或全空白」殘餘**：`_canonical_key`（[items.py:60-69](../../../estimator_king/sync/items.py)）的 key 為空 ⟺ `kept == []` ⟺ 殘餘的每個 token 皆為 talent，或殘餘無 token（空字串）。因此**任何含非 talent 實體 token 的殘餘（如「アクリルスタンド」「ポーチ」）必得非空 key、被分到自己的群組，結構上不可能進入空-key 群組被誤併**。
+2. **空-key 群組只收得到「全 talent 或全空白」殘餘**：`_canonical_key`（[items.py:60-69](../../../estimator_king/sync/items.py)）的 key 為空 ⟺ `kept == []` ⟺ 殘餘的每個 token 皆為 talent，或殘餘無 token（空字串）。因此**任何含非 talent token 的殘餘（如「アクリルスタンド」「ポーチ」）必得非空 key、被分到自己的群組，結構上不可能進入空-key 群組被誤併**。注意 `_canonical_key` 對殘餘以原始 `.split()` 切 token（**非** `_meaningful_tokens` 的長度 ≥2 過濾，[items.py:64](../../../estimator_king/sync/items.py)），故連單字元的非 talent token 也會進入 `kept` 使 key 非空——空-key 群組更不可能混入任何非 talent 內容。
 
 3. **`removed_any` 守住純空白群組**：唯一能混入空-key 群組的「非 talent」成員為「殘餘整串空白」的退化 variant；其要被合併，群組仍須 `removed_any == True`（即至少一筆為純 talent）。全空白且無任何 talent 的群組 `removed_any == False`，仍走 else 分支不合併。
 
@@ -70,7 +70,7 @@ if len(group) >= 2 and removed_any:
 新增：
 
 1. **純-talent 列舉合併**：product 標題如「隣人ボイス」，多個 variant 殘餘為裸 talent 名（皆在 `TALENTS`，同價），驗證合併為 1 筆 item、`item_name == product 標題`、`talents` 收齊全部、`source_variant_ids` 長度等於 variant 數、`price_jpy` 為共同價。
-2. **空-key 但無 talent 不合併**：≥2 個殘餘為空白且無 talent 的 variant（同價），驗證 `removed_any == False` 路徑下**不**合併（各自成 item，非單一合併 item）。
+2. **空-key 但無 talent 不合併**：建構 ≥2 個「殘餘為空字串且無 talent」的同價 variant——variant 標題形如 `"グッズ / "`（`" / "` 後為空，`_strip_prefix` 後 `residual == ""`，故 `_canonical_key` 回傳 `("", [])`、落入空-key 群組但 `removed_any == False`）。驗證它們**不**被合併：斷言以 **item 數**為準——`len(result.items) == 2`（或 variant 數）、每筆 `len(source_variant_ids) == 1`。**不可用 `item_name` 區分**：空殘餘走 else 分支後，命名經 `_is_option_value("")`（`len("") < 4` → True）→ `f"{snapshot.title} ".strip()` → 兩筆 `item_name` 皆等於 product 標題，故只能以 item 數 / `source_variant_ids` 長度驗證未合併。
 3. **混合：純-talent 列舉 + 一筆獨立非 talent 品項同存**：驗證純-talent 群組合併為 1 筆（product 標題命名）、非 talent 品項（如「アクリルスタンド」，非空 key）獨立成另一筆、兩者互不干擾。
 
 既有測試須維持綠（驗證非空 key 路徑不受影響）：
@@ -89,6 +89,6 @@ if len(group) >= 2 and removed_any:
 
 1. 純-talent 列舉商品（多 variant 殘餘皆為字典內 talent 名、同價）合併為單一 item，命名為 product 標題，`talents` 收齊、`price_jpy` 正確。
 2. 含非 talent 實體 token 的品項（如「アクリルスタンド」）永不被併入空-key 群組（結構保證，由測試案例 3 佐證）。
-3. 全空白且無 talent 的 variant 群組不被合併（`removed_any` 守住）。
+3. 全空白且無 talent 的 variant 群組不被合併（`removed_any` 守住）——以 item 數 / `source_variant_ids` 長度驗證，非以 `item_name` 區分（空殘餘兩筆名稱皆等於 product 標題）。
 4. 既有合併 / 不合併行為（Blue Journey 合併、themed series 不合併）不變。
 5. 驗證工具鏈全綠（型別 0 error、ruff、相關測試）。
