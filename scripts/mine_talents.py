@@ -3,7 +3,9 @@
 Default: fetch the authoritative talent display-name list from each store's
 official collection pages (hololive /pages/talent, vspo /collections/members
 and /collections/en-members), and print a YAML 'talents:' block for human
-review before updating stores_config.yaml.
+review before updating stores_config.yaml. Fetches go through the crawler's
+AsyncHTTPClient, so rate limiting and retries follow the CrawlerPolicy in
+stores_config.yaml (the .json endpoints return HTTP 429 under bursts).
 
 Legacy: `--chroma [PATH]` mines talent tokens heuristically from the live
 ChromaDB 'products' collection (single differing token within same-price
@@ -16,10 +18,16 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from estimator_king.crawler.async_http_client import AsyncHTTPClient
 
 
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif")
@@ -98,22 +106,24 @@ STORE_SOURCES: tuple[StoreSource, ...] = (
 )
 
 
-def fetch_text(url: str) -> str:  # pragma: no cover
-    import requests
+async def fetch_collection_title(
+    client: AsyncHTTPClient, base_url: str, handle: str
+) -> str | None:  # pragma: no cover
+    from estimator_king.crawler.async_http_client import (
+        AsyncHTTPClientError,
+        ClientError,
+    )
 
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    return resp.text
-
-
-def fetch_collection_title(base_url: str, handle: str) -> str | None:  # pragma: no cover
-    import requests
-
-    resp = requests.get(f"{base_url}/collections/{handle}.json", timeout=30)
-    if resp.status_code != 200:
+    url = f"{base_url}/collections/{handle}.json"
+    try:
+        text = await client.get(url)
+    except ClientError:
+        return None  # genuine 4xx (e.g. a non-collection handle like members.atom)
+    except AsyncHTTPClientError as exc:
+        print(f"warning: skipping {url}: {exc}", file=sys.stderr)
         return None
     try:
-        payload = cast(object, resp.json())
+        payload = cast(object, json.loads(text))
     except ValueError:
         return None
     if not isinstance(payload, dict):
@@ -129,17 +139,19 @@ def fetch_collection_title(base_url: str, handle: str) -> str | None:  # pragma:
     return title
 
 
-def mine_talents_from_stores(sources: tuple[StoreSource, ...]) -> set[str]:  # pragma: no cover
+async def mine_talents_from_stores(
+    sources: tuple[StoreSource, ...], client: AsyncHTTPClient
+) -> set[str]:  # pragma: no cover
     names: set[str] = set()
     for source in sources:
         handles: set[str] = set()
         for url in source.listing_urls:
-            handles |= extract_collection_handles(fetch_text(url))
+            handles |= extract_collection_handles(await client.get(url))
         kept = filter_handles(
             handles, source.denylist_exact, source.denylist_prefixes
         )
         for handle in sorted(kept):
-            title = fetch_collection_title(source.base_url, handle)
+            title = await fetch_collection_title(client, source.base_url, handle)
             if title is None:
                 continue
             name = normalize_talent_name(title)
@@ -194,6 +206,15 @@ def _load_docs_from_chroma(path: str) -> list[list[tuple[str, float]]]:  # pragm
     return out
 
 
+async def _mine_from_stores() -> set[str]:  # pragma: no cover
+    from estimator_king.config_schema import AppConfig
+    from estimator_king.crawler.async_http_client import AsyncHTTPClient
+
+    config = AppConfig.from_yaml("stores_config.yaml")
+    async with AsyncHTTPClient(config.crawler, proxy=config.proxy) as client:
+        return await mine_talents_from_stores(STORE_SOURCES, client)
+
+
 def main() -> None:  # pragma: no cover
     import argparse
 
@@ -217,7 +238,7 @@ def main() -> None:  # pragma: no cover
     if chroma_path is not None:
         names = sorted(mine_talents(_load_docs_from_chroma(chroma_path)))
     else:
-        names = sorted(mine_talents_from_stores(STORE_SOURCES))
+        names = sorted(asyncio.run(_mine_from_stores()))
 
     print("talents:")
     for name in names:
