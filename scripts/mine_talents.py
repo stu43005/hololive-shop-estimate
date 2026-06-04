@@ -13,6 +13,20 @@ import sys
 from collections import Counter, defaultdict
 
 
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+_HANDLE_RE = re.compile(r'href="/collections/([a-z0-9._-]+)"')
+
+
+def extract_collection_handles(html: str) -> set[str]:
+    """Extract collection handles from anchor hrefs, skipping CDN image paths."""
+    handles: set[str] = set()
+    for handle in _HANDLE_RE.findall(html):
+        if handle.endswith(_IMAGE_SUFFIXES):
+            continue
+        handles.add(handle)
+    return handles
+
+
 def mine_talents(
     docs: list[list[tuple[str, float]]], *, min_freq: int = 20
 ) -> set[str]:
