@@ -27,10 +27,12 @@
 - vspo 商品 variant title 中，名稱**無空白**（`花芽すみれ`、`小雀とと`）。
   → collection title 的內部空白必須去除，才能對上 dedup 的 token 格式。
 - 兩站有重疊成員（如 `花芽すみれ`、`花芽なずな`、`小雀とと`）→ 合併需去重。
-- 列表頁的 `/collections/<handle>` 連結混入團體/分類 collection
-  （hololive：`hololive_gen0`、`holostarsen`、`all`、`flow-glow`、`friend-a`…；
-  vspo：`all`、`goods`、`apparel`、`tapestry-poster`、`members`、`en-members`…）
-  → 需以 denylist 過濾。
+- 列表頁的 `/collections/<handle>` 連結混入團體/分類/狀態 collection
+  （hololive：`hololive_gen0`、`holostarsen`、`all`、`flow-glow`、`friend-a`、
+  `uproar`、`shi-wu-suo-sutatuhu`(事務所スタッフ)、`zu-ye-sheng`(卒業)…；
+  vspo：`all`、`goods`、`apparel`、`tapestry-poster`、`members`、`en-members`、
+  `voice`…）→ 需以 denylist 過濾。此處列舉非窮舉：列表頁日後可能新增分類/團體
+  handle，denylist 需隨之維護，而步驟 5 的人工審視是任何新洩漏的最終防線。
 - `requests` 已在 `requirements.txt`，且 `.venv` 可 import（`requests 2.32.5`）。
 
 ## 範圍
@@ -75,7 +77,10 @@ STORE_SOURCES: tuple[StoreSource, ...] = (
         store_id="hololive",
         base_url="https://shop.hololivepro.com",
         listing_urls=("https://shop.hololivepro.com/pages/talent",),
-        denylist_exact=frozenset({"all", "flow-glow", "friend-a"}),
+        denylist_exact=frozenset({
+            "all", "flow-glow", "friend-a", "uproar",
+            "shi-wu-suo-sutatuhu", "zu-ye-sheng",
+        }),
         denylist_prefixes=("hololive", "holostars"),
     ),
     StoreSource(
@@ -88,6 +93,7 @@ STORE_SOURCES: tuple[StoreSource, ...] = (
         denylist_exact=frozenset({
             "all", "members", "en-members", "apparel", "goods", "others",
             "digitalgoods", "event-goods", "goods-accessories", "tapestry-poster",
+            "voice",
         }),
         denylist_prefixes=(),
     ),
@@ -110,11 +116,12 @@ STORE_SOURCES: tuple[StoreSource, ...] = (
 - 回傳保留的 set。
 
 **`normalize_talent_name(title: str) -> str`**
-- 去除字串內所有 ASCII 半形空白與全形空白 `　`（含首尾與中間）。
-- 實作：`"".join(title.split()) ` 不夠（`str.split()` 不切全形空白）→
-  需先把 `　` 視為空白。採 `re.sub(r"[\s　]+", "", title).strip()`
-  或等效逐字過濾。回傳結果。
-- 範例：`"八雲 べに"` → `"八雲べに"`；`"がうる・ぐら"` → `"がうる・ぐら"`（不變）。
+- 去除字串內所有空白（ASCII 半形、全形空白 `　` U+3000、tab、換行；含首尾與中間），
+  合併為單一 token。
+- 實作：`"".join(title.split())`。Python 無參數 `str.split()` 會切所有 Unicode
+  空白（含全形空白 U+3000），一次去除所有空白並合併。回傳結果。
+- 範例：`"八雲 べに"` → `"八雲べに"`；`"如月　れん"`（全形空白）→ `"如月れん"`；
+  `"がうる・ぐら"` → `"がうる・ぐら"`（不變）。
 
 ### IO 函式（`# pragma: no cover`）
 
