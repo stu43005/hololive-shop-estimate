@@ -371,21 +371,23 @@ This confirms spec §7.1 (acceptance #6) against live product data. It is networ
 
 - [ ] **Step 1: Run the real-data decompose check**
 
-Run (sources `.env` for nothing needed here — this only fetches public product JSON and calls the pure `decompose_items`):
+Run it via the project's `AsyncHTTPClient` so requests honor the configured `CrawlerPolicy` (per-domain rate limit, jitter, retry/backoff, circuit breaker, and the crawler's real User-Agent) — never hammer the live store. `AppConfig.from_yaml("stores_config.yaml")` supplies `config.crawler` (CrawlerPolicy), `config.proxy` (ProxyConfig), and `config.talents` (frozenset); no `.env` is required (load_config reads structural YAML + optional env, and does not validate credentials). Construction mirrors [cycle.py:39](../../../estimator_king/crawler/cycle.py) (`AsyncHTTPClient(config.crawler, proxy=config.proxy)`); `await client.get(url)` returns the response body text.
 
 ```bash
 .venv/bin/python - <<'PY'
-import json, urllib.request, yaml
+import asyncio, json
+from estimator_king.config_schema import AppConfig
+from estimator_king.crawler.async_http_client import AsyncHTTPClient
 from estimator_king.crawler.snapshot import ProductSnapshot, ProductVariant
 from estimator_king.sync.items import decompose_items
 
-talents = frozenset(yaml.safe_load(open("stores_config.yaml")).get("talents", []))
+config = AppConfig.from_yaml("stores_config.yaml")
+talents = config.talents
 
-def fetch(store, pid):
+async def fetch(client, store, pid):
     for pg in range(1, 30):
         url = f"https://{store}/products.json?limit=250&page={pg}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; EstimatorKing-verify)"})
-        products = json.load(urllib.request.urlopen(req)).get("products", [])
+        products = json.loads(await client.get(url)).get("products", [])
         if not products:
             break  # reached end of catalog
         for p in products:
@@ -393,14 +395,7 @@ def fetch(store, pid):
                 return p
     raise SystemExit(f"product {pid} not found on {store}")
 
-def run(store, pid, label):
-    p = fetch(store, pid)
-    snap = ProductSnapshot(
-        product_id=p["id"], title=p["title"], description="",
-        variants=[ProductVariant(variant_id=v["id"], title=v["title"], price=v["price"])
-                  for v in p["variants"]],
-        html_details={})
-    res = decompose_items(snap, talents=talents)
+def check(label, res):
     merged = [i for i in res.items if len(i.source_variant_ids) >= 2]
     print(f"\n=== {label}: {len(res.items)} items, {len(merged)} merged ===")
     for i in merged:
@@ -415,8 +410,20 @@ def run(store, pid, label):
         ok = any(i.item_name == "ぶいすぽっ！ジャージ" and len(i.source_variant_ids) == 25 for i in merged)
         print("  jersey check:", "OK" if ok else "MISMATCH")
 
-run("shop.hololivepro.com", 9384273215708, "秘密の雨の日ボイス")
-run("store.vspo.jp", 7866043990203, "ぶいすぽっ！ジャージ")
+async def main():
+    targets = [("shop.hololivepro.com", 9384273215708, "秘密の雨の日ボイス"),
+               ("store.vspo.jp", 7866043990203, "ぶいすぽっ！ジャージ")]
+    async with AsyncHTTPClient(config.crawler, proxy=config.proxy) as client:
+        for store, pid, label in targets:
+            p = await fetch(client, store, pid)
+            snap = ProductSnapshot(
+                product_id=p["id"], title=p["title"], description="",
+                variants=[ProductVariant(variant_id=v["id"], title=v["title"], price=v["price"])
+                          for v in p["variants"]],
+                html_details={})
+            check(label, decompose_items(snap, talents=talents))
+
+asyncio.run(main())
 PY
 ```
 
