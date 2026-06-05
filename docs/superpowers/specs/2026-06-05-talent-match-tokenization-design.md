@@ -1,51 +1,76 @@
-# 黏著修飾詞的 token 化、合併命名與參考行 product 名 — 設計規格
+# Talent 比對 token 化（黏著修飾詞、內部空白）、合併命名與參考行 product 名 — 設計規格
 
 日期：2026-06-05
 
 ## 1. 目標
 
-讓 talent 名後**緊黏無空白修飾詞**（真實 hololive 資料中的全形括號語言標記，如 `（日本語）`/`（英語）`/`（インドネシア語）`）的列舉型商品能正確合併；合併後 item 以**共同部分**命名（空則 product 標題）；並讓 `/estimate` 送進 chat model 的參考行帶上 **product 名**，使每筆參考都有 product 脈絡。
+讓 talent 列舉型商品在兩種 talent 名寫法下都能正確合併：(a) talent 名後**緊黏無空白修飾詞**（全形括號語言標記，如 `（日本語）`）、(b) talent 名**含內部空白**（`姓 名` 形式，如 `小雀 とと`，而字典存無空白形 `小雀とと`）。合併後 item 以**共同部分**命名（空則 product 標題）；並讓 `/estimate` 送進 chat model 的參考行帶上 **product 名**，使每筆參考都有 product 脈絡。
 
 外部介面（`/estimate`、`crawl`/`run`）不變；改變的是 `decompose_items` 的 token 化與命名，以及 estimator 參考行格式。
 
 ## 2. 現況與根因（已實證）
 
-`_canonical_key`（[items.py:60-69](../../../estimator_king/sync/items.py)）只以**空白**切 token（`normalize_text(residual).split()`）。真實商品 `ホロライブ 秘密の雨の日ボイス ～紫陽花の見える温泉宿で～`（product 9384273215708）的 variant `商品名` 欄為 `<talent>（日本語）` 形式，talent 與括號語言標記**無空白相連**：
+`_canonical_key`（[items.py:60-69](../../../estimator_king/sync/items.py)）只以**空白**切 token（`normalize_text(residual).split()`）並**逐單一 token** 比對字典。這對兩種真實 talent 寫法失效：
 
-- `ときのそら（日本語）` → `.split()` 得單一 token `ときのそら（日本語）`，不等於字典裡的裸 `ときのそら` → talent 不被移除 → canonical key 唯一非空 → **不合併**（45 筆一般 voice 各自獨立）。
-- SP voice `ときのそら SPボイス（日本語）` 因 talent 與 `SPボイス` 間**有空白**，`ときのそら` 被切出移除、剩 `SPボイス（日本語）` 為共同 key → 意外合併（×12「SPボイス（日本語）」、×3「SPボイス（英語）」）。
+**(a) talent 名緊黏括號修飾詞** — `ホロライブ 秘密の雨の日ボイス ～紫陽花の見える温泉宿で～`（product 9384273215708）的 variant `商品名` 為 `<talent>（日本語）`：
 
-實證（以 1,385 個真實 product 跑修正後邏輯）：修正 token 化後共 759 個合併 item，分佈見 §7.2。根因為「token 化無法處理黏著修飾詞」，與先前移除 `key.strip()` 的變更無關。
+- `ときのそら（日本語）` → `.split()` 得單一 token `ときのそら（日本語）`，≠ 字典裸 `ときのそら` → 不移除 → 唯一 key → **不合併**（45 筆一般 voice 各自獨立）。
+- SP voice `ときのそら SPボイス（日本語）` 因 talent 與 `SPボイス` 間有空白，`ときのそら` 被切出移除、剩 `SPボイス（日本語）` → 意外合併（×12「SPボイス（日本語）」、×3「SPボイス（英語）」）。
+
+**(b) talent 名含內部空白** — `ぶいすぽっ！ジャージ`（product vspo:7866043990203）單選項 `バリエーション` = talent 名、全 7500 円，**部分寫成 `姓 名`**（含空白），而字典存無空白形：
+
+- `小雀 とと` → `.split()` 得 `小雀`、`とと` 兩 token，皆 ≠ 字典 `小雀とと` → 不移除 → 唯一 key → **不合併**。
+- 無內部空白者（`花芽すみれ`）單 token 命中字典 → 合併（×10），與含空白者（15 筆）混雜；且每筆未合併品項各別經 LLM 分類得到不一致 type（ジャケット／その他／スウェット…）。
+
+實證（1,385 真實 product）：修正後共 759 合併群組，分佈見 §7.2。根因為「**逐單一 token 比對**無法處理黏著修飾詞（需先拆 token）與內部空白（需跨 token、空白不敏感比對）」，與先前移除 `key.strip()` 無關。
 
 ## 3. 變更
 
-### 3.1 Token 化（`_canonical_key`，[items.py](../../../estimator_king/sync/items.py)）
+### 3.1 Token 化 + greedy n-gram 空白不敏感 talent 比對（`_canonical_key`，[items.py](../../../estimator_king/sync/items.py)）
 
-把 token 切法從「只切空白」改為「切空白 **+ 全形/半形括號**」，括號內容保留為獨立 token：
+兩項合一：(1) token 切法改為「空白 **+ 全/半形括號**」；(2) talent 比對改為「**貪婪最長 n-gram、空白不敏感**」——把連續 token 串接（無空白）後比對**去空白字典**，命中即整段移除。
 
 ```python
 _TOKEN_SPLIT = re.compile(r"[\s（）()]+")
+_MAX_TALENT_TOKENS = 4   # n-gram 上限（姓 名 spaced 名為 2 token；上限涵蓋罕見更長者）
 
-def _canonical_key(residual: str, talents: frozenset[str]) -> tuple[str, list[str]]:
-    """Drop talent tokens; return (canonical_key, removed_talent_tokens)."""
+
+def _talents_nospace(talents: frozenset[str]) -> dict[str, str]:
+    """去空白正規化形 → 原字典形，供空白不敏感比對。"""
+    return {normalize_text(t).replace(" ", ""): t for t in talents}
+
+
+def _canonical_key(residual: str, talents_nospace: dict[str, str]) -> tuple[str, list[str]]:
+    """Drop talent tokens (greedy longest n-gram, whitespace-insensitive);
+    return (canonical_key, removed_talent_originals)."""
+    toks = [t for t in _TOKEN_SPLIT.split(normalize_text(residual)) if t]
     kept: list[str] = []
     removed: list[str] = []
-    for tok in _TOKEN_SPLIT.split(normalize_text(residual)):
-        if not tok:
-            continue
-        if tok in talents:
-            removed.append(tok)
-        else:
-            kept.append(tok)
+    i = 0
+    while i < len(toks):
+        matched = False
+        for j in range(min(len(toks), i + _MAX_TALENT_TOKENS), i, -1):  # 最長優先
+            cand = "".join(toks[i:j])                  # 串接（無空白）
+            if cand in talents_nospace:
+                removed.append(talents_nospace[cand])  # 記原字典形
+                i = j
+                matched = True
+                break
+        if not matched:
+            kept.append(toks[i])
+            i += 1
     return " ".join(kept), removed
 ```
 
-- 分隔符為空白與括號 `（）()`。括號內容（如 `日本語`）成為保留 token，併入 canonical key。
-- talent 名內的 `・`（如 `アユンダ・リス`、`ハコス・ベールズ`）**不是**分隔符 → talent 仍以完整單 token 比對命中字典、被正確移除。
-- **僅變更 `_canonical_key` 的 token 化**；`_meaningful_tokens`（[items.py:56-57](../../../estimator_king/sync/items.py)，供 `_extract_snippet` 使用）**不動**，避免波及 snippet 擷取。
-- 範圍限定括號（YAGNI）：不處理 `「」`『』【】等其他括號（真實資料用不到）。
+- **呼叫端調整**：唯一呼叫點在 `decompose_items`（[items.py:140](../../../estimator_king/sync/items.py)）。於分組迴圈**外**先 `talents_nospace = _talents_nospace(talents)`（每次 decompose 算一次），改呼叫 `_canonical_key(residual, talents_nospace)`。簽名由 `(residual, talents)` 改為 `(residual, talents_nospace)`。
+- **分隔符** = 空白 + `（）()`；括號內容（`日本語`）成為保留 token、併入 key。
+- **空白不敏感 + 貪婪最長 n-gram**：`小雀 とと` → `[小雀, とと]` → `小雀`+`とと`=`小雀とと` 命中 → 移除。單 token（`花芽すみれ`）、middot 名（`アユンダ・リス`，`・` 非分隔符 → 單 token）皆仍命中。`normalize_text` 已把全形空白 U+3000 收斂為半形，再 `.replace(" ","")` 去除 → 串接比對對全/半形空白皆不敏感。
+- **`removed` 記原字典形**（非 variant 寫法）：`_Item.talents` 因此收齊一致原形（`小雀とと`），與既有 `talents` 欄位語義一致。
+- 與兩根因例組合正確：`小雀 とと（日本語）` → `[小雀,とと,日本語]` → 移除 `小雀とと`、留 `日本語` → key `日本語`；`ときのそら SPボイス（日本語）` → 移除 `ときのそら`、留 `SPボイス 日本語`。
+- **僅變更 `_canonical_key`（與其簽名/呼叫端）**；`_meaningful_tokens`（[items.py:56-57](../../../estimator_king/sync/items.py)）與 `_extract_snippet` 內以原 `talents` 做的 best-effort core 去 talent（[items.py:82](../../../estimator_king/sync/items.py)）**不動**（best-effort、不影響合併）。
+- 範圍限定括號（YAGNI）：不處理 `「」`『』【】。
 
-結果（`秘密の雨の日ボイス`）：一般 voice 依語言分組——`日本語`×27、`英語`×12、`インドネシア語`×6；SP voice——`SPボイス 日本語`×12、`SPボイス 英語`×3。
+結果：`秘密の雨の日ボイス` 一般 voice 依語言分組（`日本語`×27、`英語`×12、`インドネシア語`×6）、SP（`SPボイス 日本語`×12、`SPボイス 英語`×3）；`ぶいすぽっ！ジャージ` 25 個變體（含 `小雀 とと` 等含空白者）全部 → key 空 → **合併成 1 筆**（fallback product 標題 `ぶいすぽっ！ジャージ`）。
 
 ### 3.2 合併命名（`item_name`，[items.py](../../../estimator_king/sync/items.py)）
 
@@ -100,7 +125,7 @@ def _format_reference(self, hit: _Hit) -> str:
 
 ## 5. 範圍
 
-- **變更檔案**：`estimator_king/sync/items.py`（token 化 + 命名）、`estimator_king/bot/estimator.py`（參考行）。
+- **變更檔案**：`estimator_king/sync/items.py`（token 化 + n-gram 空白不敏感比對 + `_talents_nospace` helper + `_canonical_key` 簽名與其唯一呼叫端 + 命名兩分支 + 移除 `_is_option_value`/`_SIZE_RE`/`whole_product_single`）、`estimator_king/bot/estimator.py`（參考行加 product 欄位）。
 - **不改** `stores_config.yaml`（無補 talents、無改 `item_types_version`）。後果同前次：本變更為程式邏輯 + 文件格式變更、不影響 `content_hash`，**現有已索引 product 不會立即重新拆解**；僅新 product 或下次 `content_hash` 變動 / 自然重抓者套用新邏輯。屬可接受的漸進生效（如需立即生效可另案 bump `item_types_version`）。
 - **無 `engine.py` 邏輯變更**（其 `_format_item_document`/metadata 既有結構不變；item_name 內容改變是 items.py 的產出差異）。item_name 全使用點（slug、文件、classify 輸入、metadata、log、參考行）對改變後的值（含空字串）皆安全降級，無破壞。
 - **`_extract_snippet` 與 item_name 的相依**：`_extract_snippet`（[items.py:77](../../../estimator_king/sync/items.py)）以算好的 item_name 為比對 core（呼叫於 ProductItem 建構處）。合併命名改為共同部分後，snippet 比對 core 隨之改變（例如改以 `アクリルスタンド` 而非 product 標題比對條列規格行）。snippet 為 best-effort、缺失安全降級、**不影響價格/類型/檢索**；其命中率變化以 §7.3 operational verification 於實作後用真實 `html_details` 驗證。
@@ -118,13 +143,15 @@ def _format_reference(self, hit: _Hit) -> str:
 
 ### 7.1 目標商品
 
-對 `秘密の雨の日ボイス`（product 9384273215708）重跑 `decompose_items`，預期 5 個合併 item，item_name 分別為共同部分：`日本語`(×27)、`英語`(×12)、`インドネシア語`(×6)、`SPボイス 日本語`(×12)、`SPボイス 英語`(×3)，5 者 item_name 相異 → slug 不撞號。
+- **(a) 黏著修飾詞** `秘密の雨の日ボイス`（product 9384273215708）重跑 `decompose_items`，預期 5 個合併 item，item_name 分別為共同部分：`日本語`(×27)、`英語`(×12)、`インドネシア語`(×6)、`SPボイス 日本語`(×12)、`SPボイス 英語`(×3)，5 者 item_name 相異 → slug 不撞號。
+- **(b) 內部空白** `ぶいすぽっ！ジャージ`（product vspo:7866043990203）重跑，預期 25 個變體（含 `小雀 とと`、`一ノ瀬 うるは` 等含空白 talent）全部合併成 **1 筆**，key 空 → item_name fallback product 標題 `ぶいすぽっ！ジャージ`、`talents` 收齊 25 原形、price 7500。
 
 ### 7.2 整體分佈（1,385 product 樣本，759 合併 item）
 
 - 共同部分命名（key 非空）：**552**（如 `アクリルスタンド`、`缶バッジセット`、`コレクションカード`、`日本語`、`Blue Journey衣装ver.`…）。
 - fallback product 標題（key 空）：**207**。
 - 空 item_name（空殘餘非合併項）：**0**（理論邊界，真實資料不發生；§8.1 仍保留 guard 測試）。
+- **n-gram 不過度合併**：全樣本合併群組數，單 token 比對 vs n-gram 空白不敏感比對皆為 **759（相同）**——n-gram 不製造新（虛假）合併群組，只把本該同組的含空白 talent 變體正確吸收進既有群組（如 jersey 由「10 合併 + 15 singleton」變「25 合 1」）。
 
 ### 7.3 snippet 命中率（實作後 operational verification）
 
@@ -137,6 +164,7 @@ def _format_reference(self, hit: _Hit) -> str:
 - **更新** `test_talent_variants_merge_to_product_title`：Blue Journey（殘餘 `さくらみこ Blue Journey衣装ver.`）合併後 item_name 改為共同部分 **`Blue Journey衣装ver.`**（非 product 標題）；改名為 `test_talent_variants_merge_named_by_common_part`，斷言 `item_name == "Blue Journey衣装ver."`、`source_variant_ids` 長度、talents 收齊。
 - **新增** 黏著括號修飾詞合併：product 標題如 `秘密ボイス`，variant `カテゴリ / さくらみこ（日本語）`、`カテゴリ / 白上フブキ（日本語）`（同價）→ 合併 1 筆，item_name == `日本語`；另加 `カテゴリ / さくらみこ（英語）`、`カテゴリ / 白上フブキ（英語）`（同價）→ 另合併 1 筆 item_name == `英語`；驗證同價兩組 item_name 相異（不撞號）。
 - **新增** 含空白 + 括號（SP 型）：variant `カテゴリ / さくらみこ SPボイス（日本語）`、`カテゴリ / 白上フブキ SPボイス（日本語）` → 合併，item_name == `SPボイス 日本語`。
+- **新增** 內部空白 talent（n-gram 跨 token 比對）：product 標題如 `ぶいすぽっ！ジャージ`，variant `バリエーション / さくら みこ`、`バリエーション / 白上 フブキ`（內部含空白）、`バリエーション / 博衣こより`（無空白形）同價 → 三者皆命中字典被移除 → key 空 → 合併 1 筆，`item_name == "ぶいすぽっ！ジャージ"`（fallback product 標題）、`set(talents) == {"さくらみこ","白上フブキ","博衣こより"}`（**原字典形**）、`source_variant_ids` 長度 3。
 - **更新** `test_short_option_value_prepends_product_title` → 短選項值不再前綴 product 標題；改名 `test_short_option_value_named_by_residual`，斷言 item_name == `黒 M` / `白 L`（`normalize_text` 後值——輸入 `黒　M`/`白　L` 的全形空白被收斂為半形）。
 - **更新** `test_empty_residual_without_talent_not_merged` → 空殘餘非合併項 item_name 改為 `""`（不再 product 標題）；以 item 數 / `source_variant_ids` 長度驗證未合併、且 `item_name == ""`；移除原註解對 `_is_option_value("")` 的引用（該函式已刪）。
 - **維持綠** `test_pure_talent_enumeration_merges_to_product_title`（裸 talent、key 空 → item_name == product 標題）。
@@ -167,7 +195,7 @@ def _format_reference(self, hit: _Hit) -> str:
 
 ## 10. 驗收標準
 
-1. talent 名黏著括號語言標記的列舉商品，token 化後依共同部分（含語言）正確合併，同 product 同價的不同語言組得到相異 item_name（不撞號）。
+1. talent 列舉商品在兩種寫法下正確合併：(a) 黏著括號語言標記（`<talent>（日本語）`）→ 拆 token 後依共同部分（含語言）合併、同 product 同價不同語言組 item_name 相異不撞號；(b) talent 名含內部空白（`小雀 とと`）→ greedy n-gram 空白不敏感比對命中無空白字典、與無空白形一同合併（jersey 25 → 1）。n-gram **不製造虛假合併**（全樣本合併群組數與單 token 比對相同，§7.2）。
 2. 合併 item 以共同部分命名；共同部分為空時 fallback product 標題。
 3. `whole_product_single` 移除後，整 product 合併且共同部分非空者以共同部分命名（如 `Blue Journey衣装ver.`）。
 4. `/estimate` 參考行在 product_title **≠** item_name 時帶入 product_title 欄位；product_title == item_name（key 空 fallback）時不重複顯示。
