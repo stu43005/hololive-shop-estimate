@@ -38,7 +38,7 @@ def test_unparseable_price_counts_as_excluded_zero():
     assert result.excluded_zero == 1  # "N/A" parses to None -> counted as ¥0
 
 
-def test_talent_variants_merge_to_product_title():
+def test_talent_variants_merge_named_by_common_part():
     snap = _snap("3Dアクリルスタンド Blue Journey衣装ver.", [
         ("グッズ / さくらみこ Blue Journey衣装ver.", "330"),
         ("グッズ / 白上フブキ Blue Journey衣装ver.", "330"),
@@ -46,7 +46,7 @@ def test_talent_variants_merge_to_product_title():
     result = decompose_items(snap, talents=TALENTS)
     items = result.items
     assert len(items) == 1
-    assert items[0].item_name == "3Dアクリルスタンド Blue Journey衣装ver."
+    assert items[0].item_name == "Blue Journey衣装ver."  # common part, not product title
     assert items[0].price_jpy == 330
     assert len(items[0].source_variant_ids) == 2
     assert set(items[0].talents) == {"さくらみこ", "白上フブキ"}
@@ -67,14 +67,15 @@ def test_themed_series_not_merged_even_at_same_price():
     assert result.excluded_zero == 0
 
 
-def test_short_option_value_prepends_product_title():
+def test_short_option_value_named_by_residual():
     snap = _snap("ぶいすぽっ！オリジナルTシャツ", [
         ("バリエーション / 黒　M", "5500"),
         ("バリエーション / 白　L", "5500"),
     ])
     result = decompose_items(snap, talents=TALENTS)
     names = sorted(i.item_name for i in result.items)
-    assert names == ["ぶいすぽっ！オリジナルTシャツ 白 L", "ぶいすぽっ！オリジナルTシャツ 黒 M"]
+    # No product-title prefix; normalize_text collapses the full-width space (U+3000).
+    assert names == ["白 L", "黒 M"]
 
 
 def test_detail_snippet_substring_match():
@@ -117,9 +118,8 @@ def test_pure_talent_enumeration_merges_to_product_title():
 
 
 def test_empty_residual_without_talent_not_merged():
-    # Residual strips to "" but no talent removed -> removed_any False -> must NOT merge.
-    # Assert on item COUNT, not item_name: both empty-residual items get name == product
-    # title via _is_option_value("") (len("") < 4) -> f"{title} ".strip().
+    # Residual strips to "" and no talent removed -> removed_any False -> must NOT merge.
+    # With _is_option_value removed, the non-merged name is normalize_text("") == "".
     snap = _snap("グッズセット", [
         ("グッズ / ", "500"),
         ("グッズ / ", "500"),
@@ -127,7 +127,7 @@ def test_empty_residual_without_talent_not_merged():
     result = decompose_items(snap, talents=TALENTS)
     assert len(result.items) == 2
     assert all(len(i.source_variant_ids) == 1 for i in result.items)
-    assert all(i.item_name == "グッズセット" for i in result.items)
+    assert all(i.item_name == "" for i in result.items)
 
 
 def test_pure_talent_enumeration_coexists_with_distinct_item():
@@ -144,3 +144,45 @@ def test_pure_talent_enumeration_coexists_with_distinct_item():
     assert set(items["誕生日記念"].talents) == {"さくらみこ", "白上フブキ"}
     assert items["アクリルスタンド"].price_jpy == 500
     assert len(items["アクリルスタンド"].source_variant_ids) == 1
+
+
+def test_glued_language_suffix_merges_by_language():
+    # Talent glued to a bracketed language tag: split on parens, remove talent, key = language.
+    snap = _snap("秘密ボイス", [
+        ("ボイス / さくらみこ（日本語）", "1000"),
+        ("ボイス / 白上フブキ（日本語）", "1000"),
+        ("ボイス / さくらみこ（英語）", "1000"),
+        ("ボイス / 白上フブキ（英語）", "1000"),
+    ])
+    items = {i.item_name: i for i in decompose_items(snap, talents=TALENTS).items}
+    assert set(items) == {"日本語", "英語"}  # two language groups, distinct names at one price
+    assert len(items["日本語"].source_variant_ids) == 2
+    assert len(items["英語"].source_variant_ids) == 2
+
+
+def test_sp_voice_merges_by_common_part():
+    # Talent + space + 'SPボイス' + glued language -> key = "SPボイス 日本語".
+    snap = _snap("秘密ボイス", [
+        ("ボイス / さくらみこ SPボイス（日本語）", "500"),
+        ("ボイス / 白上フブキ SPボイス（日本語）", "500"),
+    ])
+    result = decompose_items(snap, talents=TALENTS)
+    assert len(result.items) == 1
+    assert result.items[0].item_name == "SPボイス 日本語"
+    assert len(result.items[0].source_variant_ids) == 2
+
+
+def test_internal_space_talent_merges():
+    # Talent written with an internal space (姓 名) still matches the no-space dict entry
+    # via whitespace-insensitive greedy n-gram matching.
+    snap = _snap("ぶいすぽっ！ジャージ", [
+        ("バリエーション / さくら みこ", "7500"),
+        ("バリエーション / 白上 フブキ", "7500"),
+        ("バリエーション / 博衣こより", "7500"),
+    ])
+    result = decompose_items(snap, talents=TALENTS)
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.item_name == "ぶいすぽっ！ジャージ"  # key empty -> product-title fallback
+    assert len(item.source_variant_ids) == 3
+    assert set(item.talents) == {"さくらみこ", "白上フブキ", "博衣こより"}  # original dict forms

@@ -13,9 +13,8 @@ from collections import defaultdict
 
 from estimator_king.crawler.snapshot import ProductSnapshot, normalize_text
 
-_SIZE_RE = re.compile(
-    r"(^|[\s/])(XX?[SML]|[SML]|フリー)?サイズ|^(XX?[SML]|[SML])([\s/]|$)|フリーサイズ"
-)
+_TOKEN_SPLIT = re.compile(r"[\s（）()]+")  # split on whitespace + full/half-width parens
+_MAX_TALENT_TOKENS = 4  # greedy n-gram cap (spaced 姓 名 names are 2 tokens; cap covers rare longer)
 _SEGMENT_SPLIT = re.compile(r"[・◇\n]")
 
 
@@ -57,21 +56,31 @@ def _meaningful_tokens(text: str) -> list[str]:
     return [t for t in normalize_text(text).split() if len(t) >= 2]  # drop single-char tokens (CJK particles/punctuation noise)
 
 
-def _canonical_key(residual: str, talents: frozenset[str]) -> tuple[str, list[str]]:
-    """Drop talent tokens; return (canonical_key, removed_talent_tokens)."""
+def _talents_nospace(talents: frozenset[str]) -> dict[str, str]:
+    """Map whitespace-stripped normalized talent -> original, for space-insensitive matching."""
+    return {normalize_text(t).replace(" ", ""): t for t in talents}
+
+
+def _canonical_key(residual: str, talents_nospace: dict[str, str]) -> tuple[str, list[str]]:
+    """Drop talent tokens (greedy longest n-gram, whitespace-insensitive); return
+    (canonical_key, removed_talent_originals)."""
+    toks = [t for t in _TOKEN_SPLIT.split(normalize_text(residual)) if t]
     kept: list[str] = []
     removed: list[str] = []
-    for tok in normalize_text(residual).split():
-        if tok in talents:
-            removed.append(tok)
-        else:
-            kept.append(tok)
+    i = 0
+    while i < len(toks):
+        matched = False
+        for j in range(min(len(toks), i + _MAX_TALENT_TOKENS), i, -1):  # longest first
+            cand = "".join(toks[i:j])
+            if cand in talents_nospace:
+                removed.append(talents_nospace[cand])
+                i = j
+                matched = True
+                break
+        if not matched:
+            kept.append(toks[i])
+            i += 1
     return " ".join(kept), removed
-
-
-def _is_option_value(residual: str) -> bool:
-    norm = normalize_text(residual)
-    return len(norm) < 4 or bool(_SIZE_RE.search(norm))  # too short to be a standalone item name (size/color option like "黒 M")
 
 
 def _extract_snippet(item_name: str, html_details: dict[str, str], talents: frozenset[str]) -> str:
@@ -122,13 +131,15 @@ def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> De
         kept.append((residual, price, v.variant_id))
 
     # Step 3: talent-gated canonical-key dedup, grouped by price.
+    talents_nospace = _talents_nospace(talents)
     by_price: dict[int, list[tuple[str, int]]] = defaultdict(list)
     for residual, price, vid in kept:
         by_price[price].append((residual, vid))
 
     @dataclass
     class _Item:
-        residual: str | None  # None => whole-group merge (name from product title)
+        residual: str | None  # None => merged group (name from key, or product title if key empty)
+        key: str              # group canonical key (common part); "" for non-merged items
         price: int
         variant_ids: list[int]
         talents: list[str]
@@ -137,7 +148,7 @@ def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> De
     for price, members in by_price.items():
         groups: dict[str, list[tuple[str, int, list[str]]]] = defaultdict(list)
         for residual, vid in members:
-            key, removed = _canonical_key(residual, talents)
+            key, removed = _canonical_key(residual, talents_nospace)
             groups[key].append((residual, vid, removed))
         for key, group in groups.items():
             removed_any = any(r for _, _, r in group)
@@ -148,27 +159,21 @@ def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> De
                         if t not in merged_talents:
                             merged_talents.append(t)
                 raw_items.append(_Item(
-                    residual=None, price=price,
+                    residual=None, key=key, price=price,
                     variant_ids=[vid for _, vid, _ in group], talents=merged_talents,
                 ))
             else:
                 for residual, vid, _ in group:
-                    raw_items.append(_Item(residual=residual, price=price,
+                    raw_items.append(_Item(residual=residual, key="", price=price,
                                            variant_ids=[vid], talents=[]))
 
-    # Step 4: naming (three branches) + snippet.
-    # whole product collapsed to one item -> name it by the product title
-    whole_product_single = (
-        len(raw_items) == 1 and raw_items[0].residual is None and len(raw_items[0].variant_ids) >= 2
-    )
+    # Step 4: naming (two branches) + snippet.
     items: list[ProductItem] = []
     for ri in raw_items:
-        if ri.residual is None or whole_product_single:
-            name = snapshot.title
-        elif _is_option_value(ri.residual):
-            name = f"{snapshot.title} {normalize_text(ri.residual)}".strip()
+        if ri.residual is None:
+            name = ri.key.strip() or snapshot.title   # merged: common part; product title if key empty
         else:
-            name = ri.residual
+            name = normalize_text(ri.residual)         # non-merged: normalized residual
         items.append(ProductItem(
             product_id=snapshot.product_id,
             product_title=snapshot.title,
