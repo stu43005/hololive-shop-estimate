@@ -52,21 +52,20 @@ def _canonical_key(residual: str, talents: frozenset[str]) -> tuple[str, list[st
 合併 item（去重分群後 `residual=None`）的名稱改為**共同部分（該組 canonical key）**，key 為空（整串皆 talent）時 fallback product 標題：
 
 - `_Item`（[items.py:129-134](../../../estimator_king/sync/items.py)）新增欄位 `key: str`：合併分支（[items.py:150-153](../../../estimator_king/sync/items.py)）填入該組 canonical key；非合併分支（[items.py:154-157](../../../estimator_king/sync/items.py)）填 `""`（未使用）。
-- 命名分支（[items.py:165-171](../../../estimator_king/sync/items.py)）改為：
+- 命名分支（[items.py:165-171](../../../estimator_king/sync/items.py)）**簡化為兩分支**：
 
   ```python
   for ri in raw_items:
       if ri.residual is None:
-          name = ri.key.strip() or snapshot.title   # 共同部分；空才用 product 標題
-      elif _is_option_value(ri.residual):
-          name = f"{snapshot.title} {normalize_text(ri.residual)}".strip()
+          name = ri.key.strip() or snapshot.title   # 合併：共同部分；空才用 product 標題
       else:
-          name = ri.residual
+          name = ri.residual                          # 非合併：殘餘原樣（含短選項值如「黒 M」；空殘餘為 ""）
       items.append(ProductItem(... item_name=name ...))
   ```
 
 - **移除 `whole_product_single`**（[items.py:161-163](../../../estimator_king/sync/items.py)）：其唯一效果是「整 product 合併時強制 product 標題命名」，現由上式「key 空 → product 標題」涵蓋；key 非空時改用共同部分（如 `Blue Journey衣装ver.`）。此為刻意的命名語義變更。
-- **不採用** `{product} / {key}` 形式，也不做子字串抑制：product 脈絡改由 §3.3 的參考行欄位提供，使 item_name 維持為純共同部分、避免 embedding 文件中 product 標題重複（[engine.py:84-88](../../../estimator_king/sync/engine.py) 的文件第 3 行已含 `# {product_title}`）。
+- **移除 `_is_option_value`（[items.py:72-74](../../../estimator_king/sync/items.py)）與 `_SIZE_RE`（[items.py:16-18](../../../estimator_king/sync/items.py)）**（兩者僅用於原短選項值前綴命名，[items.py:168](../../../estimator_king/sync/items.py) 是 `_is_option_value` 的唯一呼叫點）：原把短選項值殘餘（如「黒 M」）前置 product 標題命名為 `{product} {殘餘}`。product 脈絡現由 §3.3 參考行欄位、embedding 文件第 3 行 `# {product_title}`、log tree 父層提供，前置已多餘、且會在 embedding 文件中重複 product。移除後短選項值直接以殘餘命名（`黒 M`）。**連帶**：空殘餘（`""`）非合併項的 item_name 由 product 標題改為 `""`（罕見退化變體；product 仍由參考行/metadata 提供）。
+- **不採用** `{product} / {key}` 形式：product 脈絡改由 §3.3 的參考行欄位提供，使 item_name 維持為純共同部分／純殘餘、避免 embedding 文件中 product 標題重複（[engine.py:84-88](../../../estimator_king/sync/engine.py) 的文件第 3 行已含 `# {product_title}`）。移除格式 #3 後，此「item_name 不扛 product」原則於所有分支一致（唯一例外為 key 空 fallback，因無共同部分可用）。
 
 ### 3.3 Estimator 參考行加 product 名（[estimator.py:173-178](../../../estimator_king/bot/estimator.py)）
 
@@ -80,40 +79,40 @@ def _format_reference(self, hit: _Hit) -> str:
     item_name = str(m.get("item_name") or "")
     product_title = str(m.get("product_title") or "")
     fields = [item_name, str(m.get("item_type") or "")]
-    if product_title and product_title not in item_name:
-        fields.append(product_title)   # 去重：item_name 已含 product 標題（key 空 fallback、或短選項值前綴）時不重複插入
+    if product_title and product_title != item_name:
+        fields.append(product_title)   # 去重：item_name 已 fallback 為 product 標題（key 空）時不重複插入
     fields += [f"¥{m.get('price_jpy')}", date, str(m.get("store_id") or "")]
     line = "- " + " | ".join(fields)
     snippet = str(m.get("detail_snippet", "") or "")
     ...  # 既有 snippet 接行邏輯不變
 ```
 
-- 欄位：`item_name | item_type | [product_title] | ¥price | date | store_id`；**product_title 僅在非空且不是 item_name 子字串時插入**（置於 item_type 之後）。以子字串（非相等）判斷可統一去重兩種 item_name 已含 product 標題的情況：(#2) key 空 fallback（item_name == product 標題）、(#3) 短選項值前綴（item_name == `{product 標題} {殘餘}`）。
-- 去重後每筆參考仍帶 product 脈絡：item_name 未含 product 標題者（key 非空合併 #1、一般殘餘 #4）由 product_title 欄位提供；item_name 已含 product 標題者（#2/#3）脈絡已在 item_name 內。
-- item_name 命名（[items.py](../../../estimator_king/sync/items.py)）不因此變更，`_is_option_value` 前綴分支保留（item_name 在 log 仍自描述）。
-- **子字串（非相等）判斷的取捨**：當 product_title 巧合成為 #1（key 非空合併）或 #4（一般殘餘）item_name 的子字串時也會省略欄位。此為刻意取捨——此類巧合罕見，且省略僅損失冗餘 product 脈絡（item_name 已自含該字串），不致誤導 chat model；不另做 #2/#3 結構性前綴 vs 巧合子字串的區分（YAGNI）。
+- 欄位：`item_name | item_type | [product_title] | ¥price | date | store_id`；**product_title 僅在非空且 ≠ item_name 時插入**（置於 item_type 之後）。格式 #3 移除（§3.2）後，item_name 唯一會等於 product 標題的情況是 key 空 fallback；以相等判斷即精確去除該重複，無子字串過度省略之虞。
+- 去重後每筆參考仍帶 product 脈絡：item_name ≠ product 標題者（合併共同部分、非合併殘餘）由 product_title 欄位提供；item_name == product 標題者（key 空 fallback）脈絡已在 item_name 內。
 - **system prompt 不改**：新增欄位為加性、self-descriptive；現有 prompt（[estimator.py](../../../estimator_king/bot/estimator.py) `SYSTEM_PROMPT`）關於以 item_name/detail 對齊的指示仍適用。
 
 ## 4. 不變式與 slug 唯一性
 
 - **item_name 必須帶共同部分以避免 slug 撞號**：item_id 為 `{store_id}:{product_id}:{slug(item_name, price)}`（[engine.py:77-80](../../../estimator_king/sync/engine.py)、[engine.py:240](../../../estimator_king/sync/engine.py)）。token 化修正後，同一 product 同價會有多個合併組（如 voice 的 `日本語`/`英語`/`インドネシア語` 同為 1000 円）。若全 fallback 成 product 標題則 slug 相同 → 互相覆寫。§3.2 以共同部分命名確保同 product 同價的不同合併組得到**相異 item_name → 相異 slug**，不撞號。
 - **key 空時的 fallback 安全**：同 product 內 key 空的合併組至多一個（key 空且同價即同組、已合併為一），fallback product 標題不致與其他 key 空組同價撞號。
-- **既有邊界（非本次引入、不處理）**：key 空的 fallback 與「空殘餘無 talent 的非合併項」（殘餘為空字串時 `_is_option_value("")` 為真、亦命名為 product 標題）理論上可在同 product 同價撞號。此為既有行為（現行碼的純-talent 合併與空殘餘非合併皆已命名為 product 標題），**非本次變更引入**，且需空殘餘 variant 方觸發，屬可接受的既有邊界，本案不處理。
+- **既有邊界（非本次引入、不處理）**：移除 `_is_option_value` 後（§3.2），空殘餘無 talent 的非合併項 item_name 為 `""`（不再是 product 標題），與 key 空 fallback（product 標題）不同 → 兩者不再交叉撞號。剩餘理論邊界為「同 product 同價有 ≥2 個空殘餘非合併項」→ 皆 `""` 而撞號；此與既有行為等價（先前皆命名 product 標題亦撞號）、需空殘餘 variant 方觸發，且真實資料抽樣 **0 例**，本案不處理。
 - **同價前提仍成立**：合併仍先按 price 分組（[items.py:125-127](../../../estimator_king/sync/items.py)），命名變更不影響分組。
 
 ## 5. 範圍
 
 - **變更檔案**：`estimator_king/sync/items.py`（token 化 + 命名）、`estimator_king/bot/estimator.py`（參考行）。
 - **不改** `stores_config.yaml`（無補 talents、無改 `item_types_version`）。後果同前次：本變更為程式邏輯 + 文件格式變更、不影響 `content_hash`，**現有已索引 product 不會立即重新拆解**；僅新 product 或下次 `content_hash` 變動 / 自然重抓者套用新邏輯。屬可接受的漸進生效（如需立即生效可另案 bump `item_types_version`）。
-- **無 `engine.py` 邏輯變更**（其 `_format_item_document`/metadata 既有結構不變；item_name 內容改變是 items.py 的產出差異）。
+- **無 `engine.py` 邏輯變更**（其 `_format_item_document`/metadata 既有結構不變；item_name 內容改變是 items.py 的產出差異）。item_name 全使用點（slug、文件、classify 輸入、metadata、log、參考行）對改變後的值（含空字串）皆安全降級，無破壞。
+- **`_extract_snippet` 與 item_name 的相依**：`_extract_snippet`（[items.py:77](../../../estimator_king/sync/items.py)）以算好的 item_name 為比對 core（呼叫於 ProductItem 建構處）。合併命名改為共同部分後，snippet 比對 core 隨之改變（例如改以 `アクリルスタンド` 而非 product 標題比對條列規格行）。snippet 為 best-effort、缺失安全降級、**不影響價格/類型/檢索**；其命中率變化以 §7.3 operational verification 於實作後用真實 `html_details` 驗證。
 - **無新增第三方相依**。
 
 ## 6. 不受影響的既有行為（迴歸保護）
 
 - **themed series 不誤併**（同主題不同品項，無 talent token、無括號）：key 非空且互異 → 不合併、各自以殘餘命名。
-- **短選項值併入 product 標題**（`黒 M` 等）：`_is_option_value` 分支不變。
-- **SET / ¥0 排除**、**detail_snippet 擷取**：不受 token 化變更影響（snippet 用 `_meaningful_tokens`，未改）。
-- **純-talent 列舉**（裸 talent 名、key 空，如 `隣人ボイス2026`）：key 空 → fallback product 標題（行為不變）。
+- **SET / ¥0 排除**：不受 token 化變更影響。
+- **detail_snippet 的 token 化（`_meaningful_tokens`）不變**；惟其比對 core（item_name）對合併品項隨命名改變（§5、§7.3），屬 best-effort、安全降級。
+- **純-talent 列舉**（裸 talent 名、key 空，如 `隣人ボイス2026`）：key 空 → fallback product 標題（命名行為不變）。
+- （**短選項值命名已改變**，不再前綴 product 標題 → 列於 §3.2/§8.1，非迴歸保護項。）
 
 ## 7. 真實資料驗收（operational verification）
 
@@ -123,9 +122,13 @@ def _format_reference(self, hit: _Hit) -> str:
 
 ### 7.2 整體分佈（1,385 product 樣本，759 合併 item）
 
-- 共同部分命名（key 非空）：539（如 `アクリルスタンド`、`缶バッジセット`、`コレクションカード`、`日本語`…）。
-- fallback product 標題（key 空）：207。
-- （先前 `{product}/{key}` 的子字串抑制案例 13 個，在本設計改為純共同部分命名 → 該 13 個 item_name 為其共同部分，如 `Blue Journey衣装ver.`；product 脈絡由 §3.3 參考行欄位提供。）
+- 共同部分命名（key 非空）：**552**（如 `アクリルスタンド`、`缶バッジセット`、`コレクションカード`、`日本語`、`Blue Journey衣装ver.`…）。
+- fallback product 標題（key 空）：**207**。
+- 空 item_name（空殘餘非合併項）：**0**（理論邊界，真實資料不發生；§8.1 仍保留 guard 測試）。
+
+### 7.3 snippet 命中率（實作後 operational verification）
+
+`_extract_snippet` 以 item_name 為比對 core（§5），合併命名改變會影響其命中。實作後對**真實 crawl 的 `html_details`**（非 products.json 的 body_html）比對合併品項 snippet 命中率，確認未顯著劣化（best-effort、缺失安全降級，非阻斷項；若顯著劣化再評估是否將 snippet core 與顯示名解耦）。
 
 ## 8. 測試
 
@@ -134,8 +137,10 @@ def _format_reference(self, hit: _Hit) -> str:
 - **更新** `test_talent_variants_merge_to_product_title`：Blue Journey（殘餘 `さくらみこ Blue Journey衣装ver.`）合併後 item_name 改為共同部分 **`Blue Journey衣装ver.`**（非 product 標題）；改名為 `test_talent_variants_merge_named_by_common_part`，斷言 `item_name == "Blue Journey衣装ver."`、`source_variant_ids` 長度、talents 收齊。
 - **新增** 黏著括號修飾詞合併：product 標題如 `秘密ボイス`，variant `カテゴリ / さくらみこ（日本語）`、`カテゴリ / 白上フブキ（日本語）`（同價）→ 合併 1 筆，item_name == `日本語`；另加 `カテゴリ / さくらみこ（英語）`、`カテゴリ / 白上フブキ（英語）`（同價）→ 另合併 1 筆 item_name == `英語`；驗證同價兩組 item_name 相異（不撞號）。
 - **新增** 含空白 + 括號（SP 型）：variant `カテゴリ / さくらみこ SPボイス（日本語）`、`カテゴリ / 白上フブキ SPボイス（日本語）` → 合併，item_name == `SPボイス 日本語`。
+- **更新** `test_short_option_value_prepends_product_title` → 短選項值不再前綴 product 標題；改名 `test_short_option_value_named_by_residual`，斷言 item_name == `黒 M` / `白 L`（殘餘原樣）。
+- **更新** `test_empty_residual_without_talent_not_merged` → 空殘餘非合併項 item_name 改為 `""`（不再 product 標題）；以 item 數 / `source_variant_ids` 長度驗證未合併、且 `item_name == ""`；移除原註解對 `_is_option_value("")` 的引用（該函式已刪）。
 - **維持綠** `test_pure_talent_enumeration_merges_to_product_title`（裸 talent、key 空 → item_name == product 標題）。
-- **維持綠** `test_themed_series_not_merged_even_at_same_price`、`test_short_option_value_prepends_product_title`、`test_empty_residual_without_talent_not_merged`、`test_pure_talent_enumeration_coexists_with_distinct_item`、`test_excludes_set_and_zero_price`、`test_unparseable_price_counts_as_excluded_zero`、`test_detail_snippet_substring_match`、`test_voice_item_has_no_snippet`。
+- **維持綠** `test_themed_series_not_merged_even_at_same_price`、`test_pure_talent_enumeration_coexists_with_distinct_item`、`test_excludes_set_and_zero_price`、`test_unparseable_price_counts_as_excluded_zero`、`test_detail_snippet_substring_match`、`test_voice_item_has_no_snippet`。
 
 ### 8.2 `tests/test_estimator.py`
 
@@ -149,12 +154,10 @@ def _format_reference(self, hit: _Hit) -> str:
           "product_title": product_title})
   ```
 
-- 去重以 **item_name（即傳入的 `id`）是否含 product_title 子字串**決定欄位是否插入，與 `product_title` 參數值本身無關。
-- **更新** 參考行斷言（[test_estimator.py:116](../../../tests/test_estimator.py)）：插入欄位案例——既有 `_hit("itemX", "ぬいぐるみ", 500, …)` 的 `item_name="itemX"` 不含 `"P"` → 斷言改為 `"- itemX | ぬいぐるみ | P | ¥500 | ? | s"`。
-- **新增** 去重斷言兩例（item_name 含 product_title → 省略欄位）：
-  - exact：`_hit("P", "ぬいぐるみ", 500, 0, 0.1, product_title="P")` → 行 `"- P | ぬいぐるみ | ¥500 | ? | s"`，且 `last_user_prompt.count("| P |") == 0`。
-  - 前綴：`_hit("P 黒 M", "ぬいぐるみ", 500, 0, 0.1, product_title="P")` → 行 `"- P 黒 M | ぬいぐるみ | ¥500 | ? | s"`，且 `last_user_prompt.count("| P |") == 0`。
-- 其餘 estimator 測試（rerank、對帳、多類型查詢等）：既有 id 皆不含大寫 `P` 子字串，故插入 product 欄位不影響其排序/存在性斷言，維持綠。
+- 去重以 **item_name（即傳入的 `id`）是否等於 product_title** 決定欄位是否插入（格式 #3 移除後，唯一相等情況為 key 空 fallback）。
+- **更新** 參考行斷言（[test_estimator.py:116](../../../tests/test_estimator.py)）：插入欄位案例——既有 `_hit("itemX", "ぬいぐるみ", 500, …)` 的 `item_name="itemX" ≠ "P"` → 斷言改為 `"- itemX | ぬいぐるみ | P | ¥500 | ? | s"`。
+- **新增** 去重斷言（item_name == product_title → 省略欄位）：`_hit("P", "ぬいぐるみ", 500, 0, 0.1, product_title="P")` → 行 `"- P | ぬいぐるみ | ¥500 | ? | s"`，且 `last_user_prompt.count("| P |") == 0`。
+- 其餘 estimator 測試（rerank、對帳、多類型查詢等）：既有 id 皆不等於 `"P"`，故插入 product 欄位不影響其排序/存在性斷言，維持綠。
 
 ## 9. 驗證工具鏈（[CLAUDE.md](../../../CLAUDE.md)）
 
@@ -167,7 +170,9 @@ def _format_reference(self, hit: _Hit) -> str:
 1. talent 名黏著括號語言標記的列舉商品，token 化後依共同部分（含語言）正確合併，同 product 同價的不同語言組得到相異 item_name（不撞號）。
 2. 合併 item 以共同部分命名；共同部分為空時 fallback product 標題。
 3. `whole_product_single` 移除後，整 product 合併且共同部分非空者以共同部分命名（如 `Blue Journey衣装ver.`）。
-4. `/estimate` 參考行在 product_title **不是** item_name 子字串時帶入 product_title 欄位；product_title 是 item_name 子字串（含 key 空 fallback 的相等、短選項值前綴）時不重複顯示。
-5. 既有不受影響行為（themed series、短選項、純-talent、SET/¥0、snippet）維持不變。
-6. 真實 `秘密の雨の日ボイス` 重跑得 §7.1 預期 5 合併 item。
-7. 驗證工具鏈全綠（型別 0 error、ruff、相關測試）。
+4. `/estimate` 參考行在 product_title **≠** item_name 時帶入 product_title 欄位；product_title == item_name（key 空 fallback）時不重複顯示。
+5. 移除 `_is_option_value`/`_SIZE_RE`：短選項值非合併項以殘餘命名（`黒 M`）；空殘餘非合併項 item_name 為 `""`。
+6. 既有不受影響行為（themed series 不誤併、純-talent 命名、SET/¥0 排除）維持不變。
+7. 真實 `秘密の雨の日ボイス` 重跑得 §7.1 預期 5 合併 item。
+8. snippet：合併品項 snippet 命中率經 §7.3 operational verification 確認未顯著劣化（best-effort、非阻斷）。
+9. 驗證工具鏈全綠（型別 0 error、ruff、相關測試）。
