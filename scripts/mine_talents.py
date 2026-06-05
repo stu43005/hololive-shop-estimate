@@ -206,7 +206,11 @@ def _load_docs_from_chroma(path: str) -> list[list[tuple[str, float]]]:  # pragm
     return out
 
 
-async def _mine_from_stores() -> set[str]:  # pragma: no cover
+async def mine_from_stores() -> set[str]:  # pragma: no cover
+    """Build an AsyncHTTPClient from stores_config.yaml and mine all stores.
+
+    Public entry point reused by scripts/update_talents_config.py.
+    """
     from estimator_king.config_schema import AppConfig
     from estimator_king.crawler.async_http_client import AsyncHTTPClient
 
@@ -238,7 +242,7 @@ def main() -> None:  # pragma: no cover
     if chroma_path is not None:
         names = sorted(mine_talents(_load_docs_from_chroma(chroma_path)))
     else:
-        names = sorted(asyncio.run(_mine_from_stores()))
+        names = sorted(asyncio.run(mine_from_stores()))
 
     print("talents:")
     for name in names:
