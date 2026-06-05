@@ -154,8 +154,8 @@ HTTP 一律走專案既有的 `estimator_king.crawler.async_http_client.AsyncHTT
 
 ### CLI（`main()`）
 
-- 預設（無 `--chroma`）：`names = sorted(asyncio.run(_mine_from_stores()))`，
-  印出 `talents:` YAML 區塊（每行 `  - <name>`）。`_mine_from_stores()` 以
+- 預設（無 `--chroma`）：`names = sorted(asyncio.run(mine_from_stores()))`，
+  印出 `talents:` YAML 區塊（每行 `  - <name>`）。`mine_from_stores()` 以
   `AppConfig.from_yaml("stores_config.yaml")` 取得 `CrawlerPolicy`/`ProxyConfig`，
   用 `async with AsyncHTTPClient(config.crawler, proxy=config.proxy)` 建 client，
   再 `await mine_talents_from_stores(STORE_SOURCES, client)`。

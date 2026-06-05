@@ -15,7 +15,7 @@
 - **Modify** `scripts/mine_talents.py`：
   - 新增純函式 `extract_collection_handles`、`filter_handles`、`normalize_talent_name`
   - 新增 `StoreSource` dataclass 與 `STORE_SOURCES` 常數
-  - 新增 async IO 函式 `fetch_collection_title`、`mine_talents_from_stores`、`_mine_from_stores`（皆走 `AsyncHTTPClient`）
+  - 新增 async IO 函式 `fetch_collection_title`、`mine_talents_from_stores`、`mine_from_stores`（皆走 `AsyncHTTPClient`）
   - 重寫 `main()` 為 argparse（預設走新路徑，`--chroma [PATH]` 走舊路徑）
   - 修掉既有 `reportOptionalIterable`（line 51）、移除重構後不再使用的 `import sys`
   - 保留 `mine_talents(docs, *, min_freq=20)` 與 `_load_docs_from_chroma(path)` 行為不變
@@ -411,10 +411,10 @@ def main() -> None:  # pragma: no cover
 ```
 
 整段替換為（預設路徑透過 `asyncio.run` 驅動 async 流程，並把 client 的建立收進
-`_mine_from_stores` helper，置於 `main` 之前）：
+`mine_from_stores` helper，置於 `main` 之前）：
 
 ```python
-async def _mine_from_stores() -> set[str]:  # pragma: no cover
+async def mine_from_stores() -> set[str]:  # pragma: no cover
     from estimator_king.config_schema import AppConfig
     from estimator_king.crawler.async_http_client import AsyncHTTPClient
 
@@ -446,7 +446,7 @@ def main() -> None:  # pragma: no cover
     if chroma_path is not None:
         names = sorted(mine_talents(_load_docs_from_chroma(chroma_path)))
     else:
-        names = sorted(asyncio.run(_mine_from_stores()))
+        names = sorted(asyncio.run(mine_from_stores()))
 
     print("talents:")
     for name in names:
