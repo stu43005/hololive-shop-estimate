@@ -77,14 +77,20 @@ def _format_reference(self, hit: _Hit) -> str:
     m = hit.metadata
     pub = int(m.get("published_at", 0) or 0)
     date = ...  # 既有日期格式化邏輯不變
-    line = (f"- {m.get('item_name')} | {m.get('item_type')} | {m.get('product_title')} | "
-            f"¥{m.get('price_jpy')} | {date} | {m.get('store_id')}")
+    item_name = str(m.get("item_name") or "")
+    product_title = str(m.get("product_title") or "")
+    fields = [item_name, str(m.get("item_type") or "")]
+    if product_title and product_title not in item_name:
+        fields.append(product_title)   # 去重：item_name 已含 product 標題（key 空 fallback、或短選項值前綴）時不重複插入
+    fields += [f"¥{m.get('price_jpy')}", date, str(m.get("store_id") or "")]
+    line = "- " + " | ".join(fields)
     snippet = str(m.get("detail_snippet", "") or "")
     ...  # 既有 snippet 接行邏輯不變
 ```
 
-- 欄位順序：`item_name | item_type | product_title | ¥price | date | store_id`（product_title 置於 item_type 之後）。
-- 此變更讓所有參考行（含非合併 item）都帶 product 脈絡，使 chat model 能依 product 對齊同商品參考。
+- 欄位：`item_name | item_type | [product_title] | ¥price | date | store_id`；**product_title 僅在非空且不是 item_name 子字串時插入**（置於 item_type 之後）。以子字串（非相等）判斷可統一去重兩種 item_name 已含 product 標題的情況：(#2) key 空 fallback（item_name == product 標題）、(#3) 短選項值前綴（item_name == `{product 標題} {殘餘}`）。
+- 去重後每筆參考仍帶 product 脈絡：item_name 未含 product 標題者（key 非空合併 #1、一般殘餘 #4）由 product_title 欄位提供；item_name 已含 product 標題者（#2/#3）脈絡已在 item_name 內。
+- item_name 命名（[items.py](../../../estimator_king/sync/items.py)）不因此變更，`_is_option_value` 前綴分支保留（item_name 在 log 仍自描述）。
 - **system prompt 不改**：新增欄位為加性、self-descriptive；現有 prompt（[estimator.py](../../../estimator_king/bot/estimator.py) `SYSTEM_PROMPT`）關於以 item_name/detail 對齊的指示仍適用。
 
 ## 4. 不變式與 slug 唯一性
@@ -132,8 +138,9 @@ def _format_reference(self, hit: _Hit) -> str:
 
 ### 8.2 `tests/test_estimator.py`
 
-- **更新** `_hit`（[test_estimator.py:31-34](../../../tests/test_estimator.py)）的 metadata 加入 `"product_title": "P"`（或具代表性值）。
-- **更新** 參考行斷言（[test_estimator.py:116](../../../tests/test_estimator.py)）為新格式，含 product_title 欄位，例：`"- itemX | ぬいぐるみ | P | ¥500 | ? | s"`。
+- **更新** `_hit`（[test_estimator.py:31-34](../../../tests/test_estimator.py)）：metadata 加入 `product_title`，並讓 `_hit` 接受可選 `product_title` 參數（預設 `"P"`），以便測兩種去重情況。
+- **更新** 參考行斷言（[test_estimator.py:116](../../../tests/test_estimator.py)）：item_name **不含** product_title 時，行含 product 欄位，例：`"- itemX | ぬいぐるみ | P | ¥500 | ? | s"`。
+- **新增** 去重斷言：item_name **已含** product_title 時（exact 如 item_name==`"P"`，或前綴如 `_hit("P 黒 M", …, product_title="P")`），參考行**不**重複 product，例：`"- P 黒 M | ぬいぐるみ | ¥500 | ? | s"`，並驗證 product 未出現第二次（如 `last_user_prompt.count("| P |") == 0`）。
 - 其餘 estimator 測試（rerank、對帳、多類型查詢等）不受影響。
 
 ## 9. 驗證工具鏈（[CLAUDE.md](../../../CLAUDE.md)）
@@ -147,7 +154,7 @@ def _format_reference(self, hit: _Hit) -> str:
 1. talent 名黏著括號語言標記的列舉商品，token 化後依共同部分（含語言）正確合併，同 product 同價的不同語言組得到相異 item_name（不撞號）。
 2. 合併 item 以共同部分命名；共同部分為空時 fallback product 標題。
 3. `whole_product_single` 移除後，整 product 合併且共同部分非空者以共同部分命名（如 `Blue Journey衣装ver.`）。
-4. `/estimate` 參考行包含 product_title 欄位。
+4. `/estimate` 參考行在 item_name 未含 product 標題時帶入 product_title 欄位；item_name 已含 product 標題（key 空 fallback 或短選項值前綴）時不重複顯示。
 5. 既有不受影響行為（themed series、短選項、純-talent、SET/¥0、snippet）維持不變。
 6. 真實 `秘密の雨の日ボイス` 重跑得 §7.1 預期 5 合併 item。
 7. 驗證工具鏈全綠（型別 0 error、ruff、相關測試）。
