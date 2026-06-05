@@ -148,7 +148,7 @@ Expected (current unmodified `items.py`):
 
 - [ ] **Step 3: Edit `estimator_king/sync/items.py`**
 
-(3a) Replace the `_SIZE_RE` constant block (lines 16-18) — i.e. delete `_SIZE_RE` and add the two new constants. The block becomes:
+(3a) Replace the `_SIZE_RE` + `_SEGMENT_SPLIT` constant block (lines 16-19) — delete `_SIZE_RE`, add the two new constants, and keep `_SEGMENT_SPLIT` unchanged (do not duplicate it). The block becomes:
 
 ```python
 _TOKEN_SPLIT = re.compile(r"[\s（）()]+")  # split on whitespace + full/half-width parens
@@ -382,9 +382,13 @@ from estimator_king.sync.items import decompose_items
 talents = frozenset(yaml.safe_load(open("stores_config.yaml")).get("talents", []))
 
 def fetch(store, pid):
-    for pg in range(1, 6):
+    for pg in range(1, 30):
         url = f"https://{store}/products.json?limit=250&page={pg}"
-        for p in json.load(urllib.request.urlopen(url)).get("products", []):
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; EstimatorKing-verify)"})
+        products = json.load(urllib.request.urlopen(req)).get("products", [])
+        if not products:
+            break  # reached end of catalog
+        for p in products:
             if p["id"] == pid:
                 return p
     raise SystemExit(f"product {pid} not found on {store}")
@@ -401,6 +405,15 @@ def run(store, pid, label):
     print(f"\n=== {label}: {len(res.items)} items, {len(merged)} merged ===")
     for i in merged:
         print(f"  {i.item_name!r} x{len(i.source_variant_ids)} ¥{i.price_jpy}")
+    if label == "秘密の雨の日ボイス":
+        got = {(i.item_name, len(i.source_variant_ids)) for i in merged}
+        expect = {("日本語", 27), ("英語", 12), ("インドネシア語", 6),
+                  ("SPボイス 日本語", 12), ("SPボイス 英語", 3)}
+        missing = expect - got
+        print("  voice check:", "OK" if not missing else f"MISSING {missing}")  # set membership also confirms distinct names
+    if label == "ぶいすぽっ！ジャージ":
+        ok = any(i.item_name == "ぶいすぽっ！ジャージ" and len(i.source_variant_ids) == 25 for i in merged)
+        print("  jersey check:", "OK" if ok else "MISMATCH")
 
 run("shop.hololivepro.com", 9384273215708, "秘密の雨の日ボイス")
 run("store.vspo.jp", 7866043990203, "ぶいすぽっ！ジャージ")
@@ -408,10 +421,11 @@ PY
 ```
 
 Expected output:
-- `秘密の雨の日ボイス`: 5 merged items — `'日本語' x27`, `'英語' x12`, `'インドネシア語' x6`, `'SPボイス 日本語' x12`, `'SPボイス 英語' x3` (item_names distinct; other non-voice items may also appear).
-- `ぶいすぽっ！ジャージ`: 1 merged item — `'ぶいすぽっ！ジャージ' x25`.
 
-If the merges match, §7.1 is verified. If a store is unreachable, note it and proceed (Task 1 unit tests cover the same logic on synthetic snapshots).
+- `秘密の雨の日ボイス`: 5 voice merges (`日本語 x27`, `英語 x12`, `インドネシア語 x6`, `SPボイス 日本語 x12`, `SPボイス 英語 x3`; other non-voice merges may also print) and a `voice check: OK` line.
+- `ぶいすぽっ！ジャージ`: 1 merged item `'ぶいすぽっ！ジャージ' x25` and a `jersey check: OK` line.
+
+Pass condition: both `voice check: OK` and `jersey check: OK`. The voice set-membership check also confirms the five same-/multi-price language groups carry distinct item_names (slug-uniqueness, spec §7.1). If a store is unreachable, note it and proceed — Task 1 unit tests cover the same logic on synthetic snapshots.
 
 - [ ] **Step 2: Note the snippet hit-rate follow-up (spec §7.3)**
 
