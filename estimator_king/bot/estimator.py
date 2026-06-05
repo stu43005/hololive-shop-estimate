@@ -174,8 +174,13 @@ class Estimator:
         m = hit.metadata
         pub = int(m.get("published_at", 0) or 0)
         date = "?" if pub == 0 else datetime.fromtimestamp(pub, tz=timezone.utc).strftime("%Y-%m")
-        line = (f"- {m.get('item_name')} | {m.get('item_type')} | "
-                f"¥{m.get('price_jpy')} | {date} | {m.get('store_id')}")
+        item_name = str(m.get("item_name") or "")
+        product_title = str(m.get("product_title") or "")
+        fields = [item_name, str(m.get("item_type") or "")]
+        if product_title and product_title != item_name:
+            fields.append(product_title)
+        fields += [f"¥{m.get('price_jpy')}", date, str(m.get("store_id") or "")]
+        line = "- " + " | ".join(fields)
         snippet = str(m.get("detail_snippet", "") or "")
         if snippet:
             line += f"\n    {snippet[:120]}"

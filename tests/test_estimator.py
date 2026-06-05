@@ -28,10 +28,11 @@ class RecordingVectorStore:
         return list(self._hits)
 
 
-def _hit(id, item_type, price, pub, dist):
+def _hit(id, item_type, price, pub, dist, product_title="P"):
     return QueryHit(id=id, document="", distance=dist, metadata={
         "item_name": id, "item_type": item_type, "price_jpy": price,
-        "published_at": pub, "store_id": "s", "detail_snippet": ""})
+        "published_at": pub, "store_id": "s", "detail_snippet": "",
+        "product_title": product_title})
 
 
 class FakeChat:
@@ -113,7 +114,7 @@ def test_context_line_format_shape():
     chat = FakeChat([_est("もちもちぬいぐるみ")])
     est = _estimator(vs, chat)
     est.estimate_products(["もちもちぬいぐるみ"], "u")
-    assert "- itemX | ぬいぐるみ | ¥500 | ? | s" in chat.last_user_prompt
+    assert "- itemX | ぬいぐるみ | P | ¥500 | ? | s" in chat.last_user_prompt
 
 
 def test_merge_keeps_minimum_distance_for_same_id():
@@ -224,3 +225,13 @@ def test_fetch_multiplier_still_sends_only_top_k_to_chat():
     _estimator(vs, chat, top_k=5, fetch_mult=2).estimate_products(["x"], "u")
     ref_lines = [ln for ln in chat.last_user_prompt.splitlines() if ln.startswith("- h")]
     assert len(ref_lines) == 5
+
+
+def test_reference_line_omits_product_when_equal_to_item_name():
+    vs = RecordingVectorStore([_hit("P", "ぬいぐるみ", 500, 0, 0.1, product_title="P")])
+    chat = FakeChat([_est("もちもちぬいぐるみ")])
+    est = _estimator(vs, chat)
+    est.estimate_products(["もちもちぬいぐるみ"], "u")
+    prompt = chat.last_user_prompt
+    assert "- P | ぬいぐるみ | ¥500 | ? | s" in prompt
+    assert prompt.count("| P |") == 0  # product not repeated as its own column
