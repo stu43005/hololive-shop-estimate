@@ -59,12 +59,12 @@ def _canonical_key(residual: str, talents: frozenset[str]) -> tuple[str, list[st
       if ri.residual is None:
           name = ri.key.strip() or snapshot.title   # 合併：共同部分；空才用 product 標題
       else:
-          name = ri.residual                          # 非合併：殘餘原樣（含短選項值如「黒 M」；空殘餘為 ""）
+          name = normalize_text(ri.residual)          # 非合併：normalize 後的殘餘（收斂全形空白/entity，與合併 key 一致；如「黒　M」→「黒 M」；空殘餘為 ""）
       items.append(ProductItem(... item_name=name ...))
   ```
 
 - **移除 `whole_product_single`**（[items.py:161-163](../../../estimator_king/sync/items.py)）：其唯一效果是「整 product 合併時強制 product 標題命名」，現由上式「key 空 → product 標題」涵蓋；key 非空時改用共同部分（如 `Blue Journey衣装ver.`）。此為刻意的命名語義變更。
-- **移除 `_is_option_value`（[items.py:72-74](../../../estimator_king/sync/items.py)）與 `_SIZE_RE`（[items.py:16-18](../../../estimator_king/sync/items.py)）**（兩者僅用於原短選項值前綴命名，[items.py:168](../../../estimator_king/sync/items.py) 是 `_is_option_value` 的唯一呼叫點）：原把短選項值殘餘（如「黒 M」）前置 product 標題命名為 `{product} {殘餘}`。product 脈絡現由 §3.3 參考行欄位、embedding 文件第 3 行 `# {product_title}`、log tree 父層提供，前置已多餘、且會在 embedding 文件中重複 product。移除後短選項值直接以殘餘命名（`黒 M`）。**連帶**：空殘餘（`""`）非合併項的 item_name 由 product 標題改為 `""`（罕見退化變體；product 仍由參考行/metadata 提供）。
+- **移除 `_is_option_value`（[items.py:72-74](../../../estimator_king/sync/items.py)）與 `_SIZE_RE`（[items.py:16-18](../../../estimator_king/sync/items.py)）**（兩者僅用於原短選項值前綴命名，[items.py:168](../../../estimator_king/sync/items.py) 是 `_is_option_value` 的唯一呼叫點）：原把短選項值殘餘（如「黒 M」）前置 product 標題命名為 `{product} {殘餘}`。product 脈絡現由 §3.3 參考行欄位、embedding 文件第 3 行 `# {product_title}`、log tree 父層提供，前置已多餘、且會在 embedding 文件中重複 product。移除後短選項值直接以 **`normalize_text` 後的殘餘**命名（與合併分支的 canonical key 一致皆 normalize；variant 中的全形空白收斂，如 `黒　M` → `黒 M`）。注意：此使既有非合併「一般殘餘」分支也一併套用 `normalize_text`（先前為原樣）；既有測試殘餘本已乾淨故 normalize 為 no-op、不受影響。**連帶**：空殘餘（`""`）非合併項的 item_name 由 product 標題改為 `""`（罕見退化變體；product 仍由參考行/metadata 提供）。
 - **不採用** `{product} / {key}` 形式：product 脈絡改由 §3.3 的參考行欄位提供，使 item_name 維持為純共同部分／純殘餘、避免 embedding 文件中 product 標題重複（[engine.py:84-88](../../../estimator_king/sync/engine.py) 的文件第 3 行已含 `# {product_title}`）。移除格式 #3 後，此「item_name 不扛 product」原則於所有分支一致（唯一例外為 key 空 fallback，因無共同部分可用）。
 
 ### 3.3 Estimator 參考行加 product 名（[estimator.py:173-178](../../../estimator_king/bot/estimator.py)）
@@ -137,7 +137,7 @@ def _format_reference(self, hit: _Hit) -> str:
 - **更新** `test_talent_variants_merge_to_product_title`：Blue Journey（殘餘 `さくらみこ Blue Journey衣装ver.`）合併後 item_name 改為共同部分 **`Blue Journey衣装ver.`**（非 product 標題）；改名為 `test_talent_variants_merge_named_by_common_part`，斷言 `item_name == "Blue Journey衣装ver."`、`source_variant_ids` 長度、talents 收齊。
 - **新增** 黏著括號修飾詞合併：product 標題如 `秘密ボイス`，variant `カテゴリ / さくらみこ（日本語）`、`カテゴリ / 白上フブキ（日本語）`（同價）→ 合併 1 筆，item_name == `日本語`；另加 `カテゴリ / さくらみこ（英語）`、`カテゴリ / 白上フブキ（英語）`（同價）→ 另合併 1 筆 item_name == `英語`；驗證同價兩組 item_name 相異（不撞號）。
 - **新增** 含空白 + 括號（SP 型）：variant `カテゴリ / さくらみこ SPボイス（日本語）`、`カテゴリ / 白上フブキ SPボイス（日本語）` → 合併，item_name == `SPボイス 日本語`。
-- **更新** `test_short_option_value_prepends_product_title` → 短選項值不再前綴 product 標題；改名 `test_short_option_value_named_by_residual`，斷言 item_name == `黒 M` / `白 L`（殘餘原樣）。
+- **更新** `test_short_option_value_prepends_product_title` → 短選項值不再前綴 product 標題；改名 `test_short_option_value_named_by_residual`，斷言 item_name == `黒 M` / `白 L`（`normalize_text` 後值——輸入 `黒　M`/`白　L` 的全形空白被收斂為半形）。
 - **更新** `test_empty_residual_without_talent_not_merged` → 空殘餘非合併項 item_name 改為 `""`（不再 product 標題）；以 item 數 / `source_variant_ids` 長度驗證未合併、且 `item_name == ""`；移除原註解對 `_is_option_value("")` 的引用（該函式已刪）。
 - **維持綠** `test_pure_talent_enumeration_merges_to_product_title`（裸 talent、key 空 → item_name == product 標題）。
 - **維持綠** `test_themed_series_not_merged_even_at_same_price`、`test_pure_talent_enumeration_coexists_with_distinct_item`、`test_excludes_set_and_zero_price`、`test_unparseable_price_counts_as_excluded_zero`、`test_detail_snippet_substring_match`、`test_voice_item_has_no_snippet`。
@@ -171,7 +171,7 @@ def _format_reference(self, hit: _Hit) -> str:
 2. 合併 item 以共同部分命名；共同部分為空時 fallback product 標題。
 3. `whole_product_single` 移除後，整 product 合併且共同部分非空者以共同部分命名（如 `Blue Journey衣装ver.`）。
 4. `/estimate` 參考行在 product_title **≠** item_name 時帶入 product_title 欄位；product_title == item_name（key 空 fallback）時不重複顯示。
-5. 移除 `_is_option_value`/`_SIZE_RE`：短選項值非合併項以殘餘命名（`黒 M`）；空殘餘非合併項 item_name 為 `""`。
+5. 移除 `_is_option_value`/`_SIZE_RE`：非合併項以 `normalize_text` 後殘餘命名（短選項 `黒　M` → `黒 M`）；空殘餘非合併項 item_name 為 `""`。
 6. 既有不受影響行為（themed series 不誤併、純-talent 命名、SET/¥0 排除）維持不變。
 7. 真實 `秘密の雨の日ボイス` 重跑得 §7.1 預期 5 合併 item。
 8. snippet：合併品項 snippet 命中率經 §7.3 operational verification 確認未顯著劣化（best-effort、非阻斷）。
