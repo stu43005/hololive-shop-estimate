@@ -423,14 +423,21 @@ git commit -m "feat(items): exclude whole-set bundle options in decompose_items"
   `sync_products` signature at lines 127-139 + accumulation at line 178 + call at
   lines 166-169; `_rebuild_product_items` signature at lines 212-223 + `decompose_items`
   call at line 228 + `return RebuildReport(...)` at lines 272-276)
-- Test: `tests/test_engine_items.py`
+- Test: `tests/test_engine_items.py` (new exclusion test)
+- Test: `tests/test_engine_logging.py` (update the head-string assertion at line 89 to
+  the new `(SET×.., ¥0×.., bundle×..)` format)
 
 - [ ] **Step 1: Write the failing test**
 
-First inspect how `sync_products` is invoked in `tests/test_engine_items.py` (the helper
-around line 58 builds the keyword args). Append a new test that passes a populated
-`bundle_set` and asserts the bundle item is excluded and counted. Add this import at the
-top of `tests/test_engine_items.py` if not already present:
+`tests/test_engine_items.py` already defines everything this test needs:
+`ProductSnapshot`/`ProductVariant` (imported line 2), `sync_products` (line 4),
+`ProductStateRepository` (line 3), `TALENTS`/`ITEM_TYPES` (lines 6-7), the `Fake*`
+providers (classes at lines 10/15/35), and a `_repo()` helper (lines 51-54) that returns
+an **opened** in-memory repo (`ProductStateRepository(":memory:")` + `repo.open()`).
+`sync_products` calls `repository.get_by_external_key(...)`/`upsert(...)`, which require
+an open connection — always use `_repo()`, never construct a repo inline.
+
+Add this import near the top of `tests/test_engine_items.py`:
 
 ```python
 from estimator_king.config_schema import BundleSetPolicy
@@ -439,11 +446,8 @@ from estimator_king.config_schema import BundleSetPolicy
 Append:
 
 ```python
-def test_sync_excludes_bundle_option(tmp_path):
-    repo = ProductStateRepository(str(tmp_path / "db.sqlite"))
-    embedder = FakeEmbedder()
-    vector_store = FakeVectorStore()
-    typing_provider = FakeTypingProvider()
+def test_sync_excludes_bundle_option():
+    repo, vs = _repo(), FakeVectorStore()
     snap = ProductSnapshot(
         product_id=1, title="誕生日", description="",
         variants=[
@@ -454,22 +458,21 @@ def test_sync_excludes_bundle_option(tmp_path):
         html_details={},
     )
     res = sync_products(
-        [("https://x/p/1", snap)], "s", repo, embedder, vector_store,
-        typing_provider=typing_provider, talents=TALENTS,
+        [("http://x/products/1", snap)], "hololive", repo,
+        FakeEmbedder(), vs,
+        typing_provider=FakeTypingProvider(), talents=TALENTS,
         item_types=ITEM_TYPES, item_types_version=1,
         bundle_set=BundleSetPolicy(keywords=frozenset({"グッズセット"})),
     )
     assert res.items == 2          # bundle dropped, two singles kept
-    assert res.excluded == 1       # the one bundle option
-    names = {m["item_name"] for _, m in vector_store.docs.values()}
+    assert res.excluded == 1       # the one bundle option (matched keyword グッズセット)
+    names = {m["item_name"] for _, m in vs.docs.values()}
     assert "バースデーグッズセット" not in names
     assert names == {"アクリルスタンド", "タペストリー"}
 ```
 
-If `tests/test_engine_items.py` does not already import `ProductSnapshot`,
-`ProductVariant`, `sync_products`, `ProductStateRepository`, `TALENTS`, `ITEM_TYPES`,
-or the `Fake*` providers, reuse the imports/fixtures already present in that file (they
-are defined there for the existing tests — match their names exactly).
+(`バースデーグッズセット` contains the keyword `グッズセット` → excluded by rule (A),
+regardless of its 9000 price; the two singles remain.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -629,26 +632,40 @@ to:
     )
 ```
 
-- [ ] **Step 8: Run the new test + full engine suite to verify**
+- [ ] **Step 8: Update the head-string assertion in `test_engine_logging.py`**
+
+Step 5 changed the head format to include `bundle×{excluded_bundle}`, so the existing
+assertion in `tests/test_engine_logging.py` at line 89 (which pins the old two-field
+format) must be updated. That test's snapshot has no bundle item, so `excluded_bundle`
+is 0. Change line 89 from:
+
+```python
+    assert "2 excluded (SET×1, ¥0×1)" in msg
+```
+
+to:
+
+```python
+    assert "2 excluded (SET×1, ¥0×1, bundle×0)" in msg
+```
+
+- [ ] **Step 9: Run the new test + full engine suite to verify**
 
 Run: `.venv/bin/python -m pytest tests/test_engine_items.py tests/test_engine_logging.py -v -o addopts=""`
-Expected: PASS — the new exclusion test passes and all existing engine tests stay green
-(the `excluded (SET×.., ¥0×.., bundle×..)` head-string change is asserted only where
-those tests check log output; confirm `test_engine_logging.py` expectations match — if an
-existing assertion pins the old `excluded (SET×N, ¥0×N)` string, update it to the new
-`(SET×N, ¥0×N, bundle×N)` format).
+Expected: PASS — `test_sync_excludes_bundle_option` passes and all existing engine tests
+stay green (including the updated `test_engine_logging.py` head-string assertion).
 
-- [ ] **Step 9: Type check + lint**
+- [ ] **Step 10: Type check + lint**
 
 Run: `.venv/bin/basedpyright estimator_king/sync/engine.py`
 Expected: 0 errors.
-Run: `uvx ruff check estimator_king/sync/engine.py tests/test_engine_items.py`
+Run: `uvx ruff check estimator_king/sync/engine.py tests/test_engine_items.py tests/test_engine_logging.py`
 Expected: no findings.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
-git add estimator_king/sync/engine.py tests/test_engine_items.py
+git add estimator_king/sync/engine.py tests/test_engine_items.py tests/test_engine_logging.py
 git commit -m "feat(sync): thread bundle_set through engine and count exclusions"
 ```
 
