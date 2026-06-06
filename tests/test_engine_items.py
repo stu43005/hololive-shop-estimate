@@ -1,4 +1,5 @@
 
+from estimator_king.config_schema import BundleSetPolicy
 from estimator_king.crawler.snapshot import ProductSnapshot, ProductVariant
 from estimator_king.database.repository import ProductStateRepository
 from estimator_king.sync.engine import sync_products
@@ -169,3 +170,28 @@ def test_failed_sync_has_zero_aggregates():
     assert res.embed_indexed == 0
     assert res.typing_vocab == 0
     repo.close()
+
+
+def test_sync_excludes_bundle_option():
+    repo, vs = _repo(), FakeVectorStore()
+    snap = ProductSnapshot(
+        product_id=1, title="誕生日", description="",
+        variants=[
+            ProductVariant(variant_id=1, title="グッズ / バースデーグッズセット", price="9000"),
+            ProductVariant(variant_id=2, title="グッズ / アクリルスタンド", price="3000"),
+            ProductVariant(variant_id=3, title="グッズ / タペストリー", price="3000"),
+        ],
+        html_details={},
+    )
+    res = sync_products(
+        [("http://x/products/1", snap)], "hololive", repo,
+        FakeEmbedder(), vs,
+        typing_provider=FakeTypingProvider(), talents=TALENTS,
+        item_types=ITEM_TYPES, item_types_version=1,
+        bundle_set=BundleSetPolicy(keywords=frozenset({"グッズセット"})),
+    )
+    assert res.items == 2          # bundle dropped, two singles kept
+    assert res.excluded == 1       # the one bundle option (matched keyword グッズセット)
+    names = {m["item_name"] for _, m in vs.docs.values()}
+    assert "バースデーグッズセット" not in names
+    assert names == {"アクリルスタンド", "タペストリー"}

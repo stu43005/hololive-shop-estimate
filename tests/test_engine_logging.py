@@ -86,7 +86,7 @@ def test_crawl_entry_emits_single_tree_record(caplog):
     assert "\n" in msg  # single multi-line record, not split across records
     assert 'product hololive:10 "P" (created):' in msg
     assert "2 items" in msg
-    assert "2 excluded (SET×1, ¥0×1)" in msg
+    assert "2 excluded (SET×1, ¥0×1, bundle×0)" in msg
     assert "typing=アクリルスタンド(vocab)" in msg
     assert "detail=miss" in msg
     assert "embed=indexed" in msg

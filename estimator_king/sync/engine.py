@@ -6,7 +6,7 @@ import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Iterable, Literal, Protocol, Sequence
+from typing import TYPE_CHECKING, Iterable, Literal, Protocol, Sequence
 
 from estimator_king.crawler.snapshot import (
     NORMALIZER_VERSION,
@@ -17,6 +17,9 @@ from estimator_king.crawler.snapshot import (
 from estimator_king.database.repository import ProductState, ProductStateRepository
 from estimator_king.sync.items import ProductItem, decompose_items
 from estimator_king.sync.typing import TypeDecision, classify_item
+
+if TYPE_CHECKING:
+    from estimator_king.config_schema import BundleSetPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,7 @@ class RebuildReport:
     item_rows: list[ItemRow]
     excluded_set: int
     excluded_zero: int
+    excluded_bundle: int
 
 
 def _item_slug(item_name: str, price_jpy: int) -> str:
@@ -99,13 +103,16 @@ def _format_skipped(store_id: str, product_id: str, title: str) -> str:
 
 def _format_product_tree(
     store_id: str, product_id: str, title: str, verb: str,
-    rows: list[ItemRow], excluded_set: int, excluded_zero: int,
+    rows: list[ItemRow], excluded_set: int, excluded_zero: int, excluded_bundle: int,
 ) -> str:
     n = len(rows)
-    excluded = excluded_set + excluded_zero
+    excluded = excluded_set + excluded_zero + excluded_bundle
     head = f'product {store_id}:{product_id} "{title}" ({verb}): {n} items'
     if excluded:
-        head += f", {excluded} excluded (SET×{excluded_set}, ¥0×{excluded_zero})"
+        head += (
+            f", {excluded} excluded "
+            f"(SET×{excluded_set}, ¥0×{excluded_zero}, bundle×{excluded_bundle})"
+        )
     lines = [head]
     for i, row in enumerate(rows):
         last = i == n - 1
@@ -135,6 +142,7 @@ def sync_products(
     talents: frozenset[str],
     item_types: list[str],
     item_types_version: int,
+    bundle_set: "BundleSetPolicy | None" = None,
     log_item_trees: bool = False,
 ) -> SyncResult:
     result = SyncResult()
@@ -166,6 +174,7 @@ def sync_products(
                 report = _rebuild_product_items(
                     snapshot, store_id, product_url, repository, embedder,
                     vector_store, typing_provider, talents, item_types, item_types_version,
+                    bundle_set,
                 )
                 last_indexed_at = now
                 verb = "created" if state is None else "updated"
@@ -175,7 +184,9 @@ def sync_products(
                     result.updated += 1
                 rows = report.item_rows
                 result.items += len(rows)
-                result.excluded += report.excluded_set + report.excluded_zero
+                result.excluded += (
+                    report.excluded_set + report.excluded_zero + report.excluded_bundle
+                )
                 result.detail_hits += sum(1 for r in rows if r.detail_hit)
                 result.typing_vocab += sum(1 for r in rows if r.decision.source == "vocab")
                 result.typing_cache += sum(1 for r in rows if r.decision.source == "cache")
@@ -184,7 +195,8 @@ def sync_products(
                 if log_item_trees:
                     logger.info(_format_product_tree(
                         store_id, str(snapshot.product_id), snapshot.title, verb,
-                        rows, report.excluded_set, report.excluded_zero))
+                        rows, report.excluded_set, report.excluded_zero,
+                        report.excluded_bundle))
         except Exception:  # embedding/vector/typing failure: fire-and-forget
             logger.exception("Sync failed for %s", external_key)
             result.failed += 1
@@ -220,12 +232,20 @@ def _rebuild_product_items(
     talents: frozenset[str],
     item_types: list[str],
     item_types_version: int,
+    bundle_set: "BundleSetPolicy | None" = None,
 ) -> RebuildReport:
     product_id = str(snapshot.product_id)
     existing = {h.id: str(h.metadata.get("item_hash", "")) for h in
                 vector_store.get_by_product(store_id, product_id)}
 
-    decomposed = decompose_items(snapshot, talents=talents)
+    from estimator_king.config_schema import BundleSetPolicy
+    policy = bundle_set if bundle_set is not None else BundleSetPolicy()
+    decomposed = decompose_items(
+        snapshot, talents=talents,
+        bundle_keywords=policy.keywords,
+        bundle_price_ratio=policy.price_ratio,
+        bundle_keep_keywords=policy.keep_keywords,
+    )
     rows: list[ItemRow] = []
     desired_ids: set[str] = set()
     for item in decomposed.items:
@@ -273,4 +293,5 @@ def _rebuild_product_items(
         item_rows=rows,
         excluded_set=decomposed.excluded_set,
         excluded_zero=decomposed.excluded_zero,
+        excluded_bundle=decomposed.excluded_bundle,
     )
