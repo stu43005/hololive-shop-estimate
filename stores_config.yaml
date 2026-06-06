@@ -166,7 +166,31 @@ item_types:
   - 温感マグカップ
   - アイマスク
 # Bump when the list changes to force re-classification on the next crawl.
-item_types_version: 3
+item_types_version: 4
+
+# Whole-set bundle options to exclude from priceable items. (A) any item whose name
+# contains a `keywords` substring is dropped regardless of price; (B) any item whose
+# name contains 「セット」, is not on `keep_keywords`, and is priced >= `price_ratio` ×
+# the same-product median is also dropped (catches set bundles with no keyword).
+bundle_set:
+  keywords:
+    - グッズセット
+    - フルセット
+    - 応援セット
+    - 語セット
+  price_ratio: 5.0
+  keep_keywords:
+    - ステッカーセット
+    - 缶バッジセット
+    - クリアファイルセット
+    - キーホルダーセット
+    - カードセット
+    - ブロマイドセット
+    - ポスターセット
+    - ボイスセット
+    - カトラリーセット
+    - ステーショナリーセット
+    - チャームセット
 
 # Talent display names for talent-gated dedup. Base list is mined from the
 # official store collection pages via scripts/mine_talents.py; graduated
