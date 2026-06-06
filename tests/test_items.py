@@ -186,3 +186,91 @@ def test_internal_space_talent_merges():
     assert item.item_name == "ぶいすぽっ！ジャージ"  # key empty -> product-title fallback
     assert len(item.source_variant_ids) == 3
     assert set(item.talents) == {"さくらみこ", "白上フブキ", "博衣こより"}  # original dict forms
+
+
+BUNDLE_KW = frozenset({"グッズセット", "フルセット", "応援セット", "語セット"})
+BUNDLE_KEEP = frozenset({"クリアファイルセット", "缶バッジセット", "ボイスセット"})
+
+
+def test_bundle_keyword_excluded_regardless_of_price():
+    # "バースデーグッズセット" matches keyword "グッズセット"; excluded even though its
+    # price (1500) is below the peer median (2 peers at 3000) -> ratio 0.5 < 5.
+    snap = _snap("誕生日", [
+        ("グッズ / バースデーグッズセット", "1500"),
+        ("グッズ / アクリルスタンド", "3000"),
+        ("グッズ / タペストリー", "3000"),
+    ])
+    result = decompose_items(
+        snap, talents=TALENTS,
+        bundle_keywords=BUNDLE_KW, bundle_price_ratio=5.0, bundle_keep_keywords=BUNDLE_KEEP)
+    names = [i.item_name for i in result.items]
+    assert "バースデーグッズセット" not in names
+    assert set(names) == {"アクリルスタンド", "タペストリー"}
+    assert result.excluded_bundle == 1
+
+
+def test_keep_keyword_protects_high_ratio_set():
+    # "クリアファイルセット" is a single-product type: high ratio (3600 vs median 660)
+    # but on the keep whitelist -> kept.
+    snap = _snap("クリアファイル", [
+        ("グッズ / クリアファイルセット", "3600"),
+        ("グッズ / ステッカー", "660"),
+        ("グッズ / ポストカード", "660"),
+    ])
+    result = decompose_items(
+        snap, talents=TALENTS,
+        bundle_keywords=BUNDLE_KW, bundle_price_ratio=5.0, bundle_keep_keywords=BUNDLE_KEEP)
+    assert "クリアファイルセット" in [i.item_name for i in result.items]
+    assert result.excluded_bundle == 0
+
+
+def test_price_tiebreaker_excludes_non_keyword_set():
+    # "stage セット" has no bundle keyword, not on keep list, ratio 30000/1000 = 30 >= 5
+    # and name contains セット -> excluded by (B).
+    snap = _snap("アクリルスタンド", [
+        ("グッズ / hololive stageセット", "30000"),
+        ("グッズ / 単品A", "1000"),
+        ("グッズ / 単品B", "1000"),
+    ])
+    result = decompose_items(
+        snap, talents=TALENTS,
+        bundle_keywords=BUNDLE_KW, bundle_price_ratio=5.0, bundle_keep_keywords=BUNDLE_KEEP)
+    names = [i.item_name for i in result.items]
+    assert "hololive stageセット" not in names
+    assert result.excluded_bundle == 1
+
+
+def test_bundle_keyword_excluded_with_no_peers():
+    # Single variant whose name matches a keyword: (A) fires with no peers needed.
+    snap = _snap("フルセット商品", [
+        ("グッズ / フルセット", "20000"),
+    ])
+    result = decompose_items(
+        snap, talents=TALENTS,
+        bundle_keywords=BUNDLE_KW, bundle_price_ratio=5.0, bundle_keep_keywords=BUNDLE_KEEP)
+    assert result.items == []
+    assert result.excluded_bundle == 1
+
+
+def test_low_ratio_non_keyword_set_kept():
+    # "缶バッジセット" non-keyword, on keep list, and ratio low -> kept; excluded_bundle 0.
+    snap = _snap("缶バッジ", [
+        ("グッズ / 缶バッジセット", "1000"),
+        ("グッズ / タペストリー", "5000"),
+        ("グッズ / アクリルスタンド", "5000"),
+    ])
+    result = decompose_items(
+        snap, talents=TALENTS,
+        bundle_keywords=BUNDLE_KW, bundle_price_ratio=5.0, bundle_keep_keywords=BUNDLE_KEEP)
+    assert "缶バッジセット" in [i.item_name for i in result.items]
+    assert result.excluded_bundle == 0
+
+
+def test_bundle_filter_default_params_noop():
+    # Default (no bundle params): no exclusion, excluded_bundle 0, field present.
+    snap = _snap("P", [
+        ("グッズ / アクリルスタンド", "500"),
+    ])
+    result = decompose_items(snap, talents=TALENTS)
+    assert result.excluded_bundle == 0
+    assert [i.item_name for i in result.items] == ["アクリルスタンド"]

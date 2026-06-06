@@ -8,6 +8,7 @@ from the snapshot onto every item of that product.
 from __future__ import annotations
 
 import re
+import statistics
 from dataclasses import dataclass
 from collections import defaultdict
 
@@ -35,6 +36,7 @@ class DecomposeResult:
     items: list[ProductItem]
     excluded_set: int
     excluded_zero: int
+    excluded_bundle: int = 0
 
 
 def _strip_prefix(title: str) -> tuple[str, str | None]:
@@ -114,7 +116,39 @@ def _extract_snippet(item_name: str, html_details: dict[str, str], talents: froz
     return best
 
 
-def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> DecomposeResult:
+def _is_bundle(
+    item: ProductItem,
+    peers: list[ProductItem],
+    keywords: frozenset[str],
+    price_ratio: float,
+    keep_keywords: frozenset[str],
+) -> bool:
+    """True if item is a whole-set bundle option to exclude.
+
+    (A) item_name contains any bundle keyword -> exclude regardless of price.
+    (B) item_name contains 「セット」, is not whitelisted, and its price is at least
+        `price_ratio` times the median of same-product peer prices.
+    """
+    name = item.item_name
+    if any(k in name for k in keywords):
+        return True
+    if "セット" in name and not any(k in name for k in keep_keywords):
+        peer_prices = [p.price_jpy for p in peers if p.price_jpy > 0]
+        if peer_prices:
+            med = statistics.median(peer_prices)
+            if med > 0 and item.price_jpy / med >= price_ratio:
+                return True
+    return False
+
+
+def decompose_items(
+    snapshot: ProductSnapshot,
+    *,
+    talents: frozenset[str],
+    bundle_keywords: frozenset[str] = frozenset(),
+    bundle_price_ratio: float = 5.0,
+    bundle_keep_keywords: frozenset[str] = frozenset(),
+) -> DecomposeResult:
     # Step 1+2: keep non-SET, non-zero variants as (residual, price_int, variant_id).
     kept: list[tuple[str, int, int]] = []
     excluded_set = 0
@@ -184,5 +218,17 @@ def decompose_items(snapshot: ProductSnapshot, *, talents: frozenset[str]) -> De
             detail_snippet=_extract_snippet(name, snapshot.html_details, talents),
             published_at=snapshot.published_at,
         ))
+    # Post-pass: drop whole-set bundle options (leave-one-out peer comparison over the
+    # full item set computed before any removal).
+    kept_items: list[ProductItem] = []
+    excluded_bundle = 0
+    for item in items:
+        peers = [other for other in items if other is not item]
+        if _is_bundle(item, peers, bundle_keywords, bundle_price_ratio, bundle_keep_keywords):
+            excluded_bundle += 1
+            continue
+        kept_items.append(item)
+
     return DecomposeResult(
-        items=items, excluded_set=excluded_set, excluded_zero=excluded_zero)
+        items=kept_items, excluded_set=excluded_set, excluded_zero=excluded_zero,
+        excluded_bundle=excluded_bundle)
