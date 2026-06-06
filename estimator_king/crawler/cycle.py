@@ -62,6 +62,7 @@ async def run_crawl_cycle(
                         typing_provider=typing_provider, talents=config.talents,
                         item_types=config.item_types,
                         item_types_version=config.item_types_version,
+                        bundle_set=config.bundle_set,
                         log_item_trees=log_item_trees, proxy=config.proxy)
                     counters["fetched_ok"] += result.processed
                     counters["created"] += result.created

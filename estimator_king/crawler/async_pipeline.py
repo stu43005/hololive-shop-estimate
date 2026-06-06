@@ -10,7 +10,7 @@ from estimator_king.crawler.shopify import fetch_product
 from estimator_king.sync.engine import sync_products
 
 if TYPE_CHECKING:
-    from estimator_king.config_schema import CrawlerPolicy, ProxyConfig
+    from estimator_king.config_schema import BundleSetPolicy, CrawlerPolicy, ProxyConfig
     from estimator_king.database.repository import ProductStateRepository
     from estimator_king.llm.embeddings import EmbeddingProvider
     from estimator_king.llm.typing_provider import TypingProvider
@@ -61,6 +61,7 @@ async def async_process_queue(
     talents: frozenset[str],
     item_types: list[str],
     item_types_version: int,
+    bundle_set: BundleSetPolicy | None = None,
     log_item_trees: bool = False,
     proxy: ProxyConfig | None = None,
 ) -> PipelineResult:
@@ -84,7 +85,7 @@ async def async_process_queue(
                     state_repo, embedder, vector_store,
                     typing_provider=typing_provider, talents=talents,
                     item_types=item_types, item_types_version=item_types_version,
-                    log_item_trees=log_item_trees,
+                    log_item_trees=log_item_trees, bundle_set=bundle_set,
                 )
                 state_repo.delete_queue_entry(entry_id)
                 result.created += sync_result.created
