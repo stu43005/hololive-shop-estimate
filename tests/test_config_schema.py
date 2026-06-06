@@ -59,3 +59,42 @@ def test_load_config_defaults_when_sections_absent(tmp_path, monkeypatch):
     assert cfg.estimator_recency_weight == 0.05
     assert cfg.estimator_diversity_weight == 0.05
     assert cfg.estimator_fetch_multiplier == 2
+
+
+def test_load_config_parses_bundle_set_section(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    path = _write_yaml(tmp_path, """
+        stores:
+          - id: s
+            base_url: https://x
+            sitemap_url: https://x/sitemap.xml
+        bundle_set:
+          keywords: [グッズセット, フルセット]
+          price_ratio: 4.0
+          keep_keywords: [ステッカーセット]
+    """)
+    cfg = load_config(path)
+    assert cfg.bundle_set.keywords == frozenset({"グッズセット", "フルセット"})
+    assert cfg.bundle_set.price_ratio == 4.0
+    assert cfg.bundle_set.keep_keywords == frozenset({"ステッカーセット"})
+
+
+def test_load_config_bundle_set_defaults_when_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    path = _write_yaml(tmp_path, """
+        stores:
+          - id: s
+            base_url: https://x
+            sitemap_url: https://x/sitemap.xml
+    """)
+    cfg = load_config(path)
+    assert cfg.bundle_set.keywords == frozenset()
+    assert cfg.bundle_set.keep_keywords == frozenset()
+    assert cfg.bundle_set.price_ratio == 5.0
+
+
+def test_bundle_set_policy_rejects_non_positive_ratio():
+    import pytest
+    from estimator_king.config_schema import BundleSetPolicy
+    with pytest.raises(ValueError, match="price_ratio"):
+        BundleSetPolicy(price_ratio=0.0).validate()

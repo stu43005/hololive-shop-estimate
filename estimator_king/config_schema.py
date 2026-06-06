@@ -87,6 +87,20 @@ class ProxyConfig:
             )
 
 
+@dataclass(frozen=True)
+class BundleSetPolicy:
+    """Policy for excluding whole-set bundle options from decomposed items."""
+
+    keywords: frozenset[str] = field(default_factory=frozenset)
+    price_ratio: float = 5.0
+    keep_keywords: frozenset[str] = field(default_factory=frozenset)
+
+    def validate(self):
+        """Validate bundle-set policy."""
+        if self.price_ratio <= 0:
+            raise ValueError("bundle_set.price_ratio must be greater than 0")
+
+
 @dataclass
 class AppConfig:
     """Complete application configuration.
@@ -122,6 +136,7 @@ class AppConfig:
     item_types: List[str] = field(default_factory=list)
     item_types_version: int = 0
     talents: frozenset[str] = field(default_factory=frozenset)
+    bundle_set: BundleSetPolicy = field(default_factory=BundleSetPolicy)
     estimator_top_k: int = 10
     estimator_recency_weight: float = 0.05
     estimator_diversity_weight: float = 0.05
@@ -156,6 +171,9 @@ class AppConfig:
 
         # Validate proxy config
         self.proxy.validate()
+
+        # Validate bundle-set policy
+        self.bundle_set.validate()
 
     def build_provider_config(self) -> "ProviderConfig":
         from estimator_king.llm.config import ProviderConfig
@@ -255,6 +273,14 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         https_proxy=os.getenv("HTTPS_PROXY", proxy_data.get("https_proxy", "")),
     )
 
+    # Parse bundle-set policy
+    bundle_data = yaml_data.get("bundle_set", {}) or {}
+    bundle_set = BundleSetPolicy(
+        keywords=frozenset(bundle_data.get("keywords", []) or []),
+        price_ratio=float(bundle_data.get("price_ratio", 5.0)),
+        keep_keywords=frozenset(bundle_data.get("keep_keywords", []) or []),
+    )
+
     def _opt_int(name: str, default: int | None) -> int | None:
         raw = os.getenv(name)
         if raw is None:
@@ -285,6 +311,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         item_types=list(yaml_data.get("item_types", []) or []),
         item_types_version=int(yaml_data.get("item_types_version", 0) or 0),
         talents=frozenset(yaml_data.get("talents", []) or []),
+        bundle_set=bundle_set,
         estimator_top_k=int(est.get("top_k", 10)),
         estimator_recency_weight=float(est.get("recency_weight", 0.05)),
         estimator_diversity_weight=float(est.get("diversity_weight", 0.05)),
