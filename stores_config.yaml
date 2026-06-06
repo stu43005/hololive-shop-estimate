@@ -162,6 +162,9 @@ item_types:
   - 法被
   - ワイドラバーマット
   - ベースボールシャツ
+  - キーボード
+  - 温感マグカップ
+  - アイマスク
 # Bump when the list changes to force re-classification on the next crawl.
 item_types_version: 3
 
