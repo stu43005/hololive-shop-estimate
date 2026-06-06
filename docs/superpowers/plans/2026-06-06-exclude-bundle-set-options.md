@@ -780,11 +780,24 @@ following blank line (line 170), insert:
 # name contains 「セット」, is not on `keep_keywords`, and is priced >= `price_ratio` ×
 # the same-product median is also dropped (catches set bundles with no keyword).
 bundle_set:
-  keywords: [グッズセット, フルセット, 応援セット, 語セット]
+  keywords:
+    - グッズセット
+    - フルセット
+    - 応援セット
+    - 語セット
   price_ratio: 5.0
-  keep_keywords: [ステッカーセット, 缶バッジセット, クリアファイルセット, キーホルダーセット,
-                  カードセット, ブロマイドセット, ポスターセット, ボイスセット,
-                  カトラリーセット, ステーショナリーセット, チャームセット]
+  keep_keywords:
+    - ステッカーセット
+    - 缶バッジセット
+    - クリアファイルセット
+    - キーホルダーセット
+    - カードセット
+    - ブロマイドセット
+    - ポスターセット
+    - ボイスセット
+    - カトラリーセット
+    - ステーショナリーセット
+    - チャームセット
 ```
 
 - [ ] **Step 3: Verify the real config loads with the new block**
