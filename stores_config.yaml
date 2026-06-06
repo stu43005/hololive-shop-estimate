@@ -185,6 +185,14 @@ item_types:
   - キーケース
   - アクリルクロック
   - ピアス
+  - デスクライト
+  - フライトタグ
+  - マウス
+  - お守り
+  - デジタルメッセージボード
+  - ルームディフューザー
+  - オードトワレ
+  - クロス
 # Bump when the list changes to force re-classification on the next crawl.
 item_types_version: 4
 
