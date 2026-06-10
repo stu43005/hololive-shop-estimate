@@ -193,8 +193,9 @@ SYSTEM_PROMPT = (
 
 `snap_to_tax_grid` 測試：
 
-- 已在格點上：`6600 -> 6600`、`1100 -> 1100`（不變）。
-- 向下 round：`3850` 已是格點不變；以 `3800 -> 3850`（餘 60 ≥ 55 進位）、`3000 -> 2970`（餘 30 < 55 退位）驗證最近格點。
+- 已在格點上（不變）：`6600 -> 6600`、`1100 -> 1100`、`3850 -> 3850`。
+- 進位（餘數 ≥ 55）：`3800 -> 3850`（餘 60）。
+- 退位（餘數 < 55）：`3000 -> 2970`（餘 30）。
 - 平手往上：`55 -> 110`（餘 55，進位）。
 - 非正數哨兵：`0 -> 0`、`-50 -> 0`。
 
@@ -207,7 +208,7 @@ SYSTEM_PROMPT = (
 
 `estimate_products` 整合：
 
-- 既有 type-filtered query / recency rerank / diversity / reconciliation / fetch_multiplier 等測試須維持綠燈（snap 套用後最終輸出價格皆為 ¥110 整數倍，必要時調整既有測試中對 `FakeChat` 回傳價的斷言為格點值）。
+- 既有 type-filtered query / recency rerank / diversity / reconciliation / fetch_multiplier 等測試須維持綠燈。snap 只作用於模型估價輸出（`suggested_price_jpy`、`price_range_jpy`），不影響既有測試中對 reference context metadata 的 `price_jpy` 斷言（那些是 vector store 的參考價，非估價輸出）；reconciliation 的哨兵斷言（`suggested_price_jpy == 0`）經 snap 後仍為 0。因此既有斷言預期皆不需更動，新行為由專屬的 `snap_to_tax_grid` / `_snap_estimate` 測試覆蓋。
 
 ## 文件同步（強制）
 
