@@ -44,10 +44,10 @@
 from estimator_king.bot.estimator import Estimator
 ```
 
-改為：
+改為（Task 1 只 import 本 Task 定義的 `snap_to_tax_grid`；`_snap_estimate` 留到 Task 2 才加入）：
 
 ```python
-from estimator_king.bot.estimator import Estimator, snap_to_tax_grid, _snap_estimate
+from estimator_king.bot.estimator import Estimator, snap_to_tax_grid
 ```
 
 - [ ] **Step 2: 寫失敗測試**
@@ -134,7 +134,15 @@ git commit -m "feat(estimator): add tax-grid price snapping helper"
 - Modify: `estimator_king/bot/estimator.py`（緊接 `snap_to_tax_grid` 之後新增）
 - Test: `tests/test_estimator.py`
 
-- [ ] **Step 1: 寫失敗測試**
+- [ ] **Step 1: 擴充測試檔 import**
+
+把 `tests/test_estimator.py` 第 1 行（Task 1 已改為 `from estimator_king.bot.estimator import Estimator, snap_to_tax_grid`）擴充為：
+
+```python
+from estimator_king.bot.estimator import Estimator, snap_to_tax_grid, _snap_estimate
+```
+
+- [ ] **Step 2: 寫失敗測試**
 
 在 `tests/test_estimator.py` 末尾新增：
 
@@ -188,12 +196,12 @@ def test_snap_estimate_does_not_mutate_input():
     assert est.price_range_jpy.max == 5000
 ```
 
-- [ ] **Step 2: 跑測試確認失敗**
+- [ ] **Step 3: 跑測試確認失敗**
 
 Run: `.venv/bin/python -m pytest tests/test_estimator.py -k snap_estimate -v -o addopts=""`
-Expected: FAIL（`_snap_estimate` 尚未定義）。
+Expected: FAIL（import 的 `_snap_estimate` 尚未定義，整個測試模組於 collection 階段 ImportError）。
 
-- [ ] **Step 3: 實作**
+- [ ] **Step 4: 實作**
 
 在 `estimator_king/bot/estimator.py` 的 `snap_to_tax_grid` 函式之後新增：
 
@@ -213,19 +221,19 @@ def _snap_estimate(est: ProductEstimate) -> ProductEstimate:
 
 `ProductEstimate` 與 `PriceRange` 已於 `estimator.py` 第 11 行 `from estimator_king.llm.chat import EstimateBatch, PriceRange, ProductEstimate` import，無需新增 import。
 
-- [ ] **Step 4: 跑測試確認通過**
+- [ ] **Step 5: 跑測試確認通過**
 
 Run: `.venv/bin/python -m pytest tests/test_estimator.py -k snap_estimate -v -o addopts=""`
 Expected: 4 個 `snap_estimate` 測試全 PASS。
 
-- [ ] **Step 5: Type check + Lint**
+- [ ] **Step 6: Type check + Lint**
 
 Run: `.venv/bin/basedpyright estimator_king/bot/estimator.py`
 Expected: 0 errors。
 Run: `uvx ruff check estimator_king/bot/estimator.py tests/test_estimator.py`
 Expected: 無 lint 問題。
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add estimator_king/bot/estimator.py tests/test_estimator.py
@@ -399,33 +407,47 @@ git commit -m "feat(estimator): rewrite system prompt to fix anchoring bias and 
 ## Task 5: 同步 `docs/data-pipeline.md`
 
 **Files:**
-- Modify: `docs/data-pipeline.md`（chat-estimate 與 reconcile 階段）
+- Modify: `docs/data-pipeline.md`（`## 階段 14:Chat 估價、對齊與輸出`，以及查詢端 ASCII 資料流區塊）
 
-依 CLAUDE.md，data-pipeline 流程變更必須同 PR 更新此文件。本 Task 需先讀取 `docs/data-pipeline.md`，找到「chat estimate」（system prompt / 估價）階段與「reconcile」階段，按該檔既有的每階段格式（機制 / 控制設定 key / 對應函式 `file:line` / 設計理由）整合下列內容。
+依 CLAUDE.md，data-pipeline 流程變更必須同 PR 更新此文件。chat-estimate 與 reconcile 並非兩個獨立的頂層階段，而是同一個 `## 階段 14:Chat 估價、對齊與輸出` 底下的編號子項（item 1 = 組 prompt / `SYSTEM_PROMPT`、item 3 = `_reconcile`、item 4 = `format_estimates`）。本 Task 需先讀取 `docs/data-pipeline.md` 取得實際行號，再按該檔既有格式（編號子項 + `[檔名:行號](相對路徑#L行號)` 引用 + 結尾「> **設計理由**」區塊）整合下列變更。`file:line` 引用一律用該檔慣例：短檔名標籤 + 行號 + `#L` 錨點（例如 `[estimator.py:101](../estimator_king/bot/estimator.py#L101)`），行號以實際檔案為準。
 
 - [ ] **Step 1: 讀取並定位**
 
-讀取 `docs/data-pipeline.md`，找出 chat-estimate 階段（描述 `SYSTEM_PROMPT` 與 `_chat.estimate` 的段落）與其後的 reconcile 階段（描述 `_reconcile` 的段落）。
+讀取 `docs/data-pipeline.md`，定位：(a) `## 階段 14` 的「**對應 function**」標頭；(b) item 1 描述 `SYSTEM_PROMPT` 要求的那段（「每行一筆估價、同序不漏…」）；(c) item 3 `_reconcile`、item 4 `format_estimates`；(d) 階段 14 結尾的「> **設計理由**」區塊（含「『近期價加權』是抗通膨主力」一句）；(e) 檔案開頭查詢端 ASCII 資料流區塊中 `_reconcile → format_estimates` 那段。
 
-- [ ] **Step 2: 更新 chat-estimate 階段的 prompt 行為描述**
+- [ ] **Step 2: 更新 item 1 的 prompt 行為描述**
 
-將該階段描述 `SYSTEM_PROMPT` 行為的文字更新為反映新規則（沿用該檔既有語氣與格式）：
+將 item 1 描述 `SYSTEM_PROMPT` 要求的文字（現為「每行一筆估價、同序不漏、**只能**用提供的參考、優先同 `item_type`、近期價加權、依 `item_name` 與 detail 比對 size/材質、整數 JPY、最多 3 筆 `reference_products`、無強匹配仍給 `low` 估價而非捏造。」）改寫為：
 
-> system prompt 以 XML 區塊定義估價規則。references 採嚴格優先序 **item_type > size/material > recency**（recency 僅作 tie-breaker，不得蓋過更接近的同類比對）；**禁止引用 references 以外的一般「相場」行情**；待估品項帶有 references 沒有的溢價特徵/素材（温感、もこもこ／あったか、加大、なりきり、特殊素材等）時，錨定到同類 references 的**上端**；price_range 約 **±25–30% 且偏上**；confidence `high` 需同名/同型近似 exact 且 suggested 落在同類 references 價格跨度內（非外推）。輸出格式不在 prompt 重述，由 `response_format=EstimateBatch` 強制。
->
-> **設計理由**：消除舊 prompt「item_type 優先 vs recency 較高」並列指令的矛盾（對 gpt-5.4-mini 等 GPT-5 系列特別有害，會耗 reasoning token 調和衝突）；修正系統性低估與向中央錨定的偏誤。
+> `SYSTEM_PROMPT`（[estimator.py:16](../estimator_king/bot/estimator.py#L16)）以 XML 區塊要求：每行一筆估價、同序不漏、**只能**用提供的參考（禁止引用參考以外的一般「相場」行情）、references 採嚴格優先序 **item_type > size/材質 > recency**（recency 僅作 tie-breaker、不得蓋過更接近的同類比對）、帶參考所無的溢價特徵/素材（温感、もこもこ／あったか、加大、なりきり等）時錨定同類參考**上端**、價格為含稅且必為 **¥110 整數倍**、price_range 約 **±25–30% 且偏上**、confidence `high` 需同名/同型近似 exact 且 suggested 落在同類參考價格跨度內、最多 3 筆 `reference_products`、無強匹配仍給 `low` 估價而非捏造。輸出欄位不在 prompt 重述，由 `response_format=EstimateBatch` schema 強制。
 
-- [ ] **Step 3: 在 reconcile 階段之後新增 tax-grid snap 步驟**
+- [ ] **Step 3: 更新階段 14「設計理由」中已過時的 recency 敘述**
 
-在 reconcile 階段之後，依該檔每階段格式新增一個步驟，內容：
+階段 14 結尾「> **設計理由**」區塊裡的「**prompt 與檢索設計呼應**」項現述「『近期價加權』是抗通膨主力(故 rerank recency_weight 可以很小)」，與新 prompt（recency 已降為僅 tie-breaker）矛盾。將該句改寫為：
 
-> **含稅格點正規化（snap）** — reconcile 之後，對每筆估價的 `suggested_price_jpy` 與 `price_range_jpy` 上下界各自 round 到最近的 **¥110** 倍數（`snap_to_tax_grid` / `_snap_estimate`，[estimator_king/bot/estimator.py](../estimator_king/bot/estimator.py)）。平手（餘 55）往上；非正數的「無估價」哨兵維持 `0`；snap 後強制 `min ≤ suggested ≤ max`。
->
-> **設計理由**：日本零售價皆為含稅價＝稅前(¥100 整數倍)×1.1，必為 ¥110 整數倍。觀測 12 筆實際定價 12/12 落在此格點，但模型自然只 5/12；deterministic 後處理保證輸出落點正確，與 prompt 端 `<price_format>` 形成雙保險。
+> - **prompt 與檢索設計呼應**：「優先同 `item_type`」對應 per-type `where` 檢索；**recency 在 prompt 端已降為僅 tie-breaker**——同類比對接近度優先，rerank 的 `recency_weight` 因此維持很小，只做同等可比時的微調而非主導；「依 item_name/detail 比對 size/材質」正是 `_format_reference` 要輸出 `item_name`、`item_type`、`product_title`、價格、日期、store 與 snippet 這幾個欄位的原因。
 
-（上述為內容要點；實作時請對齊 `docs/data-pipeline.md` 既有的標題層級、表格欄位與 `file:line` 引用風格。函式行號以實際檔案為準。）
+- [ ] **Step 4: 新增 snap 子項（介於 `_reconcile` 與 `format_estimates` 之間）**
 
-- [ ] **Step 4: Commit**
+snap 在 `_reconcile` 之後、`format_estimates` 之前執行。在階段 14 的 item 3（`_reconcile`）與 item 4（`format_estimates`）之間插入新子項，並將原 `format_estimates` 子項順移編號：
+
+> N. **含稅格點正規化（snap）**（[estimator.py:LINE](../estimator_king/bot/estimator.py#Lline)）：`_reconcile` 之後，對每筆估價的 `suggested_price_jpy` 與 `price_range_jpy{min,max}` 各自 round 到最近的 **¥110** 倍數（`snap_to_tax_grid` / `_snap_estimate`）；平手（餘 55）往上；非正數的「無估價」哨兵維持 `0`；snap 後強制 `min ≤ suggested ≤ max`。
+
+（`LINE`/`#Lline` 以 `_snap_estimate` 在 `estimator.py` 的實際行號填入。）
+
+同時更新階段 14 的「**對應 function**」標頭，於 `_reconcile` 之後、`format_estimates` 之前加入 `_snap_estimate`（[estimator.py:Lxxx]，行號以實際檔案為準）。
+
+- [ ] **Step 5: 在「設計理由」區塊補上 snap 的理由**
+
+於階段 14「> **設計理由**」區塊新增一項：
+
+> - **為何 snap 到 ¥110 格點**：日本零售價皆為含稅價＝稅前(¥100 整數倍)×1.1，必為 ¥110 整數倍。觀測 12 筆實際定價 12/12 落在此格點、模型自然只 5/12；deterministic 後處理保證輸出落點正確，與 prompt `<price_format>` 形成雙保險。
+
+- [ ] **Step 6: 更新查詢端 ASCII 資料流區塊**
+
+在檔案開頭查詢端 ASCII 區塊中，`_reconcile(...)` 與 `format_estimates → Discord embeds` 之間插入一行 snap，使流程為 `… → _reconcile → snap_to_tax_grid（每筆價格 round 到最近 ¥110 倍數）→ format_estimates`（沿用既有框線與縮排風格）。
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add docs/data-pipeline.md
