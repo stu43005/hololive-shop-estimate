@@ -41,6 +41,24 @@ SYSTEM_PROMPT = (
     "</stop_rules>"
 )
 
+_TAX_GRID_JPY = 110
+
+
+def snap_to_tax_grid(price: int) -> int:
+    """Round a JPY price to the nearest ¥110 tax-inclusive grid point.
+
+    Japanese retail prices are tax-included and are exact multiples of ¥110
+    (pre-tax base x 1.1). Ties (remainder exactly 55) round up, matching the
+    observed upward price drift. Non-positive input returns 0, preserving the
+    "no estimate" sentinel produced by reconciliation.
+    """
+    if price <= 0:
+        return 0
+    quotient, remainder = divmod(price, _TAX_GRID_JPY)
+    if remainder * 2 >= _TAX_GRID_JPY:
+        quotient += 1
+    return quotient * _TAX_GRID_JPY
+
 
 class _Embedder(Protocol):
     def embed_query(self, text: str) -> list[float]: ...

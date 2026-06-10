@@ -1,4 +1,4 @@
-from estimator_king.bot.estimator import Estimator
+from estimator_king.bot.estimator import Estimator, snap_to_tax_grid
 from estimator_king.llm.chat import EstimateBatch, ProductEstimate, PriceRange
 from estimator_king.vectorstore.store import QueryHit
 
@@ -235,3 +235,26 @@ def test_reference_line_omits_product_when_equal_to_item_name():
     prompt = chat.last_user_prompt
     assert "- P | ぬいぐるみ | ¥500 | ? | s" in prompt
     assert prompt.count("| P |") == 0  # product not repeated as its own column
+
+
+def test_snap_to_tax_grid_on_grid_unchanged():
+    assert snap_to_tax_grid(6600) == 6600
+    assert snap_to_tax_grid(1100) == 1100
+    assert snap_to_tax_grid(3850) == 3850
+
+
+def test_snap_to_tax_grid_rounds_up_when_remainder_at_least_55():
+    assert snap_to_tax_grid(3800) == 3850  # remainder 60
+
+
+def test_snap_to_tax_grid_rounds_down_when_remainder_below_55():
+    assert snap_to_tax_grid(3000) == 2970  # remainder 30
+
+
+def test_snap_to_tax_grid_tie_rounds_up():
+    assert snap_to_tax_grid(55) == 110  # remainder 55
+
+
+def test_snap_to_tax_grid_non_positive_returns_zero():
+    assert snap_to_tax_grid(0) == 0
+    assert snap_to_tax_grid(-50) == 0
