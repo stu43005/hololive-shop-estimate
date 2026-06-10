@@ -130,6 +130,7 @@ class Estimator:
             batch = self._estimate_chunk(chunk)
             all_estimates.extend(batch.estimates)
         reconciled = self._reconcile(product_names, all_estimates)
+        reconciled = [_snap_estimate(est) for est in reconciled]
         logger.info("estimate done for %s: %d estimates in %.1fs",
                     user_id, len(reconciled), time.monotonic() - start)
         return EstimateBatch(estimates=reconciled)

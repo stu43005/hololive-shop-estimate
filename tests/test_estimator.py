@@ -304,3 +304,18 @@ def test_snap_estimate_does_not_mutate_input():
     assert est.suggested_price_jpy == 3800
     assert est.price_range_jpy.min == 3000
     assert est.price_range_jpy.max == 5000
+
+
+def test_estimate_products_snaps_output_to_grid():
+    vs = RecordingVectorStore([_hit("a", "ぬいぐるみ", 500, 100, 0.1)])
+    chat = FakeChat([ProductEstimate(
+        product_name="もちもちぬいぐるみ", suggested_price_jpy=3800,
+        price_range_jpy=PriceRange(min=3000, max=5000), confidence="high",
+        rationale="r", reference_products=[])])
+    est = _estimator(vs, chat, typing=FakeTypingProvider("ぬいぐるみ"))
+    batch = est.estimate_products(["もちもちぬいぐるみ"], "u")
+    out = batch.estimates[0]
+    assert out.suggested_price_jpy == 3850
+    assert out.suggested_price_jpy % 110 == 0
+    assert out.price_range_jpy.min % 110 == 0
+    assert out.price_range_jpy.max % 110 == 0
