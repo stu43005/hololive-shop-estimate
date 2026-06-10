@@ -1,4 +1,4 @@
-from estimator_king.bot.estimator import Estimator, snap_to_tax_grid
+from estimator_king.bot.estimator import Estimator, snap_to_tax_grid, _snap_estimate
 from estimator_king.llm.chat import EstimateBatch, ProductEstimate, PriceRange
 from estimator_king.vectorstore.store import QueryHit
 
@@ -258,3 +258,49 @@ def test_snap_to_tax_grid_tie_rounds_up():
 def test_snap_to_tax_grid_non_positive_returns_zero():
     assert snap_to_tax_grid(0) == 0
     assert snap_to_tax_grid(-50) == 0
+
+
+def test_snap_estimate_snaps_all_three_values():
+    est = ProductEstimate(
+        product_name="x", suggested_price_jpy=3800,
+        price_range_jpy=PriceRange(min=3000, max=5000), confidence="high",
+        rationale="r", reference_products=[])
+    out = _snap_estimate(est)
+    assert out.suggested_price_jpy == 3850
+    assert out.price_range_jpy.min == 2970
+    assert out.price_range_jpy.max == 4950
+
+
+def test_snap_estimate_clamps_when_snapped_bounds_cross_suggested():
+    # suggested 3800->3850; min 3960->3960 (> suggested); max 3700->3740 (< suggested)
+    est = ProductEstimate(
+        product_name="x", suggested_price_jpy=3800,
+        price_range_jpy=PriceRange(min=3960, max=3700), confidence="medium",
+        rationale="r", reference_products=[])
+    out = _snap_estimate(est)
+    assert out.price_range_jpy.min <= out.suggested_price_jpy <= out.price_range_jpy.max
+    assert out.suggested_price_jpy == 3850
+    assert out.price_range_jpy.min == 3850
+    assert out.price_range_jpy.max == 3850
+
+
+def test_snap_estimate_sentinel_stays_zero():
+    est = ProductEstimate(
+        product_name="x", suggested_price_jpy=0,
+        price_range_jpy=PriceRange(min=0, max=0), confidence="low",
+        rationale="r", reference_products=[])
+    out = _snap_estimate(est)
+    assert out.suggested_price_jpy == 0
+    assert out.price_range_jpy.min == 0
+    assert out.price_range_jpy.max == 0
+
+
+def test_snap_estimate_does_not_mutate_input():
+    est = ProductEstimate(
+        product_name="x", suggested_price_jpy=3800,
+        price_range_jpy=PriceRange(min=3000, max=5000), confidence="high",
+        rationale="r", reference_products=[])
+    _snap_estimate(est)
+    assert est.suggested_price_jpy == 3800
+    assert est.price_range_jpy.min == 3000
+    assert est.price_range_jpy.max == 5000

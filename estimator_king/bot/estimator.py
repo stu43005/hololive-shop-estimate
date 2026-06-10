@@ -60,6 +60,19 @@ def snap_to_tax_grid(price: int) -> int:
     return quotient * _TAX_GRID_JPY
 
 
+def _snap_estimate(est: ProductEstimate) -> ProductEstimate:
+    """Snap an estimate's prices onto the ¥110 grid, keeping min <= suggested <= max."""
+    suggested = snap_to_tax_grid(est.suggested_price_jpy)
+    low = snap_to_tax_grid(est.price_range_jpy.min)
+    high = snap_to_tax_grid(est.price_range_jpy.max)
+    low = min(low, suggested)
+    high = max(high, suggested)
+    return est.model_copy(update={
+        "suggested_price_jpy": suggested,
+        "price_range_jpy": PriceRange(min=low, max=high),
+    })
+
+
 class _Embedder(Protocol):
     def embed_query(self, text: str) -> list[float]: ...
 
