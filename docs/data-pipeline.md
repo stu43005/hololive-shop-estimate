@@ -74,6 +74,8 @@ Discord modal 輸入(≤10 行) → parse_product_lines
 │  _reconcile(以 normalize_text 對齊回每一輸入行,缺漏補 low/¥0)       │
 └─────────────────────────────────────────────────────────────────────┘
         ▼
+   snap_to_tax_grid(每筆價格 round 到最近 ¥110 倍數)
+        ▼
    format_estimates → Discord embeds(超長自動分頁)
 ```
 
@@ -826,15 +828,20 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
 
 **對應 function**:`_estimate_chunk()` 末段 + `ChatProvider.estimate()`
 ([chat.py:58](../estimator_king/llm/chat.py#L58))+ `_reconcile()`
-([estimator.py:189](../estimator_king/bot/estimator.py#L189))+ `format_estimates()`
+([estimator.py:252](../estimator_king/bot/estimator.py#L252))+ `_snap_estimate()`
+([estimator.py:94](../estimator_king/bot/estimator.py#L94))+ `format_estimates()`
 ([commands.py:36](../estimator_king/bot/commands.py#L36))。
 
-1. **組 prompt**([estimator.py:125-132](../estimator_king/bot/estimator.py#L125)):每行
+1. **組 prompt**([estimator.py:171-189](../estimator_king/bot/estimator.py#L171)):每行
    參考組成 `### Query: {name}\n{refs}`(無命中則 `(no matches)`),整批拼成 user prompt;
-   `SYSTEM_PROMPT`([estimator.py:16](../estimator_king/bot/estimator.py#L16))要求:每行一筆
-   估價、同序不漏、**只能**用提供的參考、優先同 `item_type`、近期價加權、依 `item_name` 與
-   detail 比對 size/材質、整數 JPY、最多 3 筆 `reference_products`、無強匹配仍給 `low` 估價而非
-   捏造。
+   `SYSTEM_PROMPT`([estimator.py:16](../estimator_king/bot/estimator.py#L16))以 XML 區塊要求:
+   每行一筆估價、同序不漏、**只能**用提供的參考(禁止引用參考以外的一般「相場」行情)、
+   references 採嚴格優先序 **item_type > size/材質 > recency**(recency 僅作 tie-breaker、
+   不得蓋過更接近的同類比對)、帶參考所無的溢價特徵/素材(温感、もこもこ／あったか、加大、
+   なりきり等)時錨定同類參考**上端**、價格為含稅且必為 **¥110 整數倍**、price_range 約
+   **±25–30% 且偏上**、confidence `high` 需同名/同型近似 exact 且 suggested 落在同類參考
+   價格跨度內、最多 3 筆 `reference_products`、無強匹配仍給 `low` 估價而非捏造。
+   輸出欄位不在 prompt 重述,由 `response_format=EstimateBatch` schema 強制。
 2. **結構化輸出**([chat.py:58-100](../estimator_king/llm/chat.py#L58)):
    `chat_structured_output=True`(預設)→ `chat.completions.parse` 綁
    `EstimateBatch` schema;否則走 `json_object` 模式手動驗證(供無嚴格 schema 的 endpoint,
@@ -842,11 +849,15 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
    輸出型別:`EstimateBatch{ estimates: [ProductEstimate{ product_name,
    suggested_price_jpy, price_range_jpy{min,max}, confidence, rationale,
    reference_products[] }] }`([chat.py:15-37](../estimator_king/llm/chat.py#L15))。
-3. **對齊回輸入** `_reconcile()`([estimator.py:189-211](../estimator_king/bot/estimator.py#L189)):
+3. **對齊回輸入** `_reconcile()`([estimator.py:252](../estimator_king/bot/estimator.py#L252)):
    以 `normalize_text` 正規化後當鍵,把每筆估價對回原輸入行並保持原順序;**缺漏的行**補上
    `confidence="low"`、`¥0` 的佔位估價(確保輸出行數 == 輸入行數);LLM 多回的重複估價以
    `setdefault` 保留首筆、其餘丟棄並 log warning。
-4. **輸出 Discord** `format_estimates()`:每筆組成價格 / 區間 / 信心 / rationale(截斷 300 字)/
+4. **含稅格點正規化(snap)**([estimator.py:94](../estimator_king/bot/estimator.py#L94)):
+   `_reconcile` 之後,對每筆估價的 `suggested_price_jpy` 與 `price_range_jpy{min,max}`
+   各自 round 到最近的 **¥110** 倍數(`snap_to_tax_grid` / `_snap_estimate`);
+   平手(餘 55)往上;非正數的「無估價」哨兵維持 `0`;snap 後強制 `min ≤ suggested ≤ max`。
+5. **輸出 Discord** `format_estimates()`:每筆組成價格 / 區間 / 信心 / rationale(截斷 300 字)/
    參考清單;依 `max_length = 2000` 自動分頁成多個 embed(標題標 `page i/total`)。
 
 > **設計理由**
@@ -855,10 +866,12 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
 >   參考),也讓「每行一筆、同序、不漏」這條成功準則在單次呼叫內可控。
 > - **為何 reconcile 用 `normalize_text` 對齊**:LLM 回傳的 `product_name` 可能有空白/全半形/大小寫
 >   差異;兩側都正規化後才能精準對回輸入行與順序,缺漏補佔位、多餘靜默丟棄,保證輸出可預期。
-> - **prompt 與檢索設計呼應**:「優先同 `item_type`」對應 per-type `where` 檢索,「近期價加權」是
->   抗通膨主力(故 rerank recency_weight 可以很小),「依 item_name/detail 比對 size/材質」正是
->   `_format_reference` 要輸出 `item_name`、`item_type`、`product_title`、價格、日期、store 與
->   snippet 這幾個欄位的原因。
+> - **prompt 與檢索設計呼應**:「優先同 `item_type`」對應 per-type `where` 檢索;
+>   **recency 在 prompt 端已降為僅 tie-breaker**——同類比對接近度優先,rerank 的
+>   `recency_weight` 因此維持很小,只做同等可比時的微調而非主導;「依 item_name/detail
+>   比對 size/材質」正是 `_format_reference` 要輸出 `item_name`、`item_type`、
+>   `product_title`、價格、日期、store 與 snippet 這幾個欄位的原因。
+> - **為何 snap 到 ¥110 格點**:日本零售價皆為含稅價＝稅前(¥100 整數倍)×1.1,必為 ¥110 整數倍。觀測 12 筆實際定價 12/12 落在此格點、模型自然只 5/12;deterministic 後處理保證輸出落點正確,與 prompt `<price_format>` 形成雙保險。
 
 ---
 
