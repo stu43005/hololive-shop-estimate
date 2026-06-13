@@ -193,6 +193,16 @@ item_types:
   - ルームディフューザー
   - オードトワレ
   - クロス
+  - ジャージ
+  - チョーカー
+  - カードホルダー
+  - 配達鞄
+  - マルチケース
+  - マガジンラック
+  - シェイカー
+  - ティッシュカバー
+  - エプロン
+  - ストレージボックス
 # Bump when the list changes to force re-classification on the next crawl.
 item_types_version: 4
 
