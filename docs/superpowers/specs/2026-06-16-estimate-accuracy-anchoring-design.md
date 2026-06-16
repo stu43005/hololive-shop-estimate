@@ -32,11 +32,12 @@
 
 ## 設計總覽
 
-改動範圍與第一輪一致——集中在 [estimator.py](../../../estimator_king/bot/estimator.py) 的 `SYSTEM_PROMPT`，不動 retrieval、rerank、chat provider、資料結構、`snap_to_tax_grid`——外加一支 eval 腳本。採「外科式編修現有 prompt」（保留 commit `2b72223` 已驗證的 XML 分節結構，只動三處，改動可歸因），不整段重寫，不做 deterministic 錨定後處理。
+改動範圍主要集中在 [estimator.py](../../../estimator_king/bot/estimator.py) 的 `SYSTEM_PROMPT`，不動 retrieval、rerank、chat provider、資料結構、`snap_to_tax_grid` 的行為——外加一個 prompt-hash 啟動日誌欄位（見「部署與回滾」）與一支 eval 腳本。採「外科式編修現有 prompt」（保留 commit `2b72223` 已驗證的 XML 分節結構，只動三處，改動可歸因），不整段重寫，不做 deterministic 錨定後處理。
 
 1. `SYSTEM_PROMPT`：`<premium_adjustment>` 升級為 `<anchoring>`（#A）、新增 `<set_and_count>`（#B）、重新校準 `<range_and_confidence>`（#C）。
-2. 新增 `scripts/analysis/eval_estimate.py` + 內嵌 25 筆標註 fixtures，量測 MAPE／range 覆蓋率等指標。
-3. 同步 [docs/data-pipeline.md](../../../docs/data-pipeline.md)。
+2. `Estimator` 加一個 `SYSTEM_PROMPT` 短 hash 屬性並附加到既有起訖日誌（runtime 歸因，詳見「部署與回滾」）。
+3. 新增 `scripts/analysis/eval_estimate.py` + 內嵌 25 筆標註 fixtures，**重現 `_estimate_chunk` retrieval 並套用本尊排除**，量測 MAPE／range 覆蓋率等指標。
+4. 同步 [docs/data-pipeline.md](../../../docs/data-pipeline.md)。
 
 ## 部署與回滾（rollout & rollback）
 
@@ -45,7 +46,8 @@
 - **單點、git-tracked**：改動只是 `estimator.py` 內 `SYSTEM_PROMPT` 字串常數（外加 eval 腳本與文件）。回滾 = `git revert` 該 commit，無資料庫 migration、無設定變更。
 - **不需 re-index**：本輪不動 retrieval、embedding 模型、vector ID 方案、embedding document 格式或 SQLite schema，因此切換前後 chroma / SQLite **完全相容**，回滾不需 `rm -rf chroma/` 或 `--force-refetch`（對照 CLAUDE.md「Re-index on indexing-model change」僅適用於索引層改動）。
 - **生效範圍**：bot 重啟後新 prompt 立即套用到所有 `/estimate` 流量（`SYSTEM_PROMPT` 於 process 啟動時載入）；無灰度。因此**上線前必須先用 eval 腳本取得 before/after 數據並通過下述驗收準則**，數據記錄於 PR / commit 訊息；若上線後發現迴歸，以 `git revert` + 重啟即時回復。
-- **prompt 版本辨識**：commit 訊息即版本邊界（git 歷史可定位「哪次 prompt 改動」）；不另設獨立 prompt 版本號欄位。
+- **runtime 歸因（prompt hash 日誌）**：`Estimator` 初始化時計算 `SYSTEM_PROMPT` 的短 hash（`hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:8]`）存為實例屬性，並**附加**到 `estimate_products` 既有的起訖 `logger.info` 訊息尾端（`prompt=<hash>`，附加而非改寫現有文字）。如此 runtime log 可把任一批估價結果**精確繫到產生它的 prompt 文字版本**（hash 對應 git 中該版 `SYSTEM_PROMPT`），讓事後診斷「這筆爛估價是哪版 prompt 產生的」有據可查。這是本輪唯一觸及 prompt 字串以外的 production 程式碼改動，限縮為計算 hash + 一個 log 欄位、不改估價行為與既有日誌的既有子字串。
+- **明確排除（YAGNI，已記錄之設計決定）**：不引入「可在啟動時切換的多 prompt 選擇機制」或 feature-flag。單實例 bot 的回滾 = `git revert` + 重啟即足夠快且可逆；維護兩份並存 prompt 與切換設定的成本與複雜度，對單實例、無 SLA 的個人專案不成比例。commit 訊息 + 上述 hash 日誌共同構成版本邊界，不另設獨立 prompt 版本號欄位。
 
 ## 元件設計
 
@@ -123,17 +125,27 @@ A type or piece count in the name (1種, 2個セット, 全4種, etc.) is NOT a 
 **行為契約**：
 
 1. `AppConfig.from_yaml("stores_config.yaml")` → `build_providers(config, with_chat=True)` → 用與 [runner.py](../../../estimator_king/bot/runner.py) 建 `Estimator` 完全相同的參數（`item_types`、`item_types_version`、`estimator_top_k`、`estimator_recency_weight`、`estimator_diversity_weight`、`estimator_fetch_multiplier`）建立 `Estimator`。
-2. 呼叫 `estimator.estimate_products([所有 query 名], user_id="eval")`，走完整真實 pipeline（retrieval → chat → reconcile → snap）。
-3. 用 `reconcile` 後的回傳順序與輸入順序對齊（`estimate_products` 保證一對一同序），逐筆計算：絕對誤差%、帶符號誤差%、是否落在 range（`min ≤ official ≤ max`）、confidence。
-4. 彙總指標（對齊第一輪規格用語）：**MAPE、中位數絕對誤差、平均帶符號誤差、range 覆蓋率%、完全命中率（|誤差| < 5%）**，外加 **no-estimate 計數與比率**（suggested == 0 哨兵的筆數 / 總筆數）作為一級指標。no-estimate 筆數排除於 MAPE 計算外，但其計數**必須**出現在 summary block（不得只藏在逐筆表），以免「靠製造更多 no-estimate 來壓低 MAPE」的迴歸被埋沒。
-5. 輸出逐筆表（query／est／official／誤差%／in-range／confidence）+ summary block 至 stdout。summary 至少含：MAPE、中位數絕對誤差、平均帶符號誤差、range 覆蓋率%、完全命中率、**no-estimate 計數/比率**、有效樣本數、`--runs` 值。
-6. `--runs N`（預設 3）：chat 為非決定性，對每筆跑 N 次、回報指標的平均；做上線決策的對比 run 必須 `--runs >= 3`。
+2. **重現 `Estimator._estimate_chunk` 的 retrieval、但套用本尊排除**（理由見下方「本尊排除」——這是本 eval 的核心；故 **不直接呼叫 `estimate_products`**，因其 retrieval 為內部封裝、無法注入排除）。逐 query：`embed_query` → `classify_query` → N 個 type-filtered query + 1 個 plain query → 依 vector id 去重取最小 distance → **剔除本尊 hit** → `Estimator._rerank` → 取 top_k → `Estimator._format_reference` 組 context。與既有 `calibrate_*.py`「忠實重現 `_estimate_chunk` retrieval」同手法（可直接沿用其程式碼結構）。
+3. 以與 `_estimate_chunk` 相同的 chunk 格式（每 10 query 一批、相同 user_prompt 組裝）呼叫 `self._chat.estimate(SYSTEM_PROMPT, user_prompt)`，對每筆結果套用 `_snap_estimate`（自 estimator 匯入），再逐筆對齊輸入計算：絕對誤差%、帶符號誤差%、是否落在 range（`min ≤ official ≤ max`）、confidence。
+
+**本尊排除（self-exclusion，eval 有效性關鍵）**：這批 fixture 商品多已在後續 crawl 入庫，若不排除，retrieval 會把「本尊」當 sim≈1.0 的 top reference 撈回，模型照抄即近 100% 命中——量到的是「能否撈到自己」而非估價能力，違背 eval 目的（衡量「DB 無完全對應品」時的外推）。故組 context 前，對每個 query 剔除其本尊 hit：
+
+- **判準**：`price_jpy == official_jpy`（必要條件，避免誤刪泛用名的合法比價，如 query「ポーチ」下多個不同商品同名「ポーチ」但價格不同）**且**（`normalize_text(item_name) == normalize_text(query)` 或 該 hit 相似度 ≥ 0.95）作為身分確認。`normalize_text` 重用 [crawler/snapshot.py](../../../estimator_king/crawler/snapshot.py)。
+- 採 name+price 而非「同發售日+同名」：`published_at` 難對齊每筆 fixture 發售日；純同名會誤刪泛用比價。
+- **可稽核**：eval 須對每個 fixture 印出「被剔除的本尊」（item_name｜price｜sim），供操作者肉眼確認本尊確實被找到並排除（名稱 formatting 差異可能漏抓，印出來才查得到）；某 fixture 若預期有本尊卻顯示未剔除，需調整判準後重跑。
+- **已知殘差**：只排除「同名同價的本尊」，不排除「同檔期一起入庫的其他周邊（sibling）」；若同系列商品同價同名極近似亦可能被相似度條件帶到，屬保守誤刪（寧可少一筆比價、不要 self-leak），可接受。
+
+**指標與輸出**：
+
+1. 彙總指標（對齊第一輪規格用語）：**MAPE、中位數絕對誤差、平均帶符號誤差、range 覆蓋率%、完全命中率（|誤差| < 5%）**，外加 **no-estimate 計數與比率**（suggested == 0 哨兵的筆數 / 總筆數）作為一級指標。no-estimate 筆數排除於 MAPE 計算外，但其計數**必須**出現在 summary block（不得只藏在逐筆表），以免「靠製造更多 no-estimate 來壓低 MAPE」的迴歸被埋沒。
+2. 輸出逐筆表（query／est／official／誤差%／in-range／confidence）+ summary block 至 stdout。summary 至少含：MAPE、中位數絕對誤差、平均帶符號誤差、range 覆蓋率%、完全命中率、**no-estimate 計數/比率**、有效樣本數、`--runs` 值。
+3. `--runs N`（預設 3）：chat 為非決定性，對每筆跑 N 次、回報指標的平均；做上線決策的對比 run 必須 `--runs >= 3`。
 
 **邊界與失敗處理（fail-closed）**：
 
 - 某 query 在當前 DB 無 refs → 模型回 `low`／可能回 0 哨兵；eval 照常計入（顯示為大誤差或標記 no-estimate），不中斷整批。
 - official_jpy 必為正整數；suggested 為 0 哨兵時，該筆以「no estimate」標記、排除於 MAPE 計算外但計入逐筆表，並累加進 no-estimate 計數。
-- **批次完整性檢查**：`estimate_products` 回傳筆數必須等於 fixture 筆數（`estimate_products` 保證一對一同序）；若不相等，該 run 標記為 **INVALID** 並以非零 exit code 結束，不輸出可用於決策的 summary（避免拿殘缺批次當依據）。
+- **批次完整性檢查**：所有 chunk 的 chat 估價結果，經對齊輸入後，有估價結果的 fixture 筆數 + no-estimate 筆數必須等於 fixture 總筆數（每筆 query 都要有對應輸出）；若不相等（chat 漏回或無法對齊某 query），該 run 標記為 **INVALID** 並以非零 exit code 結束，不輸出可用於決策的 summary（避免拿殘缺批次當依據）。
 - **依賴降級即作廢**：任何 embedding/chat API timeout、rate-limit、或例外導致該次 run 無法取得全部估價時，run 標記 INVALID（fail-closed），不得以部分結果宣稱改善。
 - 需 live chroma + embedding/chat API key（讀 `.env`）；dev-only、不進 CI、不寫 unit test（與其他 analysis 腳本一致）。
 
@@ -141,8 +153,10 @@ A type or piece count in the name (1種, 2個セット, 全4種, etc.) is NOT a 
 
 - MAPE 不變差（≤ baseline）、
 - range 覆蓋率不變差（≥ baseline）、
-- **no-estimate 計數不增加**（≤ baseline）、
+- **no-estimate 為 per-fixture 子集**：after-run 的 no-estimate 集合（依 fixture query 識別）必須是 baseline no-estimate 集合的子集——**任何在 baseline 有實際估價、卻在 after-run 變成 ¥0 哨兵的 fixture，即判失敗**（不得以「另一筆 no-estimate 變回有估」互相抵銷；只看總計數會漏掉這種 per-class 估價流失）、
 - 兩次 run 皆為 VALID（非 INVALID）。
+
+為支援上述 per-fixture 子集判定，summary 之外，eval 須輸出每次 run 的 no-estimate fixture 清單（依 query），供 baseline 與 after-run 做集合比對。
 
 任一條不滿足即不上線（回到元件 A 收斂或放棄該規則）。決策依據與 before/after 數據記錄於 PR / commit 訊息。
 
@@ -173,6 +187,7 @@ YB-2 RAP DOGサコッシュ 的聯名本尊未入庫，同類僅有基礎款 ¥2
 
 - **既有 `tests/test_estimator.py` 維持綠燈**：snap／retrieval／rerank／reconcile／fetch_multiplier 等斷言皆不觸及 `SYSTEM_PROMPT` 文字（已查證 `tests/` 無任何斷言 `SYSTEM_PROMPT`／分節名），prompt 改動不影響既有測試。
 - **不為 prompt 新增 unit test**：prompt 變更靠 eval 腳本 + review 驗證（沿用第一輪「prompt 變更靠 review，不建 eval harness 進 CI」的決定；本輪 eval 為手動 dev 工具）。
+- **prompt hash 日誌不破壞既有 logging 測試**：`tests/test_estimator_logging.py` 以子字串（`in`）斷言 `estimate done for ...`／`N estimates`，hash 為**附加**欄位故既有斷言仍成立；可選擇性新增一條斷言 log 含 `prompt=` 前綴，但非必要。
 - **不為 eval 腳本寫 unit test**：與 `scripts/analysis/calibrate_*.py` 慣例一致。
 
 ## 文件同步（強制）
