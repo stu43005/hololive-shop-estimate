@@ -203,6 +203,8 @@ item_types:
   - ティッシュカバー
   - エプロン
   - ストレージボックス
+  - サコッシュ
+  - ショレダーバッグ
 # Bump when the list changes to force re-classification on the next crawl.
 item_types_version: 4
 
