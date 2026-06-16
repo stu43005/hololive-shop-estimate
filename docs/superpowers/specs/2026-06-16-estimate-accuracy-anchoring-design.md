@@ -130,7 +130,7 @@ A type or piece count in the name (1種, 2個セット, 全4種, etc.) is NOT a 
 
 **本尊排除（self-exclusion，eval 有效性關鍵）**：這批 fixture 商品多已在後續 crawl 入庫，若不排除，retrieval 會把「本尊」當 sim≈1.0 的 top reference 撈回，模型照抄即近 100% 命中——量到的是「能否撈到自己」而非估價能力，違背 eval 目的（衡量「DB 無完全對應品」時的外推）。故組 context 前，對每個 query 剔除其本尊 hit：
 
-- **判準**：`price_jpy == official_jpy`（必要條件，避免誤刪泛用名的合法比價，如 query「ポーチ」下多個不同商品同名「ポーチ」但價格不同）**且**（`normalize_text(item_name) == normalize_text(query)` 或 該 hit 相似度 ≥ 0.95）作為身分確認。`normalize_text` 重用 [crawler/snapshot.py](../../../estimator_king/crawler/snapshot.py)。
+- **判準**：`price_jpy == official_jpy`（必要條件，避免誤刪泛用名的合法比價，如 query「ポーチ」下多個不同商品同名「ポーチ」但價格不同）**且**（`normalize_text(item_name) == normalize_text(query)` 或 `similarity >= 0.95`）作為身分確認。**`similarity` 採與 [`Estimator._rerank`](../../../estimator_king/bot/estimator.py) 一致的定義 `similarity = 1.0 - hit.distance`**（沿用既有 vector distance 語意，不另立度量）。`normalize_text` 重用 [crawler/snapshot.py](../../../estimator_king/crawler/snapshot.py)。
 - 採 name+price 而非「同發售日+同名」：`published_at` 難對齊每筆 fixture 發售日；純同名會誤刪泛用比價。
 - **可稽核**：eval 須對每個 fixture 印出「被剔除的本尊」（item_name｜price｜sim），供操作者肉眼確認本尊確實被找到並排除（名稱 formatting 差異可能漏抓，印出來才查得到）；某 fixture 若預期有本尊卻顯示未剔除，需調整判準後重跑。
 - **已知殘差**：只排除「同名同價的本尊」，不排除「同檔期一起入庫的其他周邊（sibling）」；若同系列商品同價同名極近似亦可能被相似度條件帶到，屬保守誤刪（寧可少一筆比價、不要 self-leak），可接受。
@@ -139,7 +139,8 @@ A type or piece count in the name (1種, 2個セット, 全4種, etc.) is NOT a 
 
 1. 彙總指標（對齊第一輪規格用語）：**MAPE、中位數絕對誤差、平均帶符號誤差、range 覆蓋率%、完全命中率（|誤差| < 5%）**，外加 **no-estimate 計數與比率**（suggested == 0 哨兵的筆數 / 總筆數）作為一級指標。no-estimate 筆數排除於 MAPE 計算外，但其計數**必須**出現在 summary block（不得只藏在逐筆表），以免「靠製造更多 no-estimate 來壓低 MAPE」的迴歸被埋沒。
 2. 輸出逐筆表（query／est／official／誤差%／in-range／confidence）+ summary block 至 stdout。summary 至少含：MAPE、中位數絕對誤差、平均帶符號誤差、range 覆蓋率%、完全命中率、**no-estimate 計數/比率**、有效樣本數、`--runs` 值。
-3. `--runs N`（預設 3）：chat 為非決定性，對每筆跑 N 次、回報指標的平均；做上線決策的對比 run 必須 `--runs >= 3`。
+3. **來源溯源（provenance，防版本偏移）**：summary 須一併印出 **`SYSTEM_PROMPT` 短 hash、git commit（短）、git working tree dirty 旗標、embedding/chat model 識別字串（取自 config）、fixture 筆數**。理由：eval 會 import 當前 checked-out 的 `SYSTEM_PROMPT`，git revert 後重跑會量到「還原版」prompt；印出這些值可讓 before/after 兩份輸出彼此可辨（哪份是哪版 prompt / 哪個 commit / 是否有未提交改動），避免拿不同前提的兩份結果誤判。before/after 兩份 stdout 連同這些 provenance 一併存檔於 PR / commit 證據。
+4. `--runs N`（預設 3）：chat 為非決定性，對每筆跑 N 次；**per-fixture 先對該筆的 N 次取平均**得「每筆平均絕對誤差」，aggregate 指標（MAPE 等）再由各筆的平均彙總。做上線決策的對比 run 必須 `--runs >= 3`。
 
 **邊界與失敗處理（fail-closed）**：
 
@@ -149,14 +150,23 @@ A type or piece count in the name (1種, 2個セット, 全4種, etc.) is NOT a 
 - **依賴降級即作廢**：任何 embedding/chat API timeout、rate-limit、或例外導致該次 run 無法取得全部估價時，run 標記 INVALID（fail-closed），不得以部分結果宣稱改善。
 - 需 live chroma + embedding/chat API key（讀 `.env`）；dev-only、不進 CI、不寫 unit test（與其他 analysis 腳本一致）。
 
-**用法與驗收準則（before/after 對比，寫入 docstring）**：改 prompt 前先以 `--runs >= 3` 跑一次 baseline（記下 MAPE / range 覆蓋率 / no-estimate 計數）→ 套用元件 A → 以相同 `--runs` 再跑。採**相對驗收**（25 筆手標樣本上設絕對門檻無意義）：新 prompt 視為通過，當且僅當相對 baseline 同時滿足
+**用法（before/after 對比，寫入 docstring）**：改 prompt 前先以 `--runs N`（N≥3）在 baseline commit 上跑一次 → 套用元件 A → 在 candidate commit 上以**相同 N、相同 fixture 順序**再跑。兩份 stdout（含上述 provenance）一併存檔。
 
-- MAPE 不變差（≤ baseline）、
-- range 覆蓋率不變差（≥ baseline）、
-- **no-estimate 為 per-fixture 子集**：after-run 的 no-estimate 集合（依 fixture query 識別）必須是 baseline no-estimate 集合的子集——**任何在 baseline 有實際估價、卻在 after-run 變成 ¥0 哨兵的 fixture，即判失敗**（不得以「另一筆 no-estimate 變回有估」互相抵銷；只看總計數會漏掉這種 per-class 估價流失）、
-- 兩次 run 皆為 VALID（非 INVALID）。
+**配對評估語意（避免非決定性誤判）**：
 
-為支援上述 per-fixture 子集判定，summary 之外，eval 須輸出每次 run 的 no-estimate fixture 清單（依 query），供 baseline 與 after-run 做集合比對。
+- **配對**：baseline 與 candidate 用相同 fixture 集合與相同 `--runs N`；比較以 **per-fixture 平均**為單位（每筆先對其 N 次取平均，見「指標與輸出」第 4 點），不是拿兩邊各一次的單跑互比。
+- **no-estimate 集合定義（跨 run 聚合，採「任一 run」語意，保守）**：一筆 fixture 計入某側的 no-estimate 集合，**當且僅當該側 N 次 run 中至少一次回 ¥0 哨兵**。如此「集合」對 baseline 與 candidate 各唯一、無歧義。
+- **noise 認知**：25 筆手標 + 非決定性 chat 下，MAPE 的 ±1～2 個百分點屬抽樣雜訊；驗收除看 aggregate，亦須檢視**本輪鎖定的目標 fixture（ポーチ／ボイス1種／ピンバッジ2個セット 等先前低估筆）其 per-fixture 平均誤差是否確有下降**——aggregate 沒變差但目標筆毫無改善，視為規則無效、不上線。
+
+**相對驗收準則**（25 筆手標樣本上設絕對門檻無意義；新 prompt 通過 ⟺ 相對 baseline 同時滿足）：
+
+- per-fixture 平均彙總的 **MAPE 不變差**（≤ baseline）、
+- **range 覆蓋率不變差**（≥ baseline）、
+- **no-estimate 為 per-fixture 子集**：candidate 的 no-estimate 集合 ⊆ baseline 的 no-estimate 集合——**任何在 baseline 全 N 次都有估價、卻在 candidate 任一 run 變 ¥0 的 fixture，即判失敗**（不得以「另一筆由 no-estimate 變回有估」互相抵銷；只看總計數會漏掉這種 per-class 估價流失）、
+- 至少一筆目標 fixture 的 per-fixture 平均誤差實質下降、
+- baseline 與 candidate 兩份 run 皆為 VALID（非 INVALID）。
+
+為支援上述判定，eval 須輸出每側「no-estimate fixture 清單（依 query，跨 N 次聚合）」與「每筆 per-fixture 平均誤差」，供 baseline 與 candidate 比對。
 
 任一條不滿足即不上線（回到元件 A 收斂或放棄該規則）。決策依據與 before/after 數據記錄於 PR / commit 訊息。
 
