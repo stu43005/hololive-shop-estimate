@@ -1,0 +1,206 @@
+# 估價準確率優化（第二輪）— 錨定／計數語意／信心校準 + eval 工具
+
+日期：2026-06-16
+範圍：`/estimate` 估價結果的第二輪準確率優化，全部集中在 prompt 層（`SYSTEM_PROMPT`），外加一支可量測 net 效果的 eval 腳本。延續並修正 [2026-06-10 第一輪規格](2026-06-10-estimate-accuracy-design.md)。
+
+## 背景與證據
+
+第一輪（2026-06-10）以 `snap_to_tax_grid` 徹底解決含稅格點問題（#1），並重寫 `SYSTEM_PROMPT`（matching 優先序、禁 DB 外行情、溢價錨上端、range/confidence）。但對一批 13 筆 **改版後** 的真實 `/estimate` 輸出與正式價格做比對，發現：
+
+- MAPE ≈ 18.4%、平均帶符號誤差 ≈ −13.8% → **系統性低估未改善，甚至略增**。
+- 13 筆估價 100% 落在 ¥110 格點（#1 已解）。
+- 4/13 正式價格仍落在模型自報 range 之外，且其中 2 筆標 `high`。
+
+### Retrieval 實測（關鍵）
+
+對 4 個失誤品項用 **與 `Estimator._estimate_chunk` 完全相同的 retrieval 路徑**（embed → `classify_query` → N 個 type-filtered query + 1 個 plain query → 依 vector id 去重取最小 distance → `_rerank` → top_k）重跑，檢視 chat model 實際看到的 references：
+
+| 品項 | 估/實 | 正確比價是否已在 refs | 判定 |
+| --- | --- | --- | --- |
+| ボイス1種 | 550 / 1100 | ✅ 同時撈到多筆 ¥1,000 單支ボイス **與** ¥500「全N種」廉價包 | 推理錯：被計數語意帶偏 |
+| ポーチ | 2750 / 4400 | ✅ 連正解本尊「鷹嶺ルイ ポーチ ¥4,400」都撈到，refs 中位數 ≈¥3,400 | 錨定錯：估在自己 refs 中位數以下 |
+| YB-2 RAP DOGサコッシュ | 2970 / 4950 | ⚠️ 同名只有基礎款 ¥2,970（聯名本尊未入庫），但有 ¥4,950 包款作上端訊號 | 結構性（本尊未入庫）+ 信心過高 |
+| ピンバッジ2個セット | 1980 / 3300 | ✅ 撈到「ピンバッジ3種セット ¥3,300」（=正解價） | 推理錯：依計數內插 |
+
+**結論：4 筆失誤中 3 筆的正確/上端比價本來就在 refs 裡，屬推理／錨定問題，而非 retrieval 缺漏。** 因此本輪修正集中在 prompt 推理層，不動 retrieval / rerank。
+
+### 三個根因與對應修正
+
+- **#A 基準錨定偏低**：模型在正常情況把 suggested 估在同類 refs 中位數以下（ポーチ）。第一輪只加了「帶溢價特徵 → 錨上端」，沒處理一般情況的基準錨定。
+- **#B 計數語意誤導**：名稱中的 種／個セット 數量被當成價格乘數。ボイス1種 被「全4種¥500」帶偏（誤以為種少＝便宜），ピンバッジ2個セット 被在「單品」與「3種セット」間內插（誤以為 2 < 3 ＝較便宜）。
+- **#C 信心／區間樂觀**：同名但帶額外修飾詞（聯名／尺寸）或泛用單字名（refs 價差大）時仍標 `high`，且區間包不住實際值。
+
+## 設計總覽
+
+改動範圍與第一輪一致——集中在 [estimator.py](../../../estimator_king/bot/estimator.py) 的 `SYSTEM_PROMPT`，不動 retrieval、rerank、chat provider、資料結構、`snap_to_tax_grid`——外加一支 eval 腳本。採「外科式編修現有 prompt」（保留 commit `2b72223` 已驗證的 XML 分節結構，只動三處，改動可歸因），不整段重寫，不做 deterministic 錨定後處理。
+
+1. `SYSTEM_PROMPT`：`<premium_adjustment>` 升級為 `<anchoring>`（#A）、新增 `<set_and_count>`（#B）、重新校準 `<range_and_confidence>`（#C）。
+2. 新增 `scripts/analysis/eval_estimate.py` + 內嵌 25 筆標註 fixtures，量測 MAPE／range 覆蓋率等指標。
+3. 同步 [docs/data-pipeline.md](../../../docs/data-pipeline.md)。
+
+## 元件設計
+
+### 元件 A：`SYSTEM_PROMPT` 三處改動（#A/#B/#C）
+
+全部在 [estimator.py](../../../estimator_king/bot/estimator.py) 的 `SYSTEM_PROMPT` 字串常數內，保留現有以 XML tag 分節的結構與其他既有分節（`<role>`／`<goal>`／`<grounding_rules>`／`<matching_priority>`／`<price_format>`／`<output_rules>`）不變。
+
+**(a) `<premium_adjustment>` → 升級為 `<anchoring>`（#A）**
+
+移除原 `<premium_adjustment>` 區塊，於同位置（`<matching_priority>` 之後）改為 `<anchoring>`，把基準錨定列為第一條、原溢價規則保留為第二條：
+
+```
+<anchoring>
+Among the comparable same-type references, decide where to anchor the suggested price:
+- Default: anchor at the MEDIAN-to-UPPER of the comparable references — do NOT anchor below their median unless the queried line names a clearly simpler or cheaper variant (smaller size, plain/no special material, fewer components). Real prices tend to exceed conservative midpoints, so a below-median guess is rarely correct.
+- Premium signal: if the queried line names a premium feature or material the references lack (heated/温感, fluffy/もこもこ・あったか, oversized, character cosplay/なりきり, special material), anchor at the UPPER end instead of the median.
+</anchoring>
+```
+
+設計理由：直接修 ポーチ 類「估在自己 refs 中位數以下」。維持「median-to-upper」的**溫和**上偏（非「一律 upper」），因為低估佔多數（baseline 8/12、本輪 6/13 偏低），但溫和錨定不會把多數本就準的品項推過頭。
+
+**(b) 新增 `<set_and_count>`（#B）**
+
+緊接在 `<anchoring>` 之後新增：
+
+```
+<set_and_count>
+A type or piece count in the name (1種, 2個セット, 全4種, etc.) is NOT a reliable price multiplier:
+- Do NOT interpolate price by count — a 2-piece set is not necessarily cheaper than a 3-piece set; price on the same-type set references at the same single-vs-set tier, not on the exact number.
+- A standalone single item (e.g. 1種) can cost as much as or MORE than a bundled multi-type set, because multi-type bundles are often discounted per unit. Do not assume "fewer types = cheaper".
+- Treat the single-vs-set distinction and item_type as the signal; treat the specific count as a weak detail, not a price driver.
+</set_and_count>
+```
+
+設計理由：修 ボイス1種（不再假設種少＝便宜，錨在 ¥1,000 單支帶）與 ピンバッジ2個セット（不依計數內插，錨在 set refs ¥2,500/¥3,300）。措辭刻意保持**中立**（「不是可靠乘數」「不要內插」），而非斷言某個方向，以免在僅兩筆樣本上過擬合。
+
+**(c) 重新校準 `<range_and_confidence>`（#C）**
+
+整段替換為：
+
+```
+<range_and_confidence>
+- price_range must bracket realistic outcomes with an upward skew (more headroom above than below), because real prices tend to exceed conservative estimates:
+  - high confidence: span roughly −20% to +30% around the suggested price.
+  - medium confidence: span roughly −25% to +45%.
+  - low confidence: span roughly −30% to +60%.
+  Keep min ≤ suggested ≤ max.
+- confidence:
+  - high = a near-exact same-NAME, same-type reference exists AND the queried line carries no extra qualifier (collaboration/brand/series name, size, material, set count) the reference lacks AND the suggested price sits within the price span of same-type references (not extrapolated).
+  - medium = same-type references exist but size/variant/feature/set-count differs, OR the name is a generic single word whose same-type references span a wide price range.
+  - low = only cross-type or weak matches.
+</range_and_confidence>
+```
+
+設計理由：(1) 區間依信心分級放寬，medium/low 上緣放更寬，覆蓋持續低估造成的 range miss；(2) 收緊 `high`——同名但查詢帶額外修飾詞（聯名／尺寸／set count）或泛用單字名 refs 價差大時降為 medium，直接修 サコッシュ／ポーチ 誤標 high。
+
+`snap_to_tax_grid` / `_snap_estimate` 仍在 `estimate_products` 末端套用，與本輪改動正交，不需更動。
+
+#### 新舊 prompt 行為對照
+
+| 主題 | 第一輪（現行） | 本輪 |
+| --- | --- | --- |
+| 基準錨定 | 無（只有溢價特徵→上端） | median-to-upper 預設，不得低於中位（#A） |
+| 計數語意 | 無 | 種／個セット 非價格乘數、不內插（#B） |
+| 溢價特徵 | `<premium_adjustment>` 獨立區塊 | 併入 `<anchoring>` 第二條，行為不變 |
+| range 寬度 | 固定 ±25–30% 偏上 | 依信心分級（high −20/+30、medium −25/+45、low −30/+60）（#C） |
+| confidence high | 近似同名同類 + 落在同類跨度內 | 再加「無額外修飾詞」「泛用單字名價差大→降 medium」（#C） |
+
+### 元件 B：`scripts/analysis/eval_estimate.py`（量測工具）
+
+落點 `scripts/analysis/`，與既有 `calibrate_*.py`／`experiment_*.py` 同目錄、同風格、同跑法（皆「忠實重現 `Estimator._estimate_chunk`」、以 `set -a; source .env; set +a; PYTHONPATH=. .venv/bin/python ...` 執行）。
+
+**標註資料**：module 層級 list 內嵌於腳本頂部（自足、零相依、易追加），seed 本規格附錄的 25 筆 `(query, official_jpy)`。
+
+**行為契約**：
+
+1. `AppConfig.from_yaml("stores_config.yaml")` → `build_providers(config, with_chat=True)` → 用與 [runner.py](../../../estimator_king/bot/runner.py) 建 `Estimator` 完全相同的參數（`item_types`、`item_types_version`、`estimator_top_k`、`estimator_recency_weight`、`estimator_diversity_weight`、`estimator_fetch_multiplier`）建立 `Estimator`。
+2. 呼叫 `estimator.estimate_products([所有 query 名], user_id="eval")`，走完整真實 pipeline（retrieval → chat → reconcile → snap）。
+3. 用 `reconcile` 後的回傳順序與輸入順序對齊（`estimate_products` 保證一對一同序），逐筆計算：絕對誤差%、帶符號誤差%、是否落在 range（`min ≤ official ≤ max`）、confidence。
+4. 彙總指標（對齊第一輪規格用語）：**MAPE、中位數絕對誤差、平均帶符號誤差、range 覆蓋率%、完全命中率（|誤差| < 5%）**。
+5. 輸出逐筆表（query／est／official／誤差%／in-range／confidence）+ summary block 至 stdout。
+6. `--runs N`（預設 1）：chat 為非決定性，N>1 時對每筆跑 N 次、回報指標的平均，用以觀察穩定度。
+
+**邊界與失敗處理**：
+
+- 某 query 在當前 DB 無 refs → 模型回 `low`／可能回 0 哨兵；eval 照常計入（顯示為大誤差或標記 no-estimate），不中斷整批。
+- official_jpy 必為正整數；suggested 為 0 哨兵時，該筆的誤差以「no estimate」標記、排除於 MAPE 計算外但計入逐筆表。
+- 需 live chroma + embedding/chat API key（讀 `.env`）；dev-only、不進 CI、不寫 unit test（與其他 analysis 腳本一致）。
+
+**用法（before/after 對比流程，寫入 docstring）**：改 prompt 前先跑一次記下基準 MAPE／覆蓋率 → 套用元件 A → 再跑 → 對比。
+
+### 已知殘差（接受、由 eval 量化，不追求消除）
+
+baseline 12 筆中有 3 筆為「過估」反例，上偏錨定／溢價規則會使其略增誤差：
+
+- わためなりきりアイマスク：est 2400 / 實 2200（"なりきり" 溢價關鍵字，實際卻在地板價）。
+- BANCHOジャージ：est 12100 / 實 9350（錨在同名最高 ref）。
+- 王国アクリルジオラマスタンド：est 3800 / 實 3300。
+
+設計取捨：對抗「系統性低估（多數）」必然以少數「本就在中位或偏低」品項的過度修正為代價。net 效果（MAPE／帶符號誤差是否下降）**以 eval 腳本量測判定，不以個案眼測**。若 eval 顯示 premium 規則拖累 net，於後續迭代再收斂——本輪不預先處理。
+
+### サコッシュ 結構性限制（接受）
+
+YB-2 RAP DOGサコッシュ 的聯名本尊未入庫，同類僅有基礎款 ¥2,970，本輪修正可讓它**不再誤標 high**（改為 medium、區間放寬），但 suggested 仍會偏低。徹底修正需「聯名小物上偏」關鍵字規則，已於 brainstorming 明確排除，故列為已知限制。
+
+## 非目標（明確排除，避免 scope creep）
+
+- 不動 retrieval / rerank（實測證明正確比價已在 refs，問題在推理層）。
+- 不做聯名／限定關鍵字上偏規則。
+- 不做 deterministic 錨定後處理（不改 `_estimate_chunk → _reconcile` 的資料流）。
+- 不整段重寫 `SYSTEM_PROMPT`。
+- eval 不進 CI、不改 chat 溫度／模型參數、不為 eval 腳本寫 unit test。
+- 不追求消除上述已知殘差／結構性限制。
+
+## 測試
+
+- **既有 `tests/test_estimator.py` 維持綠燈**：snap／retrieval／rerank／reconcile／fetch_multiplier 等斷言皆不觸及 `SYSTEM_PROMPT` 文字（已查證 `tests/` 無任何斷言 `SYSTEM_PROMPT`／分節名），prompt 改動不影響既有測試。
+- **不為 prompt 新增 unit test**：prompt 變更靠 eval 腳本 + review 驗證（沿用第一輪「prompt 變更靠 review，不建 eval harness 進 CI」的決定；本輪 eval 為手動 dev 工具）。
+- **不為 eval 腳本寫 unit test**：與 `scripts/analysis/calibrate_*.py` 慣例一致。
+
+## 文件同步（強制）
+
+更新 [docs/data-pipeline.md](../../../docs/data-pipeline.md) 的 chat-estimate 階段：補上 system prompt 新行為——`<anchoring>`（median-to-upper 基準錨定、溢價併入）、`<set_and_count>`（計數中立、不內插）、`<range_and_confidence>`（信心分級區間 + 收緊 high 判準），並更新對應「設計理由」。eval 腳本以自身 docstring 說明用法，不另動 runbook（與其他 analysis 腳本一致）。
+
+## 驗證指令
+
+- Type check：`.venv/bin/basedpyright estimator_king/bot/estimator.py scripts/analysis/eval_estimate.py`
+- Lint：`uvx ruff check estimator_king/bot/estimator.py scripts/analysis/eval_estimate.py`
+- 測試：`.venv/bin/python -m pytest tests/test_estimator.py -v -o addopts=""`
+- 效果驗證：`set -a; source .env; set +a; PYTHONPATH=. .venv/bin/python scripts/analysis/eval_estimate.py`
+
+## 附錄：eval fixtures（25 筆 query → 正式價格）
+
+本輪 13 筆（改版後實測）：
+
+| query | official_jpy |
+| --- | --- |
+| オーロラアクリルパネル | 3520 |
+| ハート型缶バッジ | 660 |
+| れきお〜推し活ショレダーバッグ | 5500 |
+| おくるみすうぬいぐるみ | 4400 |
+| ボイス1種 | 1100 |
+| YB-2 RAP DOGパーカー | 11000 |
+| YB-2 RAP DOGサコッシュ | 4950 |
+| YB-2 RAP DOGキャップ | 3850 |
+| これはYB-2しゃない　ころねのランダムラバーストラップ | 1100 |
+| アクリルジオラマスタンド | 3850 |
+| ピンバッジ2個セット | 3300 |
+| ポーチ | 4400 |
+| ぬいぐるみ　ダークローズ衣装ver. (H 250mm x W 180mm x D 120mm) | 5500 |
+
+2026-06-10 baseline 12 筆：
+
+| query | official_jpy |
+| --- | --- |
+| わためのあったかブランケット | 6600 |
+| わため＆わためいと温感マグカップ | 3850 |
+| わためいとクッション | 4950 |
+| わためなりきりアイマスク | 2200 |
+| ぶんぶんばんちょーアクリルスタンド | 1760 |
+| BANCHOジャージ | 9350 |
+| はじめとおそろいチョーカー | 4400 |
+| ぬいぐるみキーホルダー　ブラックオーロラ衣装ver. | 3850 |
+| 王国アクリルジオラマスタンド | 3300 |
+| ランダムフブちゃんずラバーキーホルダー (H89xW63cm) | 1100 |
+| もこもこフブちゃんカードホルダー (全4種) | 3520 |
+| SKNB FACTORY配達鞄 | 6600 |
