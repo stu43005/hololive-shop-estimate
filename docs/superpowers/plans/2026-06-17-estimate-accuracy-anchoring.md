@@ -277,9 +277,11 @@ def run_once(est: Estimator) -> dict[str, tuple[int, bool, str, bool]]:
     checked BEFORE snapping, so a malformed ¥1-¥54 counts as a large error, not
     a hidden no-estimate.
 
-    Raises InvalidRun on ANY failure during embedding/classification/retrieval
-    or the chat call, on a dropped line, or when the aligned result count does
-    not equal the fixture count (fail-closed)."""
+    Raises InvalidRun on any embedding, vector-retrieval, or chat failure, on a
+    dropped line, or when the aligned result count does not equal the fixture
+    count (fail-closed). classify_query never raises -- it degrades to the
+    'その他' bucket exactly as production does -- so a classification API hiccup
+    does not invalidate a run."""
     out: dict[str, tuple[int, bool, str, bool]] = {}
     try:
         for start in range(0, len(FIXTURES), est.CHUNK_SIZE):
@@ -314,7 +316,7 @@ def run_once(est: Estimator) -> dict[str, tuple[int, bool, str, bool]]:
             raise InvalidRun(f"aligned {len(out)} of {len(FIXTURES)} fixtures")
     except InvalidRun:
         raise
-    except Exception as exc:  # fail-closed: embedding/vector/classify/chat failure
+    except Exception as exc:  # fail-closed: embedding/vector/chat failure
         raise InvalidRun(f"run failed: {exc}") from exc
     return out
 
@@ -324,6 +326,8 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=3,
                         help="runs per fixture (>=3 for ship decisions)")
     args = parser.parse_args()
+    if args.runs < 1:
+        parser.error("--runs must be >= 1")
 
     config = load_config()
     providers = build_providers(config, with_chat=True)
@@ -559,7 +563,15 @@ Expected: PASS（snap/retrieval/rerank/reconcile/logging 斷言不觸及 prompt 
 
 ```bash
 git add estimator_king/bot/estimator.py
-git commit -m "feat(estimator): anchor median-to-upper, add set/count rule, tier ranges"
+git commit -F - <<'EOF'
+feat(estimator): anchor median-to-upper, add set/count rule, tier ranges
+
+Rollback: this is a single SYSTEM_PROMPT constant change; revert with
+git revert <hash> + bot restart. No re-index needed -- retrieval, embedding
+model, vector-id scheme and SQLite schema are unchanged, so chroma/SQLite stay
+compatible. No feature flag; the commit hash plus the prompt-hash startup log
+are the version boundary.
+EOF
 ```
 
 ---
@@ -590,7 +602,7 @@ Expected: 完整輸出；`prompt_hash` 應與 baseline 不同（確認量到新 
 在 [data-pipeline.md:837-844](../../../docs/data-pipeline.md#L837) 找到自「`SYSTEM_PROMPT`...以 XML 區塊要求」起至「無強匹配仍給 `low` 估價而非捏造。」與其後「輸出欄位不在 prompt 重述...schema 強制。」的整段，替換為：
 
 ```markdown
-   `SYSTEM_PROMPT`([estimator.py:16](../estimator_king/bot/estimator.py#L16))以 XML 區塊要求:
+   `SYSTEM_PROMPT`([estimator.py:17](../estimator_king/bot/estimator.py#L17))以 XML 區塊要求:
    每行一筆估價、同序不漏、**只能**用提供的參考(禁止引用參考以外的一般「相場」行情)、
    references 採嚴格優先序 **item_type > size/材質 > recency**(recency 僅作 tie-breaker)、
    **錨定 `<anchoring>`:預設錨在同類參考的「中位至上端」、不得低於中位數,除非查詢明確帶更
