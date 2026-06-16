@@ -38,6 +38,15 @@
 2. 新增 `scripts/analysis/eval_estimate.py` + 內嵌 25 筆標註 fixtures，量測 MAPE／range 覆蓋率等指標。
 3. 同步 [docs/data-pipeline.md](../../../docs/data-pipeline.md)。
 
+## 部署與回滾（rollout & rollback）
+
+本專案為單實例 Discord bot，無多租戶 / canary / feature-flag 基建，亦不為單一 prompt 改動引入此類基建（YAGNI、且超出「prompt 層」範圍）。改動的安全性與可逆性由以下事實保證，需在 spec 與 commit 訊息明確記錄：
+
+- **單點、git-tracked**：改動只是 `estimator.py` 內 `SYSTEM_PROMPT` 字串常數（外加 eval 腳本與文件）。回滾 = `git revert` 該 commit，無資料庫 migration、無設定變更。
+- **不需 re-index**：本輪不動 retrieval、embedding 模型、vector ID 方案、embedding document 格式或 SQLite schema，因此切換前後 chroma / SQLite **完全相容**，回滾不需 `rm -rf chroma/` 或 `--force-refetch`（對照 CLAUDE.md「Re-index on indexing-model change」僅適用於索引層改動）。
+- **生效範圍**：bot 重啟後新 prompt 立即套用到所有 `/estimate` 流量（`SYSTEM_PROMPT` 於 process 啟動時載入）；無灰度。因此**上線前必須先用 eval 腳本取得 before/after 數據並通過下述驗收準則**，數據記錄於 PR / commit 訊息；若上線後發現迴歸，以 `git revert` + 重啟即時回復。
+- **prompt 版本辨識**：commit 訊息即版本邊界（git 歷史可定位「哪次 prompt 改動」）；不另設獨立 prompt 版本號欄位。
+
 ## 元件設計
 
 ### 元件 A：`SYSTEM_PROMPT` 三處改動（#A/#B/#C）
@@ -116,17 +125,26 @@ A type or piece count in the name (1種, 2個セット, 全4種, etc.) is NOT a 
 1. `AppConfig.from_yaml("stores_config.yaml")` → `build_providers(config, with_chat=True)` → 用與 [runner.py](../../../estimator_king/bot/runner.py) 建 `Estimator` 完全相同的參數（`item_types`、`item_types_version`、`estimator_top_k`、`estimator_recency_weight`、`estimator_diversity_weight`、`estimator_fetch_multiplier`）建立 `Estimator`。
 2. 呼叫 `estimator.estimate_products([所有 query 名], user_id="eval")`，走完整真實 pipeline（retrieval → chat → reconcile → snap）。
 3. 用 `reconcile` 後的回傳順序與輸入順序對齊（`estimate_products` 保證一對一同序），逐筆計算：絕對誤差%、帶符號誤差%、是否落在 range（`min ≤ official ≤ max`）、confidence。
-4. 彙總指標（對齊第一輪規格用語）：**MAPE、中位數絕對誤差、平均帶符號誤差、range 覆蓋率%、完全命中率（|誤差| < 5%）**。
-5. 輸出逐筆表（query／est／official／誤差%／in-range／confidence）+ summary block 至 stdout。
-6. `--runs N`（預設 1）：chat 為非決定性，N>1 時對每筆跑 N 次、回報指標的平均，用以觀察穩定度。
+4. 彙總指標（對齊第一輪規格用語）：**MAPE、中位數絕對誤差、平均帶符號誤差、range 覆蓋率%、完全命中率（|誤差| < 5%）**，外加 **no-estimate 計數與比率**（suggested == 0 哨兵的筆數 / 總筆數）作為一級指標。no-estimate 筆數排除於 MAPE 計算外，但其計數**必須**出現在 summary block（不得只藏在逐筆表），以免「靠製造更多 no-estimate 來壓低 MAPE」的迴歸被埋沒。
+5. 輸出逐筆表（query／est／official／誤差%／in-range／confidence）+ summary block 至 stdout。summary 至少含：MAPE、中位數絕對誤差、平均帶符號誤差、range 覆蓋率%、完全命中率、**no-estimate 計數/比率**、有效樣本數、`--runs` 值。
+6. `--runs N`（預設 3）：chat 為非決定性，對每筆跑 N 次、回報指標的平均；做上線決策的對比 run 必須 `--runs >= 3`。
 
-**邊界與失敗處理**：
+**邊界與失敗處理（fail-closed）**：
 
 - 某 query 在當前 DB 無 refs → 模型回 `low`／可能回 0 哨兵；eval 照常計入（顯示為大誤差或標記 no-estimate），不中斷整批。
-- official_jpy 必為正整數；suggested 為 0 哨兵時，該筆的誤差以「no estimate」標記、排除於 MAPE 計算外但計入逐筆表。
+- official_jpy 必為正整數；suggested 為 0 哨兵時，該筆以「no estimate」標記、排除於 MAPE 計算外但計入逐筆表，並累加進 no-estimate 計數。
+- **批次完整性檢查**：`estimate_products` 回傳筆數必須等於 fixture 筆數（`estimate_products` 保證一對一同序）；若不相等，該 run 標記為 **INVALID** 並以非零 exit code 結束，不輸出可用於決策的 summary（避免拿殘缺批次當依據）。
+- **依賴降級即作廢**：任何 embedding/chat API timeout、rate-limit、或例外導致該次 run 無法取得全部估價時，run 標記 INVALID（fail-closed），不得以部分結果宣稱改善。
 - 需 live chroma + embedding/chat API key（讀 `.env`）；dev-only、不進 CI、不寫 unit test（與其他 analysis 腳本一致）。
 
-**用法（before/after 對比流程，寫入 docstring）**：改 prompt 前先跑一次記下基準 MAPE／覆蓋率 → 套用元件 A → 再跑 → 對比。
+**用法與驗收準則（before/after 對比，寫入 docstring）**：改 prompt 前先以 `--runs >= 3` 跑一次 baseline（記下 MAPE / range 覆蓋率 / no-estimate 計數）→ 套用元件 A → 以相同 `--runs` 再跑。採**相對驗收**（25 筆手標樣本上設絕對門檻無意義）：新 prompt 視為通過，當且僅當相對 baseline 同時滿足
+
+- MAPE 不變差（≤ baseline）、
+- range 覆蓋率不變差（≥ baseline）、
+- **no-estimate 計數不增加**（≤ baseline）、
+- 兩次 run 皆為 VALID（非 INVALID）。
+
+任一條不滿足即不上線（回到元件 A 收斂或放棄該規則）。決策依據與 before/after 數據記錄於 PR / commit 訊息。
 
 ### 已知殘差（接受、由 eval 量化，不追求消除）
 
