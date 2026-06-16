@@ -271,45 +271,51 @@ def build_context(est: Estimator, query: str, official: int) -> tuple[str, list[
     return f"### Query: {query}\n{refs or '(no matches)'}", selves
 
 
-def run_once(est: Estimator) -> dict[str, tuple[int, bool, str]]:
-    """One full pass over FIXTURES. Returns {query: (suggested_jpy, in_range,
-    confidence)}; suggested 0 means the model itself returned no estimate.
+def run_once(est: Estimator) -> dict[str, tuple[int, bool, str, bool]]:
+    """One full pass over FIXTURES. Returns {query: (snapped_jpy, in_range,
+    confidence, no_estimate)}; no_estimate is the model's RAW suggested == 0
+    checked BEFORE snapping, so a malformed ¥1-¥54 counts as a large error, not
+    a hidden no-estimate.
 
-    Raises InvalidRun if the chat call fails, drops a line, or the aligned
-    result count does not equal the fixture count (fail-closed)."""
-    out: dict[str, tuple[int, bool, str]] = {}
-    for start in range(0, len(FIXTURES), est.CHUNK_SIZE):
-        chunk = FIXTURES[start:start + est.CHUNK_SIZE]
-        blocks: list[str] = []
-        for query, official in chunk:
-            block, selves = build_context(est, query, official)
-            blocks.append(block)
-            tag = ", ".join(selves) if selves else "(none found)"
-            print(f"  self-excluded [{query}]: {tag}")
-        user_prompt = (
-            "Products to estimate (one per line):\n"
-            + "\n".join(q for q, _ in chunk)
-            + "\n\nReference context:\n"
-            + "\n\n".join(blocks)
-        )
-        try:
+    Raises InvalidRun on ANY failure during embedding/classification/retrieval
+    or the chat call, on a dropped line, or when the aligned result count does
+    not equal the fixture count (fail-closed)."""
+    out: dict[str, tuple[int, bool, str, bool]] = {}
+    try:
+        for start in range(0, len(FIXTURES), est.CHUNK_SIZE):
+            chunk = FIXTURES[start:start + est.CHUNK_SIZE]
+            blocks: list[str] = []
+            for query, official in chunk:
+                block, selves = build_context(est, query, official)
+                blocks.append(block)
+                tag = ", ".join(selves) if selves else "(none found)"
+                print(f"  self-excluded [{query}]: {tag}")
+            user_prompt = (
+                "Products to estimate (one per line):\n"
+                + "\n".join(q for q, _ in chunk)
+                + "\n\nReference context:\n"
+                + "\n\n".join(blocks)
+            )
             batch = est._chat.estimate(SYSTEM_PROMPT, user_prompt)
-        except Exception as exc:  # fail-closed: any chat/transport failure
-            raise InvalidRun(f"chat call failed: {exc}") from exc
-        by_name: dict[str, Any] = {}
-        for e in batch.estimates:
-            by_name.setdefault(normalize_text(e.product_name), e)
-        for query, official in chunk:
-            est_obj = by_name.get(normalize_text(query))
-            if est_obj is None:
-                raise InvalidRun(f"chat returned no estimate for {query!r}")
-            snapped = _snap_estimate(est_obj)
-            price = snapped.suggested_price_jpy
-            in_range = (snapped.price_range_jpy.min <= official
-                        <= snapped.price_range_jpy.max)
-            out[query] = (price, in_range, est_obj.confidence)
-    if len(out) != len(FIXTURES):
-        raise InvalidRun(f"aligned {len(out)} results for {len(FIXTURES)} fixtures")
+            by_name: dict[str, Any] = {}
+            for e in batch.estimates:
+                by_name.setdefault(normalize_text(e.product_name), e)
+            for query, official in chunk:
+                est_obj = by_name.get(normalize_text(query))
+                if est_obj is None:
+                    raise InvalidRun(f"chat returned no estimate for {query!r}")
+                no_est = est_obj.suggested_price_jpy == 0
+                snapped = _snap_estimate(est_obj)
+                in_range = (snapped.price_range_jpy.min <= official
+                            <= snapped.price_range_jpy.max)
+                out[query] = (snapped.suggested_price_jpy, in_range,
+                              est_obj.confidence, no_est)
+        if len(out) != len(FIXTURES):
+            raise InvalidRun(f"aligned {len(out)} of {len(FIXTURES)} fixtures")
+    except InvalidRun:
+        raise
+    except Exception as exc:  # fail-closed: embedding/vector/classify/chat failure
+        raise InvalidRun(f"run failed: {exc}") from exc
     return out
 
 
@@ -333,7 +339,7 @@ def main() -> None:
         fetch_multiplier=config.estimator_fetch_multiplier,
     )
 
-    per_fixture: dict[str, list[tuple[int, bool, str]]] = {q: [] for q, _ in FIXTURES}
+    per_fixture: dict[str, list[tuple[int, bool, str, bool]]] = {q: [] for q, _ in FIXTURES}
     try:
         for r in range(args.runs):
             print(f"\n===== run {r + 1}/{args.runs} =====")
@@ -344,8 +350,8 @@ def main() -> None:
         print(f"\nINVALID run: {exc}; not reporting summary.", file=sys.stderr)
         sys.exit(2)
 
-    # no-estimate set: a fixture the model returned ¥0 for in ANY run (conservative).
-    no_estimate = {q for q, vals in per_fixture.items() if any(v[0] == 0 for v in vals)}
+    # no-estimate set: a fixture whose RAW suggested was ¥0 in ANY run (conservative).
+    no_estimate = {q for q, vals in per_fixture.items() if any(v[3] for v in vals)}
     majority = args.runs // 2 + 1
 
     per_fixture_err: dict[str, float] = {}
@@ -610,8 +616,8 @@ Expected: 完整輸出；`prompt_hash` 應與 baseline 不同（確認量到新 
 
 - [ ] **Step 3：人工確認 Markdown 結構與一致性**
 
-Run: `grep -n "anchoring\|set_and_count\|品牌/系列名、尺寸、材質\|eval_estimate.py" docs/data-pipeline.md`
-Expected: 階段 14 step 1 與設計理由各出現新關鍵字，且 confidence-high 清單含「聯名/品牌/系列名、尺寸、材質、set count」，與 estimator.py 的 `SYSTEM_PROMPT` 一致。
+Run: `grep -nE "anchoring|set_and_count|聯名/品牌/系列名|尺寸、材質、set count|eval_estimate.py" docs/data-pipeline.md`
+Expected: 各片段都有命中——`anchoring`/`set_and_count` 出現在階段 14 step 1；`聯名/品牌/系列名` 與 `尺寸、材質、set count` 兩段（confidence-high 清單跨兩行）皆命中，與 estimator.py 的 `SYSTEM_PROMPT` 修飾詞一致；`eval_estimate.py` 出現在設計理由。
 
 - [ ] **Step 4：Commit**
 
