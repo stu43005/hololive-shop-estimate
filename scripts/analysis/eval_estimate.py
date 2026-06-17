@@ -81,40 +81,44 @@ def _git(args: list[str]) -> str:
 
 
 def build_context(est: Estimator, query: str, official: int) -> tuple[str, list[str]]:
-    """Reproduce _estimate_chunk retrieval for one query, drop the self hits,
-    return (context_block, excluded_self_descriptions)."""
+    """Reproduce _estimate_chunk retrieval for one query with the query's own
+    product absent from the index. Production fetches the closest fetch_n hits
+    per where-query; to faithfully simulate the self item not being indexed we
+    over-fetch, drop the self hits, then keep the closest fetch_n NON-self hits
+    per path -- so the candidate that self would otherwise push past the fetch_n
+    boundary is still seen. Returns (context_block, excluded_self_descriptions)."""
     embedding = est._embedder.embed_query(query)
     types = classify_query(
         query, item_types=est._item_types,
         item_types_version=est._item_types_version,
         typing_provider=est._typing_provider, repository=None,
     )
-    merged: dict[str, Any] = {}
     queries: list[dict[str, Any] | None] = [{"item_type": t} for t in types]
     queries.append(None)
+    nq = normalize_text(query)
     fetch_n = est._top_k * est._fetch_multiplier
+    overfetch = fetch_n + est._top_k  # headroom for self hits removed pre-truncation
+    merged: dict[str, Any] = {}
+    selves: dict[str, str] = {}
     for where in queries:
-        for hit in est._vector_store.query(embedding, fetch_n, where=where):
+        non_self: list[Any] = []
+        for hit in est._vector_store.query(embedding, overfetch, where=where):
+            price = int(hit.metadata.get("price_jpy", 0) or 0)
+            name = str(hit.metadata.get("item_name") or "")
+            sim = 1.0 - hit.distance
+            is_self = price == official and (normalize_text(name) == nq or sim >= SELF_SIM_THRESHOLD)
+            if is_self:
+                selves[hit.id] = f"{name}|¥{price}|sim={sim:.3f}"
+            else:
+                non_self.append(hit)
+        non_self.sort(key=lambda h: h.distance)
+        for hit in non_self[:fetch_n]:
             prev = merged.get(hit.id)
             if prev is None or hit.distance < prev.distance:
                 merged[hit.id] = hit
-
-    nq = normalize_text(query)
-    kept: list[Any] = []
-    selves: list[str] = []
-    for hit in merged.values():
-        price = int(hit.metadata.get("price_jpy", 0) or 0)
-        name = str(hit.metadata.get("item_name") or "")
-        sim = 1.0 - hit.distance
-        is_self = price == official and (normalize_text(name) == nq or sim >= SELF_SIM_THRESHOLD)
-        if is_self:
-            selves.append(f"{name}|¥{price}|sim={sim:.3f}")
-        else:
-            kept.append(hit)
-
-    ranked = est._rerank(kept)[: est._top_k]
+    ranked = est._rerank(list(merged.values()))[: est._top_k]
     refs = "\n".join(est._format_reference(h) for h in ranked)
-    return f"### Query: {query}\n{refs or '(no matches)'}", selves
+    return f"### Query: {query}\n{refs or '(no matches)'}", list(selves.values())
 
 
 def run_once(est: Estimator) -> dict[str, tuple[int, bool, str, bool]]:
