@@ -51,3 +51,4 @@ def test_chunk_debug_and_done_info(caplog):
     assert any(
         "estimate done for discord-1" in m and "2 estimates" in m for m in info_msgs
     )
+    assert sum("prompt=" in m for m in info_msgs) >= 2

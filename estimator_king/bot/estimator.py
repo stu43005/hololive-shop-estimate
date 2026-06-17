@@ -1,6 +1,7 @@
 """Price estimation: per-line type-aware retrieval + recency rerank, then ask the
 chat model for structured estimates, reconciled back to the input lines."""
 
+import hashlib
 import logging
 import time
 from collections.abc import Sequence
@@ -146,11 +147,13 @@ class Estimator:
         self._recency_weight = recency_weight
         self._diversity_weight = diversity_weight
         self._fetch_multiplier = fetch_multiplier
+        self._prompt_hash = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:8]
 
     def estimate_products(self, product_names: list[str], user_id: str) -> EstimateBatch:
         if not product_names:
             return EstimateBatch(estimates=[])
-        logger.info("estimate request from %s for %d products", user_id, len(product_names))
+        logger.info("estimate request from %s for %d products prompt=%s",
+                    user_id, len(product_names), self._prompt_hash)
         start = time.monotonic()
         total_chunks = (len(product_names) + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE
         all_estimates: list[ProductEstimate] = []
@@ -162,8 +165,8 @@ class Estimator:
             all_estimates.extend(batch.estimates)
         reconciled = self._reconcile(product_names, all_estimates)
         reconciled = [_snap_estimate(est) for est in reconciled]
-        logger.info("estimate done for %s: %d estimates in %.1fs",
-                    user_id, len(reconciled), time.monotonic() - start)
+        logger.info("estimate done for %s: %d estimates in %.1fs prompt=%s",
+                    user_id, len(reconciled), time.monotonic() - start, self._prompt_hash)
         return EstimateBatch(estimates=reconciled)
 
     def _estimate_chunk(self, chunk: list[str]) -> EstimateBatch:
