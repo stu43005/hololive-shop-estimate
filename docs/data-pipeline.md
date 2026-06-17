@@ -834,13 +834,17 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
 
 1. **組 prompt**([estimator.py:171-189](../estimator_king/bot/estimator.py#L171)):每行
    參考組成 `### Query: {name}\n{refs}`(無命中則 `(no matches)`),整批拼成 user prompt;
-   `SYSTEM_PROMPT`([estimator.py:16](../estimator_king/bot/estimator.py#L16))以 XML 區塊要求:
+   `SYSTEM_PROMPT`([estimator.py:17](../estimator_king/bot/estimator.py#L17))以 XML 區塊要求:
    每行一筆估價、同序不漏、**只能**用提供的參考(禁止引用參考以外的一般「相場」行情)、
-   references 採嚴格優先序 **item_type > size/材質 > recency**(recency 僅作 tie-breaker、
-   不得蓋過更接近的同類比對)、帶參考所無的溢價特徵/素材(温感、もこもこ／あったか、加大、
-   なりきり等)時錨定同類參考**上端**、價格為含稅且必為 **¥110 整數倍**、price_range 約
-   **±25–30% 且偏上**、confidence `high` 需同名/同型近似 exact 且 suggested 落在同類參考
-   價格跨度內、最多 3 筆 `reference_products`、無強匹配仍給 `low` 估價而非捏造。
+   references 採嚴格優先序 **item_type > size/材質 > recency**(recency 僅作 tie-breaker)、
+   **錨定 `<anchoring>`:預設錨在同類參考的「中位至上端」、不得低於中位數,除非查詢明確帶更
+   便宜/更簡單的變體訊號;帶參考所無的溢價特徵(温感、もこもこ/あったか、加大、なりきり等)
+   時錨上端**、**`<set_and_count>`:名稱中的種/個數(1種、2個セット、全4種)不是價格乘數,
+   不在不同 set 大小間內插,按 item_type 與單品/套組層級比價**、價格為含稅且必為 **¥110
+   整數倍**、**price_range 依信心分級且偏上(high −20/+30、medium −25/+45、low −30/+60)**、
+   **confidence `high` 需近似同名同型 exact、查詢無參考所缺的額外修飾詞(聯名/品牌/系列名、
+   尺寸、材質、set count)、且 suggested 落在同類參考價格跨度內;泛用單字名 refs 價差大時降為
+   medium**、最多 3 筆 `reference_products`、無強匹配仍給 `low` 估價而非捏造。
    輸出欄位不在 prompt 重述,由 `response_format=EstimateBatch` schema 強制。
 2. **結構化輸出**([chat.py:58-100](../estimator_king/llm/chat.py#L58)):
    `chat_structured_output=True`(預設)→ `chat.completions.parse` 綁
@@ -871,6 +875,9 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
 >   `recency_weight` 因此維持很小,只做同等可比時的微調而非主導;「依 item_name/detail
 >   比對 size/材質」正是 `_format_reference` 要輸出 `item_name`、`item_type`、
 >   `product_title`、價格、日期、store 與 snippet 這幾個欄位的原因。
+>   第二輪起 prompt 再以 `<anchoring>`(中位至上端、修正系統性低估)、
+>   `<set_and_count>`(計數非價格乘數)、信心分級 range 與收緊的 `high` 判準補強估價推理;
+>   net 效果以 `scripts/analysis/eval_estimate.py`(本尊排除的 25 筆 fixture)量測。
 > - **為何 snap 到 ¥110 格點**:日本零售價皆為含稅價＝稅前(¥100 整數倍)×1.1,必為 ¥110 整數倍。觀測 12 筆實際定價 12/12 落在此格點、模型自然只 5/12;deterministic 後處理保證輸出落點正確,與 prompt `<price_format>` 形成雙保險。
 
 ---
