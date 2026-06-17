@@ -86,7 +86,15 @@ def build_context(est: Estimator, query: str, official: int) -> tuple[str, list[
     per where-query; to faithfully simulate the self item not being indexed we
     over-fetch, drop the self hits, then keep the closest fetch_n NON-self hits
     per path -- so the candidate that self would otherwise push past the fetch_n
-    boundary is still seen. Returns (context_block, excluded_self_descriptions)."""
+    boundary is still seen. Returns (context_block, excluded_self_descriptions).
+
+    A self hit is the held-out fixture product, identified by exact normalized
+    name AND exact official price. The sim>=SELF_SIM_THRESHOLD branch is only a
+    backstop for name-format drift on the SAME product. To avoid silently
+    dropping a *different* same-priced product (which would make the eval context
+    unlike production and corrupt the before/after comparison), the run fails
+    closed (InvalidRun) when an exclusion is sim-only with a non-matching name,
+    or when more than one distinct product is excluded for one fixture."""
     embedding = est._embedder.embed_query(query)
     types = classify_query(
         query, item_types=est._item_types,
@@ -106,9 +114,16 @@ def build_context(est: Estimator, query: str, official: int) -> tuple[str, list[
             price = int(hit.metadata.get("price_jpy", 0) or 0)
             name = str(hit.metadata.get("item_name") or "")
             sim = 1.0 - hit.distance
-            is_self = price == official and (normalize_text(name) == nq or sim >= SELF_SIM_THRESHOLD)
-            if is_self:
-                selves[hit.id] = f"{name}|¥{price}|sim={sim:.3f}"
+            name_match = normalize_text(name) == nq
+            if price == official and (name_match or sim >= SELF_SIM_THRESHOLD):
+                ident = (f"{name}|¥{price}|sim={sim:.3f}"
+                         f"|store={hit.metadata.get('store_id')}|id={hit.id}")
+                if not name_match:
+                    raise InvalidRun(
+                        f"ambiguous self-exclusion for {query!r}: dropped a "
+                        f"same-price high-similarity row whose name does not "
+                        f"match [{ident}] -- may be a different product")
+                selves[hit.id] = ident
             else:
                 non_self.append(hit)
         non_self.sort(key=lambda h: h.distance)
@@ -116,6 +131,10 @@ def build_context(est: Estimator, query: str, official: int) -> tuple[str, list[
             prev = merged.get(hit.id)
             if prev is None or hit.distance < prev.distance:
                 merged[hit.id] = hit
+    if len(selves) > 1:
+        raise InvalidRun(
+            f"multiple distinct products excluded as self for {query!r}: "
+            f"{list(selves.values())} -- identity is ambiguous")
     ranked = est._rerank(list(merged.values()))[: est._top_k]
     refs = "\n".join(est._format_reference(h) for h in ranked)
     return f"### Query: {query}\n{refs or '(no matches)'}", list(selves.values())

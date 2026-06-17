@@ -6,9 +6,11 @@ product absent from the index would still see the next candidate. A naive
 "fetch fetch_n then drop self" hides it; the over-fetch fix recovers it.
 """
 
+import pytest
+
 from estimator_king.bot.estimator import Estimator
 from estimator_king.vectorstore.store import QueryHit
-from scripts.analysis.eval_estimate import build_context
+from scripts.analysis.eval_estimate import build_context, InvalidRun
 
 
 class _Embedder:
@@ -63,3 +65,47 @@ def test_build_context_overfetches_past_self_truncation():
     assert "c2" in refs                       # recovered by over-fetch
     assert query not in refs                  # self excluded from references
     assert any("sim=1.000" in s for s in selves)
+
+
+def test_build_context_retains_same_price_but_different_name_comparable():
+    official = 1000
+    query = "セルフ商品"
+    hits = [
+        _hit(query, official, 0.00),        # self: exact name + price
+        _hit("別の商品", official, 0.20),    # SAME price, different name, sim 0.80
+        _hit("c2", 500, 0.30),
+    ]
+    est = _estimator(_TruncatingStore(hits))
+    block, selves = build_context(est, query, official)
+    _, _, refs = block.partition("\n")
+    assert "別の商品" in refs          # legitimate same-price different-name comparable kept
+    assert query not in refs           # only the exact-name self is excluded
+    assert len(selves) == 1
+
+
+def test_build_context_fails_closed_on_sim_only_exclusion():
+    official = 1000
+    query = "セルフ商品"
+    hits = [
+        _hit("紛らわしい別商品", official, 0.02),  # sim 0.98 >= 0.95, price==official, name != query
+        _hit("c1", 500, 0.30),
+    ]
+    est = _estimator(_TruncatingStore(hits))
+    with pytest.raises(InvalidRun):
+        build_context(est, query, official)
+
+
+def test_build_context_fails_closed_on_multiple_self():
+    official = 1000
+    query = "セルフ商品"
+    hits = [
+        _hit(query, official, 0.10),       # exact name + price (id == query)
+        QueryHit(id="dup", document="", distance=0.12, metadata={
+            "item_name": query, "item_type": "その他", "price_jpy": official,
+            "published_at": 0, "store_id": "s2", "detail_snippet": "",
+            "product_title": query}),       # different id, same name+price -> 2nd self
+        _hit("c1", 500, 0.30),
+    ]
+    est = _estimator(_TruncatingStore(hits))
+    with pytest.raises(InvalidRun):
+        build_context(est, query, official)
