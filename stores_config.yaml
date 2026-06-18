@@ -205,6 +205,9 @@ item_types:
   - ストレージボックス
   - サコッシュ
   - ショレダーバッグ
+  - フード付きタオル
+  - ペットボトルホルダー
+  - ボイスぬいぐるみキーホルダー
 # Bump when the list changes to force re-classification on the next crawl.
 item_types_version: 4
 
