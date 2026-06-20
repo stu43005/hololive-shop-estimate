@@ -1271,11 +1271,11 @@ YAML
 set -a; source .env; set +a
 PYTHONPATH=. .venv/bin/python scripts/analysis/experiment_anchor_floor.py --runs 3 --candidate-config /tmp/anchor_candidate.yaml
 ```
-Read the **BANDS by same-type ref count** table. The `region` column shows `clamp` (n in `[min_refs, full_percentile_min_refs)`, forced to median) vs `full` (n ≥ `full_percentile_min_refs`, gets the configured percentile). Every band you are **opening to the aggressive percentile** — i.e. every `full` band, plus any band you would move from `clamp` to `full` by lowering `--full-min-refs` — must read `verdict = PASS` (≥ `MIN_BUCKET_N` floor-applied AND `|signed|` not worse AND MAPE within +2pp). If a band reads `underpow` or `REGRESS`, do **not** open it: **edit `/tmp/anchor_candidate.yaml`** to raise `full_percentile_min_refs` (keep those n clamped to median) or `min_refs` (no-op), then **rerun the same `--candidate-config /tmp/anchor_candidate.yaml` command** (the CLI `--general`/`--full-min-refs`/etc. flags are ignored while `--candidate-config` is set, so tuning must be done in the YAML). Repeat until every opened band is PASS. The final `/tmp/anchor_candidate.yaml` is exactly what you commit in Step 2.
+Read the **BANDS by same-type ref count** table. The `region` column shows `clamp` (n in `[min_refs, full_percentile_min_refs)`, forced to median) vs `full` (n ≥ `full_percentile_min_refs`, gets the configured percentile). **The ship decision is the Step 3 eval gate, not this table** — the bands are a diagnostic for the one sparse-risk decision: *whether it is safe to lower `full_percentile_min_refs` below its default*. With 25 fixtures, many exact-`n` bands will read `underpow` simply for lack of samples; that is expected and does **not** block enablement at the default `full_percentile_min_refs=5`. The rule is narrow: **if you choose to lower `full_percentile_min_refs`** (opening one or more small-sample `n` bands from `clamp` to `full`), then *those newly-opened bands* must read `verdict = PASS` (≥ `MIN_BUCKET_N` floor-applied AND `|signed|` not worse AND MAPE within +2pp). If a band you want to open reads `underpow` or `REGRESS`, do **not** open it: **edit `/tmp/anchor_candidate.yaml`** to keep `full_percentile_min_refs` higher (those n stay clamped to median), then **rerun the same `--candidate-config /tmp/anchor_candidate.yaml` command** (the CLI `--general`/`--full-min-refs`/etc. flags are ignored while `--candidate-config` is set, so tuning must be done in the YAML). The final `/tmp/anchor_candidate.yaml` — whose default `full_percentile_min_refs=5` opens no new small band — is exactly what you commit in Step 2; the Step 3 eval gate is the binding pass/fail.
 
 - [ ] **Step 2: Add the config block with the calibrated values**
 
-Add to `stores_config.yaml` under `estimator:` **the same `anchor_floor` block you calibrated in Step 1** (`/tmp/anchor_candidate.yaml`, adjusted if Step 1's band verdicts forced a higher `full_percentile_min_refs`/`min_refs`):
+Copy the **final, calibrated** `anchor_floor` block from `/tmp/anchor_candidate.yaml` (the exact one Step 1 ended on — not the default example below if Step 1 raised `full_percentile_min_refs`/`min_refs`) into `stores_config.yaml` under `estimator:` (indented two spaces to sit beside `top_k` etc.):
 
 ```yaml
   anchor_floor:
@@ -1319,7 +1319,15 @@ git commit -F /tmp/anchor_commit_msg.txt
 
 (Via git-master per repo convention; the `-F` form keeps it non-interactive and embeds the BASELINE/CANDIDATE/ACCEPTANCE evidence.)
 
-- [ ] **Step 5: Restart the bot** to load the enabled config. Rollback at any time = remove the `anchor_floor` block + restart.
+- [ ] **Step 5: Restart the bot** to load the enabled config (`SYSTEM_PROMPT`/config are read at process start). The bot runs `python -m estimator_king run` — stop the current process and start a fresh one with the env loaded:
+
+```bash
+# local (see docs/local-runbook.md): stop the running process (Ctrl-C / SIGTERM), then:
+set -a; source .env; set +a
+.venv/bin/python -m estimator_king run
+```
+
+In Kubernetes (see [docs/ops-runbook.md](../../../docs/ops-runbook.md)) restart the deployment instead (`kubectl rollout restart deployment/<name>`). Rollback at any time = remove the `anchor_floor` block from `stores_config.yaml` + restart the same way.
 
 ---
 
