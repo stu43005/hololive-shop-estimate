@@ -8,37 +8,47 @@
 
 **Tech Stack:** Python 3, dataclasses, pydantic `ProductEstimate` (`model_copy`), pytest, basedpyright, ruff (via uvx).
 
-**Spec:** [docs/superpowers/specs/2026-06-20-estimate-anchor-floor-design.md](../specs/2026-06-20-estimate-anchor-floor-design.md)
+**Spec:** `docs/superpowers/specs/2026-06-20-estimate-anchor-floor-design.md`
 
-**Repo conventions (read before starting):**
-- Verify after every change: `.venv/bin/basedpyright <paths>` (0 errors in `estimator_king/`), `uvx ruff check <paths>`, `.venv/bin/python -m pytest tests/test_estimator.py tests/test_config_schema.py -v -o addopts=""`.
-- Commits go through the **git-master** skill (per repo CLAUDE.md). The `git commit` lines in this plan show the intended atomic grouping + message; execute them via git-master, adding only the listed paths (never `git add -A`).
-- Test fakes live in [tests/test_estimator.py](../../../tests/test_estimator.py): `FakeEmbedder`, `FakeTypingProvider`, `RecordingVectorStore`, `FakeChat`, helpers `_hit`, `_est`, `_estimator`. Reuse them.
+**Repo facts (verified, use exactly):**
+- Config loader is `load_config(path)` in `estimator_king/config_schema.py` (`AppConfig.from_yaml` just delegates to it). Store entries use key `id` (not `store_id`).
+- Existing `tests/test_config_schema.py` uses `from estimator_king.config_schema import load_config` + a `_write_yaml(tmp_path, body)` helper + `monkeypatch.setenv("OPENAI_API_KEY", "k")`. Reuse that pattern.
+- Discord formatter is `format_estimates(batch, max_length=2000)` in `estimator_king/bot/commands.py`; it truncates each rationale to 297 chars + "..." (line ~62). Its test file is `tests/test_bot_commands.py`.
+- `estimator.py` already imports `normalize_text` (used by `_reconcile`).
+- NFKC + casefold unifies full/half-width **latin/digits** and case (e.g. `ＢＩＧ`→`big`) but does **not** convert katakana→hiragana (`ﾓｺﾓｺ`→`モコモコ`, not `もこもこ`). Tests must reflect this.
+
+**Verification after every change:**
+`.venv/bin/basedpyright <paths>` (0 errors in `estimator_king/`), `uvx ruff check <paths>`, `.venv/bin/python -m pytest tests/test_estimator.py tests/test_config_schema.py tests/test_bot_commands.py -v -o addopts=""`.
+
+**Commit discipline:** commits go through the **git-master** skill (repo CLAUDE.md). The `git commit` lines below show intended atomic grouping + message; execute via git-master adding only the listed paths (never `git add -A`).
 
 ---
 
 ## File Structure
 
-- `estimator_king/config_schema.py` — add `AnchorTier`, `AnchorFloorConfig` dataclasses + their `validate()`, parse `estimator.anchor_floor` in `from_yaml`, add `AppConfig.estimator_anchor_floor` field + call its validate in `AppConfig.validate`.
-- `estimator_king/bot/estimator.py` — add `_percentile`, `_norm_kw`, `_anchor_floor` (module-level pure fns); make `_estimate_chunk` return `(EstimateBatch, dict[str, list[int]])`; wire floor into `estimate_products` with the alignment guard; add `anchor_floor` param to `Estimator.__init__`.
-- `estimator_king/bot/runner.py` — pass `config.estimator_anchor_floor` into `Estimator`.
-- `scripts/analysis/eval_estimate.py` — collect same-type prices in `build_context`, apply `_anchor_floor` in `run_once`, add a fail-closed acceptance-criteria exit.
-- `scripts/analysis/experiment_anchor_floor.py` — read tiers/min_refs from config, report metrics bucketed by same-type ref count.
-- `tests/test_estimator.py`, `tests/test_config_schema.py` — unit + integration tests.
-- `docs/data-pipeline.md` — document the new stage.
-- `stores_config.yaml` — **Task 9 only (stage-2 enablement, separate commit after eval passes).**
+- `estimator_king/config_schema.py` — `AnchorTier`, `AnchorFloorConfig` dataclasses + `validate()`; `_req_int`/`_req_num` parse guards; parse `estimator.anchor_floor` in `load_config`; `AppConfig.estimator_anchor_floor` field + validate call.
+- `estimator_king/bot/estimator.py` — `_percentile`, `_norm_kw`, `_anchor_floor`; `_estimate_chunk` returns `(EstimateBatch, dict[str, list[int]])`; floor wired into `estimate_products` with alignment guard; `Estimator.__init__` `anchor_floor` param.
+- `estimator_king/bot/runner.py` — pass `config.estimator_anchor_floor`.
+- `scripts/analysis/eval_estimate.py` — collect same-type prices; one chat pass; compute paired baseline(no-floor)-vs-candidate(floor) metrics; fail-closed acceptance gate.
+- `scripts/analysis/experiment_anchor_floor.py` — build a **candidate** `AnchorFloorConfig` from CLI args (defaults = spec starting values); apply real `_anchor_floor`; report paired baseline-vs-candidate metrics bucketed by same-type ref count with pass/fail.
+- `tests/test_estimator.py`, `tests/test_config_schema.py`, `tests/test_bot_commands.py` — tests.
+- `docs/data-pipeline.md` — document the stage.
+- `stores_config.yaml` — **Task 9 only** (stage-2 enablement, separate commit after eval passes).
 
 ---
 
 ### Task 1: `_percentile` pure function
 
 **Files:**
-- Modify: `estimator_king/bot/estimator.py` (add module-level fn near `snap_to_tax_grid`, ~line 119)
+- Modify: `estimator_king/bot/estimator.py` (add after `snap_to_tax_grid`, ~line 119)
 - Test: `tests/test_estimator.py`
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `tests/test_estimator.py` (import update at top: `from estimator_king.bot.estimator import Estimator, snap_to_tax_grid, _snap_estimate, _percentile`):
+Update the import at the top of `tests/test_estimator.py`:
+`from estimator_king.bot.estimator import Estimator, snap_to_tax_grid, _snap_estimate, _percentile`
+
+Add:
 
 ```python
 def test_percentile_linear_interpolation():
@@ -55,16 +65,16 @@ def test_percentile_single_and_empty():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `.venv/bin/python -m pytest tests/test_estimator.py::test_percentile_linear_interpolation -v -o addopts=""`
-Expected: FAIL with `ImportError: cannot import name '_percentile'`.
+Run: `.venv/bin/python -m pytest tests/test_estimator.py -k percentile -v -o addopts=""`
+Expected: collection error / FAIL — `cannot import name '_percentile'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `estimator_king/bot/estimator.py`, after `snap_to_tax_grid` (around line 119), add:
+In `estimator_king/bot/estimator.py`, after `snap_to_tax_grid` (~line 119), add:
 
 ```python
 def _percentile(values: list[int], pct: float) -> float | None:
-    """Linear-interpolated percentile of `values` (pct in 0–100). None if empty."""
+    """Linear-interpolated percentile of `values` (pct in 0-100). None if empty."""
     s = sorted(values)
     if not s:
         return None
@@ -100,42 +110,46 @@ git commit -m "feat(estimator): add _percentile helper for anchor floor"
 ### Task 2: `AnchorTier` / `AnchorFloorConfig` config dataclasses + parse + validate
 
 **Files:**
-- Modify: `estimator_king/config_schema.py` (add dataclasses near `BundleSetPolicy` ~line 90; add `AppConfig` field ~line 143; parse in `from_yaml` ~line 290–318; call validate in `AppConfig.validate` ~line 176)
+- Modify: `estimator_king/config_schema.py` (dataclasses after `BundleSetPolicy` ~line 101; `AppConfig` field ~line 143; parse in `load_config` ~line 290; validate call ~line 176)
 - Test: `tests/test_config_schema.py`
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/test_config_schema.py` (reuse the file's existing YAML-loading helper; if it loads from a temp file, mirror that. The assertions below assume a helper `load_cfg(yaml_text)` returning an `AppConfig`; if the existing tests build YAML differently, follow that exact pattern):
+Add to `tests/test_config_schema.py` (reuse the file's `_write_yaml` helper and `load_config`):
 
 ```python
-from estimator_king.config_schema import AnchorFloorConfig, AnchorTier
 import pytest
+from estimator_king.config_schema import AnchorFloorConfig, AnchorTier, load_config
 
-
-_BASE_STORE = """
-stores:
-  - store_id: s
-    base_url: https://example.com
-    sitemap_url: https://example.com/sitemap.xml
+_STORE = """
+        stores:
+          - id: s
+            base_url: https://x
+            sitemap_url: https://x/sitemap.xml
 """
 
 
-def test_anchor_floor_absent_is_none(load_cfg):
-    cfg = load_cfg(_BASE_STORE)
+def _load(tmp_path, monkeypatch, body):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    return load_config(_write_yaml(tmp_path, _STORE + body))
+
+
+def test_anchor_floor_absent_is_none(tmp_path, monkeypatch):
+    cfg = _load(tmp_path, monkeypatch, "")
     assert cfg.estimator_anchor_floor is None
 
 
-def test_anchor_floor_parsed(load_cfg):
-    cfg = load_cfg(_BASE_STORE + """
-estimator:
-  anchor_floor:
-    general_percentile: 60
-    min_refs: 3
-    full_percentile_min_refs: 5
-    max_lift_ratio: 1.6
-    premium_tiers:
-      - percentile: 70
-        keywords: ["温感", "もこもこ"]
+def test_anchor_floor_parsed(tmp_path, monkeypatch):
+    cfg = _load(tmp_path, monkeypatch, """
+        estimator:
+          anchor_floor:
+            general_percentile: 60
+            min_refs: 3
+            full_percentile_min_refs: 5
+            max_lift_ratio: 1.6
+            premium_tiers:
+              - percentile: 70
+                keywords: ["温感", "もこもこ"]
 """)
     af = cfg.estimator_anchor_floor
     assert af is not None
@@ -147,55 +161,53 @@ estimator:
     assert af.premium_tiers[0].keywords == ("温感", "もこもこ")
 
 
-def test_anchor_floor_defaults(load_cfg):
-    cfg = load_cfg(_BASE_STORE + """
-estimator:
-  anchor_floor:
-    general_percentile: 60
+def test_anchor_floor_defaults(tmp_path, monkeypatch):
+    cfg = _load(tmp_path, monkeypatch, """
+        estimator:
+          anchor_floor:
+            general_percentile: 60
 """)
     af = cfg.estimator_anchor_floor
     assert af.min_refs == 3 and af.full_percentile_min_refs == 5
     assert af.max_lift_ratio == 1.6 and af.premium_tiers == ()
 
 
-@pytest.mark.parametrize("bad", [
-    "general_percentile: 120",
-    "general_percentile: 60\n    min_refs: 0",
-    "general_percentile: 60\n    full_percentile_min_refs: 2",
-    "general_percentile: 60\n    max_lift_ratio: 0.5",
-    "general_percentile: 60\n    premium_tiers:\n      - percentile: 70\n        keywords: []",
+@pytest.mark.parametrize("block", [
+    "anchor_floor: {}",  # present but missing required general_percentile
+    "anchor_floor:\n            general_percentile: 120",
+    "anchor_floor:\n            general_percentile: 60.5",  # non-integer rejected, not truncated
+    "anchor_floor:\n            general_percentile: 60\n            min_refs: 0",
+    "anchor_floor:\n            general_percentile: 60\n            full_percentile_min_refs: 2",
+    "anchor_floor:\n            general_percentile: 60\n            max_lift_ratio: 0.5",
+    "anchor_floor:\n            general_percentile: 60\n            premium_tiers:\n              - percentile: 70\n                keywords: []",
 ])
-def test_anchor_floor_validate_rejects(load_cfg, bad):
+def test_anchor_floor_validate_rejects(tmp_path, monkeypatch, block):
     with pytest.raises(ValueError):
-        load_cfg(_BASE_STORE + f"\nestimator:\n  anchor_floor:\n    {bad}\n")
-```
-
-If `tests/test_config_schema.py` has no `load_cfg` fixture, add one at the top of the file:
-
-```python
-import pytest
-from estimator_king.config_schema import AppConfig
-
-
-@pytest.fixture
-def load_cfg(tmp_path):
-    def _load(yaml_text: str) -> AppConfig:
-        p = tmp_path / "stores_config.yaml"
-        p.write_text(yaml_text, encoding="utf-8")
-        return AppConfig.from_yaml(str(p))
-    return _load
+        _load(tmp_path, monkeypatch, f"        estimator:\n          {block}\n")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_config_schema.py -k anchor_floor -v -o addopts=""`
-Expected: FAIL with `ImportError: cannot import name 'AnchorFloorConfig'`.
+Expected: FAIL — `cannot import name 'AnchorFloorConfig'`.
 
-- [ ] **Step 3: Add the dataclasses**
+- [ ] **Step 3: Add the dataclasses + parse guards**
 
 In `estimator_king/config_schema.py`, after `BundleSetPolicy` (after line 101), add:
 
 ```python
+def _req_int(name: str, value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"anchor_floor.{name} must be an integer")
+    return value
+
+
+def _req_num(name: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"anchor_floor.{name} must be a number")
+    return float(value)
+
+
 @dataclass(frozen=True)
 class AnchorTier:
     """One premium anchor-floor tier: a percentile + the keywords that select it."""
@@ -205,14 +217,16 @@ class AnchorTier:
 
     def validate(self):
         if not (0 <= self.percentile <= 100):
-            raise ValueError("anchor_floor tier percentile must be 0–100")
+            raise ValueError("anchor_floor tier percentile must be 0-100")
         if not self.keywords or any(not isinstance(k, str) or not k for k in self.keywords):
             raise ValueError("anchor_floor tier keywords must be a non-empty list of non-empty strings")
 
 
 @dataclass(frozen=True)
 class AnchorFloorConfig:
-    """Deterministic anchor-floor policy (see specs/2026-06-20-estimate-anchor-floor-design.md)."""
+    """Deterministic anchor-floor policy. Lifts a low suggested price toward a
+    percentile of same-type reference prices, guarded by sparse/clamp/outlier
+    checks. None on the AppConfig means the floor is disabled."""
 
     general_percentile: int
     min_refs: int = 3
@@ -222,7 +236,7 @@ class AnchorFloorConfig:
 
     def validate(self):
         if not (0 <= self.general_percentile <= 100):
-            raise ValueError("anchor_floor.general_percentile must be 0–100")
+            raise ValueError("anchor_floor.general_percentile must be 0-100")
         if self.min_refs < 1:
             raise ValueError("anchor_floor.min_refs must be >= 1")
         if self.full_percentile_min_refs < self.min_refs:
@@ -235,28 +249,31 @@ class AnchorFloorConfig:
 
 - [ ] **Step 4: Add the `AppConfig` field**
 
-In `estimator_king/config_schema.py`, in the `AppConfig` dataclass after line 143 (`estimator_fetch_multiplier: int = 2`), add:
+In the `AppConfig` dataclass, after line 143 (`estimator_fetch_multiplier: int = 2`), add:
 
 ```python
     estimator_anchor_floor: "AnchorFloorConfig | None" = None
 ```
 
-- [ ] **Step 5: Parse in `from_yaml`**
+- [ ] **Step 5: Parse in `load_config`**
 
-In `from_yaml`, after `est = yaml_data.get("estimator", {}) or {}` (line 290), add:
+In `load_config`, after `est = yaml_data.get("estimator", {}) or {}` (line 290), add (note `if af is not None:` so a present-but-empty `anchor_floor: {}` is parsed and fails on the missing required key, instead of being silently disabled):
 
 ```python
     af = est.get("anchor_floor")
     anchor_floor = None
-    if af:
+    if af is not None:
+        if "general_percentile" not in af:
+            raise ValueError("anchor_floor requires general_percentile")
         anchor_floor = AnchorFloorConfig(
-            general_percentile=int(af["general_percentile"]),
-            min_refs=int(af.get("min_refs", 3)),
-            full_percentile_min_refs=int(af.get("full_percentile_min_refs", 5)),
-            max_lift_ratio=float(af.get("max_lift_ratio", 1.6)),
+            general_percentile=_req_int("general_percentile", af["general_percentile"]),
+            min_refs=_req_int("min_refs", af.get("min_refs", 3)),
+            full_percentile_min_refs=_req_int(
+                "full_percentile_min_refs", af.get("full_percentile_min_refs", 5)),
+            max_lift_ratio=_req_num("max_lift_ratio", af.get("max_lift_ratio", 1.6)),
             premium_tiers=tuple(
                 AnchorTier(
-                    percentile=int(t["percentile"]),
+                    percentile=_req_int("tier.percentile", t["percentile"]),
                     keywords=tuple(t.get("keywords", []) or []),
                 )
                 for t in (af.get("premium_tiers", []) or [])
@@ -264,7 +281,7 @@ In `from_yaml`, after `est = yaml_data.get("estimator", {}) or {}` (line 290), a
         )
 ```
 
-Then add to the `AppConfig(...)` constructor call (after `estimator_fetch_multiplier=...`, line 318):
+Add to the `AppConfig(...)` constructor call (after `estimator_fetch_multiplier=...`, line 318):
 
 ```python
         estimator_anchor_floor=anchor_floor,
@@ -282,7 +299,7 @@ In `AppConfig.validate` (after `self.bundle_set.validate()`, line 176), add:
 - [ ] **Step 7: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_config_schema.py -k anchor_floor -v -o addopts=""`
-Expected: PASS (all anchor_floor tests).
+Expected: PASS (all anchor_floor tests, including the rejection cases).
 
 - [ ] **Step 8: Type check + lint**
 
@@ -298,15 +315,15 @@ git commit -m "feat(config): add AnchorFloorConfig schema, parsing and validatio
 
 ---
 
-### Task 3: `_anchor_floor` pure function (all guards + range recompute + provenance)
+### Task 3: `_anchor_floor` pure function (guards + range recompute + provenance + audit log)
 
 **Files:**
-- Modify: `estimator_king/bot/estimator.py` (add `_norm_kw`, `_anchor_floor` after `_percentile`; ensure `import unicodedata` at top)
+- Modify: `estimator_king/bot/estimator.py` (add `import unicodedata`; `TYPE_CHECKING` import of `AnchorFloorConfig`; `_norm_kw`, `_SKEW`, `_anchor_floor` after `_percentile`)
 - Test: `tests/test_estimator.py`
 
 - [ ] **Step 1: Write the failing tests**
 
-Update the import at the top of `tests/test_estimator.py` to include the new symbols and config types:
+Update the import at the top of `tests/test_estimator.py`:
 
 ```python
 from estimator_king.bot.estimator import (
@@ -329,22 +346,22 @@ _CFG = AnchorFloorConfig(
     general_percentile=60, min_refs=3, full_percentile_min_refs=5, max_lift_ratio=1.6,
     premium_tiers=(AnchorTier(percentile=70, keywords=("温感", "もこもこ")),),
 )
+_REFS5 = [2000, 2500, 3000, 3500, 4000]  # p60=3200, p70=3600, median=3000
 
 
 def test_anchor_floor_no_op_when_cfg_none():
     e = _est_full("x", 1000, 800, 1300)
-    assert _anchor_floor("x", e, [1000, 1100, 1200, 1300, 1400], None) is e
+    assert _anchor_floor("x", e, _REFS5, None) is e
 
 
 def test_anchor_floor_no_op_sentinel():
     e = _est_full("x", 0, 0, 0, conf="low")
-    assert _anchor_floor("x", e, [1000, 1100, 1200, 1300, 1400], _CFG) is e
+    assert _anchor_floor("x", e, _REFS5, _CFG) is e
 
 
 def test_anchor_floor_no_op_sparse():
     e = _est_full("x", 1000, 800, 1300)
-    # only 2 same-type refs < min_refs(3) -> untouched
-    assert _anchor_floor("x", e, [3000, 4000], _CFG) is e
+    assert _anchor_floor("x", e, [3000, 4000], _CFG) is e  # 2 refs < min_refs
 
 
 def test_anchor_floor_no_op_empty_refs():
@@ -353,78 +370,102 @@ def test_anchor_floor_no_op_empty_refs():
 
 
 def test_anchor_floor_raises_to_general_percentile():
-    # 5 refs (>= full_percentile_min_refs) -> full p60; sorted [2000..4000], p60=3200
     e = _est_full("ポーチ", 2200, 1800, 2900)
-    out = _anchor_floor("ポーチ", e, [2000, 2500, 3000, 3500, 4000], _CFG)
+    out = _anchor_floor("ポーチ", e, _REFS5, _CFG)
     assert out.suggested_price_jpy == 3200
-    assert out.suggested_price_jpy > e.suggested_price_jpy
     assert out.rationale.startswith("[anchor floor:")
 
 
 def test_anchor_floor_never_lowers():
     e = _est_full("x", 5000, 4000, 6000)
-    out = _anchor_floor("x", e, [2000, 2500, 3000, 3500, 4000], _CFG)
-    assert out is e  # floor (3200) < suggested -> untouched
+    assert _anchor_floor("x", e, _REFS5, _CFG) is e  # floor 3200 < suggested
 
 
 def test_anchor_floor_premium_uses_higher_tier():
-    # query carries 温感; n=5 -> p70. p70 of [2000..4000] = 3600 > p60 3200
     e = _est_full("温感マグカップ", 2200, 1800, 2900)
-    out = _anchor_floor("温感マグカップ", e, [2000, 2500, 3000, 3500, 4000], _CFG)
-    assert out.suggested_price_jpy == 3600
+    out = _anchor_floor("温感マグカップ", e, _REFS5, _CFG)
+    assert out.suggested_price_jpy == 3600  # p70
 
 
 def test_anchor_floor_premium_keyed_on_query_not_product_name():
-    # query has 温感, but the (model-rewritten) product_name does not
     e = _est_full("rewritten name", 2200, 1800, 2900)
-    out = _anchor_floor("温感マグカップ", e, [2000, 2500, 3000, 3500, 4000], _CFG)
+    out = _anchor_floor("温感マグカップ", e, _REFS5, _CFG)
     assert out.suggested_price_jpy == 3600
 
 
-def test_anchor_floor_keyword_nfkc_variant_hits_tier():
-    # half-width katakana モコモコ should still match full-width もこもこ
-    e = _est_full("ﾓｺﾓｺぬいぐるみ", 2200, 1800, 2900)
-    out = _anchor_floor("ﾓｺﾓｺぬいぐるみ", e, [2000, 2500, 3000, 3500, 4000], _CFG)
+def test_anchor_floor_multi_tier_takes_max():
+    cfg = AnchorFloorConfig(
+        general_percentile=60, min_refs=3, full_percentile_min_refs=5, max_lift_ratio=1.6,
+        premium_tiers=(AnchorTier(percentile=65, keywords=("温感",)),
+                       AnchorTier(percentile=70, keywords=("もこもこ",))))
+    e = _est_full("温感もこもこ", 2200, 1800, 2900)
+    out = _anchor_floor("温感もこもこ", e, _REFS5, cfg)
+    assert out.suggested_price_jpy == 3600  # max(65,70)=70
+
+
+def test_anchor_floor_keyword_nfkc_fullwidth_latin():
+    # NFKC+casefold: full-width latin ＢＩＧ -> big matches keyword "big"
+    cfg = AnchorFloorConfig(
+        general_percentile=60, min_refs=3, full_percentile_min_refs=5, max_lift_ratio=1.6,
+        premium_tiers=(AnchorTier(percentile=70, keywords=("big",)),))
+    e = _est_full("ＢＩＧぬいぐるみ", 2200, 1800, 2900)
+    out = _anchor_floor("ＢＩＧぬいぐるみ", e, _REFS5, cfg)
     assert out.suggested_price_jpy == 3600
 
 
 def test_anchor_floor_small_sample_clamped_to_median():
-    # n=3 (>= min_refs, < full_percentile_min_refs=5) -> effective_pct clamped to 50
-    # even though 温感 would request p70. median of [2000,3000,5000] = 3000.
+    # n=3 in [min_refs,5): even premium 温感 clamps to p50; median([2000,3000,5000])=3000
     e = _est_full("温感マグカップ", 2200, 1800, 2900)
     out = _anchor_floor("温感マグカップ", e, [2000, 3000, 5000], _CFG)
     assert out.suggested_price_jpy == 3000
 
 
 def test_anchor_floor_max_lift_ratio_no_op():
-    # floor would be 9000 (>5 refs, p60), suggested 2200; 2200*1.6=3520 < 9000 -> skip
-    e = _est_full("x", 2200, 1800, 2900)
-    out = _anchor_floor("x", e, [8000, 8500, 9000, 9500, 10000], _CFG)
-    assert out is e
+    e = _est_full("x", 2200, 1800, 2900)  # 2200*1.6=3520 < floor 9000 -> skip
+    assert _anchor_floor("x", e, [8000, 8500, 9000, 9500, 10000], _CFG) is e
 
 
 def test_anchor_floor_recomputes_range_with_upward_skew():
     e = _est_full("ポーチ", 2200, 1800, 2900, conf="medium")
-    out = _anchor_floor("ポーチ", e, [2000, 2500, 3000, 3500, 4000], _CFG)
-    # medium skew (-25%/+45%) around 3200; max widened, min not above suggested
+    out = _anchor_floor("ポーチ", e, _REFS5, _CFG)  # floor 3200, medium +45%
     assert out.price_range_jpy.max >= round(3200 * 1.45)
     assert out.price_range_jpy.min <= out.suggested_price_jpy
 
 
 def test_anchor_floor_does_not_mutate_original():
     e = _est_full("ポーチ", 2200, 1800, 2900)
-    _anchor_floor("ポーチ", e, [2000, 2500, 3000, 3500, 4000], _CFG)
+    _anchor_floor("ポーチ", e, _REFS5, _CFG)
     assert e.suggested_price_jpy == 2200 and e.rationale == "r"
+
+
+def test_anchor_floor_logs_apply_and_skip(caplog):
+    import logging
+    with caplog.at_level(logging.INFO):
+        _anchor_floor("ポーチ", _est_full("ポーチ", 2200, 1800, 2900), _REFS5, _CFG)
+    assert any("anchor_floor applied" in r.message for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        _anchor_floor("x", _est_full("x", 2200, 1800, 2900),
+                      [8000, 8500, 9000, 9500, 10000], _CFG)
+    assert any("anchor_floor skip" in r.message for r in caplog.records)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_estimator.py -k anchor_floor -v -o addopts=""`
-Expected: FAIL with `ImportError: cannot import name '_anchor_floor'`.
+Expected: FAIL — `cannot import name '_anchor_floor'`.
 
 - [ ] **Step 3: Write the implementation**
 
-In `estimator_king/bot/estimator.py`: add `import unicodedata` to the imports at the top (alongside the existing stdlib imports). Then after `_percentile`, add:
+In `estimator_king/bot/estimator.py`: add `import unicodedata` with the other stdlib imports. Add (or extend) a `TYPE_CHECKING` import block near the top:
+
+```python
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from estimator_king.config_schema import AnchorFloorConfig
+```
+
+After `_percentile`, add:
 
 ```python
 _SKEW = {"high": (0.20, 0.30), "medium": (0.25, 0.45), "low": (0.30, 0.60)}
@@ -438,10 +479,11 @@ def _norm_kw(s: str) -> str:
 def _anchor_floor(query: str, est: ProductEstimate, same_type_prices: list[int],
                   cfg: "AnchorFloorConfig | None") -> ProductEstimate:
     """Raise est.suggested toward a percentile of same-type refs, keyed by the
-    original `query`. No-op (returns est unchanged) when disabled, on the no-estimate
-    sentinel, on sparse refs, on an over-large lift, or when the floor is below
-    suggested. On a real lift it recomputes the range (upward skew) and prepends a
-    provenance note to rationale. See specs/2026-06-20-estimate-anchor-floor-design.md."""
+    original `query`. Returns est unchanged when disabled (cfg None), on the
+    no-estimate sentinel, on sparse refs (< min_refs), when the lift exceeds
+    max_lift_ratio, or when the floor is below suggested. On a real lift it
+    recomputes the range with upward skew and prepends a provenance note to
+    rationale. Logs apply/skip for audit."""
     if cfg is None or est.suggested_price_jpy == 0 or not same_type_prices:
         return est
     n = len(same_type_prices)
@@ -468,7 +510,7 @@ def _anchor_floor(query: str, est: ProductEstimate, same_type_prices: list[int],
     down, up = _SKEW.get(est.confidence, _SKEW["medium"])
     new_min = min(est.price_range_jpy.min, round(floor_int * (1 - down)))
     new_max = max(est.price_range_jpy.max, round(floor_int * (1 + up)))
-    note = f"[anchor floor: ¥{suggested}→¥{floor_int} @p{effective}, n={n}] "
+    note = f"[anchor floor: ¥{suggested}->¥{floor_int} @p{effective}, n={n}] "
     logger.info("anchor_floor applied: %r %d->%d @p%d n=%d",
                 query, suggested, floor_int, effective, n)
     return est.model_copy(update={
@@ -477,16 +519,6 @@ def _anchor_floor(query: str, est: ProductEstimate, same_type_prices: list[int],
         "rationale": note + est.rationale,
     })
 ```
-
-Add a `TYPE_CHECKING` import for the annotation at the top of the file (so there is no import cycle at runtime):
-
-```python
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from estimator_king.config_schema import AnchorFloorConfig
-```
-
-(If `from typing import ...` already exists, add `TYPE_CHECKING` to it.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -507,61 +539,85 @@ git commit -m "feat(estimator): add _anchor_floor with sparse/clamp/outlier guar
 
 ---
 
-### Task 4: Wire the floor into the estimate pipeline (chunk prices, alignment guard, Estimator param, runner)
+### Task 4: Wire the floor into the pipeline (chunk prices, alignment guard, param, runner)
 
 **Files:**
-- Modify: `estimator_king/bot/estimator.py` (`_estimate_chunk` return type ~line 199–226; `estimate_products` ~line 186–197; `Estimator.__init__` ~line 161–177)
+- Modify: `estimator_king/bot/estimator.py` (`_estimate_chunk` ~line 199-226; `estimate_products` ~line 186-197; `Estimator.__init__` ~line 161-177)
 - Modify: `estimator_king/bot/runner.py:47-55`
 - Test: `tests/test_estimator.py`
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/test_estimator.py` (these go through the real pipeline; the floor is enabled by passing `anchor_floor=_CFG` to a new `_estimator` kwarg):
+Add to `tests/test_estimator.py`:
 
 ```python
 def _estimator_af(vs, chat, anchor_floor, typing=None, item_type="ぬいぐるみ"):
-    return Estimator(FakeEmbedder(), chat, vs, typing_provider=(typing or FakeTypingProvider(item_type)),
+    return Estimator(FakeEmbedder(), chat, vs,
+                     typing_provider=(typing or FakeTypingProvider(item_type)),
                      item_types=[item_type], item_types_version=1,
                      top_k=10, recency_weight=0.05, diversity_weight=0.0, fetch_multiplier=1,
                      anchor_floor=anchor_floor)
 
 
-def test_pipeline_floor_raises_low_estimate():
-    hits = [_hit(f"r{i}", "ぬいぐるみ", p, 0, 0.1)
+def _nui_hits():
+    return [_hit(f"r{i}", "ぬいぐるみ", p, 0, 0.1)
             for i, p in enumerate([2000, 2500, 3000, 3500, 4000])]
-    vs = RecordingVectorStore(hits)
+
+
+def test_pipeline_floor_raises_low_estimate():
+    vs = RecordingVectorStore(_nui_hits())
     chat = FakeChat([_est_full("ぬいぐるみ", 2200, 1800, 2900)])
     est = _estimator_af(vs, chat, _CFG, typing=FakeTypingProvider("ぬいぐるみ"))
-    batch = est.estimate_products(["ぬいぐるみ"], "u")
-    out = batch.estimates[0]
+    out = est.estimate_products(["ぬいぐるみ"], "u").estimates[0]
     assert out.suggested_price_jpy == 3190  # 3200 floor snapped to ¥110 grid
     assert "anchor floor" in out.rationale
 
 
 def test_pipeline_floor_disabled_when_no_config():
-    hits = [_hit(f"r{i}", "ぬいぐるみ", p, 0, 0.1)
-            for i, p in enumerate([2000, 2500, 3000, 3500, 4000])]
-    vs = RecordingVectorStore(hits)
+    vs = RecordingVectorStore(_nui_hits())
     chat = FakeChat([_est_full("ぬいぐるみ", 2200, 1800, 2900)])
     est = _estimator_af(vs, chat, None, typing=FakeTypingProvider("ぬいぐるみ"))
     out = est.estimate_products(["ぬいぐるみ"], "u").estimates[0]
-    assert out.suggested_price_jpy == 2200  # only snapped, not floored
+    assert out.suggested_price_jpy == 2200  # snapped only
     assert "anchor floor" not in out.rationale
 
 
-def test_pipeline_floor_skipped_on_length_mismatch(caplog):
-    import logging
-    hits = [_hit(f"r{i}", "ぬいぐるみ", p, 0, 0.1)
-            for i, p in enumerate([2000, 2500, 3000, 3500, 4000])]
+def test_pipeline_floor_noop_for_sonota_query():
+    # classify_query returns [] for その他 -> empty same-type set -> no floor
+    hits = [_hit(f"r{i}", "その他", p, 0, 0.2) for i, p in enumerate([2000, 2500, 3000, 3500, 4000])]
     vs = RecordingVectorStore(hits)
+    chat = FakeChat([_est_full("謎の物体", 2200, 1800, 2900)])
+    est = _estimator_af(vs, chat, _CFG, typing=FakeTypingProvider("その他"))
+    out = est.estimate_products(["謎の物体"], "u").estimates[0]
+    assert out.suggested_price_jpy == 2200
+    assert "anchor floor" not in out.rationale
+
+
+def test_pipeline_floor_skipped_on_length_mismatch_short(caplog):
+    import logging
+    vs = RecordingVectorStore(_nui_hits())
     chat = FakeChat([_est_full("ぬいぐるみ", 2200, 1800, 2900)])
     est = _estimator_af(vs, chat, _CFG, typing=FakeTypingProvider("ぬいぐるみ"))
-    # Force a reconcile that returns the wrong length.
     est._reconcile = lambda names, ests: []  # type: ignore[method-assign]
     with caplog.at_level(logging.ERROR):
         batch = est.estimate_products(["ぬいぐるみ"], "u")
     assert any("anchor_floor skipped" in r.message for r in caplog.records)
     assert batch.estimates == []
+
+
+def test_pipeline_floor_skipped_on_length_mismatch_long(caplog):
+    import logging
+    vs = RecordingVectorStore(_nui_hits())
+    chat = FakeChat([_est_full("ぬいぐるみ", 2200, 1800, 2900)])
+    est = _estimator_af(vs, chat, _CFG, typing=FakeTypingProvider("ぬいぐるみ"))
+    # reconcile returns TWO rows for ONE input line -> length mismatch (too many)
+    est._reconcile = lambda names, ests: [_est_full("ぬいぐるみ", 2200, 1800, 2900),
+                                          _est_full("extra", 2200, 1800, 2900)]  # type: ignore[method-assign]
+    with caplog.at_level(logging.ERROR):
+        batch = est.estimate_products(["ぬいぐるみ"], "u")
+    assert any("anchor_floor skipped" in r.message for r in caplog.records)
+    # no estimate was floored (both stay at their snapped model value)
+    assert all("anchor floor" not in e.rationale for e in batch.estimates)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -571,20 +627,14 @@ Expected: FAIL — `Estimator.__init__` has no `anchor_floor` kwarg.
 
 - [ ] **Step 3: Add the `anchor_floor` constructor param**
 
-In `estimator_king/bot/estimator.py`, `Estimator.__init__` signature (line 161-166), add a keyword-only param and store it. Change the signature tail from:
-
-```python
-                 fetch_multiplier: int = 2) -> None:
-```
-
-to:
+In `Estimator.__init__` (line 161-166), change the signature tail from `fetch_multiplier: int = 2) -> None:` to:
 
 ```python
                  fetch_multiplier: int = 2,
                  anchor_floor: "AnchorFloorConfig | None" = None) -> None:
 ```
 
-and after `self._fetch_multiplier = fetch_multiplier` (line 176) add:
+After `self._fetch_multiplier = fetch_multiplier` (line 176) add:
 
 ```python
         self._anchor_floor = anchor_floor
@@ -592,7 +642,7 @@ and after `self._fetch_multiplier = fetch_multiplier` (line 176) add:
 
 - [ ] **Step 4: Make `_estimate_chunk` return same-type prices**
 
-In `_estimate_chunk` (line 199-226), change it to also collect and return per-query same-type prices. Replace the body so it builds a `prices_by_name` dict and returns a tuple:
+Replace the whole `_estimate_chunk` (line 199-226) with:
 
 ```python
     def _estimate_chunk(self, chunk: list[str]) -> tuple[EstimateBatch, dict[str, list[int]]]:
@@ -635,7 +685,7 @@ In `_estimate_chunk` (line 199-226), change it to also collect and return per-qu
 
 - [ ] **Step 5: Wire floor into `estimate_products`**
 
-In `estimate_products` (line 186-197), replace the chunk loop + post-processing with:
+In `estimate_products`, replace the chunk loop + post-processing (line 186-197) — **keep the trailing `logger.info(... done ...)` and `return EstimateBatch(estimates=reconciled)` exactly as they are** — with:
 
 ```python
         all_estimates: list[ProductEstimate] = []
@@ -662,9 +712,11 @@ In `estimate_products` (line 186-197), replace the chunk loop + post-processing 
         reconciled = [_snap_estimate(est) for est in reconciled]
 ```
 
+(The existing `logger.info("estimate done ...")` + `return EstimateBatch(estimates=reconciled)` lines below this block are unchanged.)
+
 - [ ] **Step 6: Pass config through `runner.py`**
 
-In `estimator_king/bot/runner.py`, the `Estimator(...)` call (line 47-55), add the new kwarg after `fetch_multiplier=config.estimator_fetch_multiplier,`:
+In `estimator_king/bot/runner.py`, the `Estimator(...)` call (line 47-55), add after `fetch_multiplier=config.estimator_fetch_multiplier,`:
 
 ```python
         anchor_floor=config.estimator_anchor_floor,
@@ -692,66 +744,63 @@ git commit -m "feat(estimator): apply anchor floor in estimate_products with ali
 ### Task 5: Provenance survives Discord rationale truncation
 
 **Files:**
-- Test: `tests/test_commands.py` (create if absent; otherwise add to it)
+- Test: `tests/test_bot_commands.py` (append; formatter is `format_estimates`)
 
-The provenance is **prepended** in `_anchor_floor` (Task 3), so it lands inside the formatter's 297-char window. This task locks that with a test against the real formatter; no production code change is expected. If the test fails, the fix is in `_anchor_floor` (keep prepending) — do **not** change the truncation in `commands.py`.
+The provenance is **prepended** in `_anchor_floor` (Task 3), so it lands inside `format_estimates`' 297-char window. This locks it. No production change expected; if it fails, keep prepending in `_anchor_floor` — do **not** change `commands.py` truncation.
 
-- [ ] **Step 1: Identify the formatter entry point**
+- [ ] **Step 1: Write the test**
 
-Run: `grep -n "def .*embed\|rationale\[:297\]\|def format" estimator_king/bot/commands.py`
-Expected: shows the embed-formatting function (around line 37) and the truncation at line 62-63. Note the function name and signature for the test below.
-
-- [ ] **Step 2: Write the failing test**
-
-Create `tests/test_commands.py` (or append). Replace `<FORMAT_FN>` and its call signature with the actual function found in Step 1:
+Append to `tests/test_bot_commands.py` (it already imports from `estimator_king.bot.commands`):
 
 ```python
-from estimator_king.bot.commands import <FORMAT_FN>
+from estimator_king.bot.commands import format_estimates
 from estimator_king.llm.chat import EstimateBatch, ProductEstimate, PriceRange
 
 
 def test_floor_provenance_survives_rationale_truncation():
-    long_tail = "あ" * 400  # model rationale well over the 300-char cap
+    long_tail = "あ" * 400  # model rationale far over the 297-char cap
     est = ProductEstimate(
         product_name="ポーチ",
         suggested_price_jpy=3190,
         price_range_jpy=PriceRange(min=2420, max=4620),
         confidence="medium",
-        rationale="[anchor floor: ¥2200→¥3190 @p60, n=6] " + long_tail,
+        rationale="[anchor floor: ¥2200->¥3190 @p60, n=6] " + long_tail,
         reference_products=[],
     )
-    embeds = <FORMAT_FN>(EstimateBatch(estimates=[est]))
-    rendered = " ".join(e.description for e in embeds)
+    embeds = format_estimates(EstimateBatch(estimates=[est]))
+    rendered = " ".join(e.description or "" for e in embeds)
     assert "anchor floor" in rendered
 ```
 
-- [ ] **Step 3: Run test to verify it passes (prepend already places it in-window)**
+- [ ] **Step 2: Run test to verify it passes**
 
-Run: `.venv/bin/python -m pytest tests/test_commands.py -v -o addopts=""`
-Expected: PASS. (If it FAILS, the provenance was appended, not prepended — fix `_anchor_floor` in Task 3 to prepend.)
+Run: `.venv/bin/python -m pytest tests/test_bot_commands.py -k provenance -v -o addopts=""`
+Expected: PASS. (If FAIL, the provenance was appended not prepended — fix `_anchor_floor` in Task 3.)
 
-- [ ] **Step 4: Type check + lint**
+- [ ] **Step 3: Lint**
 
-Run: `.venv/bin/basedpyright tests/test_commands.py 2>/dev/null; uvx ruff check tests/test_commands.py`
-Expected: ruff clean. (Test-file pyright noise from duck-typed fakes is acceptable per repo convention.)
+Run: `uvx ruff check tests/test_bot_commands.py`
+Expected: ruff clean.
 
-- [ ] **Step 5: Commit (via git-master)**
+- [ ] **Step 4: Commit (via git-master)**
 
 ```bash
-git add tests/test_commands.py
+git add tests/test_bot_commands.py
 git commit -m "test(bot): assert anchor-floor provenance survives rationale truncation"
 ```
 
 ---
 
-### Task 6: eval_estimate.py applies the floor + fail-closed acceptance gate
+### Task 6: eval_estimate.py — one chat pass, paired baseline-vs-candidate, fail-closed gate
+
+The eval already self-excludes each fixture's own product. We add: (a) collect same-type prices in `build_context`; (b) `run_once` returns the **raw** model estimate + same-type prices per query (no floor, no snap) so floor-on vs floor-off are computed from the *same* chat output (paired, no extra API cost); (c) `main` computes a baseline (no floor) and a candidate (floor) metric bundle and runs a fail-closed acceptance gate on the full spec criteria.
 
 **Files:**
 - Modify: `scripts/analysis/eval_estimate.py`
 
-- [ ] **Step 1: Collect same-type prices in `build_context`**
+- [ ] **Step 1: build_context also returns same-type prices**
 
-In `scripts/analysis/eval_estimate.py`, `build_context` currently returns `(context_block, excluded_self_descriptions)`. Extend it to also return the same-type prices from the final `ranked` list (mirroring `experiment_anchor_floor.py`). After `ranked = est._rerank(list(merged.values()))[: est._top_k]`, add:
+After `ranked = est._rerank(list(merged.values()))[: est._top_k]`, add:
 
 ```python
     type_set = set(types)
@@ -763,97 +812,208 @@ In `scripts/analysis/eval_estimate.py`, `build_context` currently returns `(cont
     ]
 ```
 
-and change the return to `return f"### Query: {query}\n{refs or '(no matches)'}", list(selves.values()), same_type_prices`. Update the function's return type annotation to `tuple[str, list[str], list[int]]`.
+Change the return to `return f"### Query: {query}\n{refs or '(no matches)'}", list(selves.values()), same_type_prices` and the return type annotation to `tuple[str, list[str], list[int]]`.
 
-- [ ] **Step 2: Apply `_anchor_floor` in `run_once`**
+- [ ] **Step 2: run_once returns raw estimate + prices + official per query**
 
-In `run_once`, where it currently does `block, selves = build_context(...)`, change to capture prices, and after the chat returns each `est_obj`, apply the floor with the same config the production Estimator uses, before `_snap_estimate`. Concretely:
-
-- Import: add `_anchor_floor` to the existing `from estimator_king.bot.estimator import ...` line.
-- In the per-query build loop, capture `block, selves, stp = build_context(est, query, official)` and stash `stp` in a dict keyed by `normalize_text(query)`.
-- In the per-query result loop, replace `snapped = _snap_estimate(est_obj)` with:
+Add `_anchor_floor` to the existing `from estimator_king.bot.estimator import ...` import. Replace `run_once` so it returns, per query, the raw `ProductEstimate`, its same-type prices, and the official price — **without** snapping or flooring (those are applied per-policy in `main`):
 
 ```python
-                floored = _anchor_floor(query, est_obj,
-                                        stp_by_query.get(normalize_text(query), []),
-                                        config.estimator_anchor_floor)
-                snapped = _snap_estimate(floored)
+def run_once(est: Estimator) -> dict[str, tuple[Any, list[int], int]]:
+    """One chat pass. Returns {query: (raw_estimate, same_type_prices, official)}.
+    Floor and snap are applied later per policy so baseline/candidate are paired."""
+    out: dict[str, tuple[Any, list[int], int]] = {}
+    try:
+        for start in range(0, len(FIXTURES), est.CHUNK_SIZE):
+            chunk = FIXTURES[start:start + est.CHUNK_SIZE]
+            blocks: list[str] = []
+            stp: dict[str, list[int]] = {}
+            for query, official in chunk:
+                block, selves, prices = build_context(est, query, official)
+                blocks.append(block)
+                stp[query] = prices
+                tag = ", ".join(selves) if selves else "(none found)"
+                print(f"  self-excluded [{query}]: {tag}")
+            user_prompt = (
+                "Products to estimate (one per line):\n"
+                + "\n".join(q for q, _ in chunk)
+                + "\n\nReference context:\n"
+                + "\n\n".join(blocks)
+            )
+            batch = est._chat.estimate(SYSTEM_PROMPT, user_prompt)
+            by_name: dict[str, Any] = {}
+            for e in batch.estimates:
+                by_name.setdefault(normalize_text(e.product_name), e)
+            for query, official in chunk:
+                est_obj = by_name.get(normalize_text(query))
+                if est_obj is None:
+                    raise InvalidRun(f"chat returned no estimate for {query!r}")
+                out[query] = (est_obj, stp[query], official)
+        if len(out) != len(FIXTURES):
+            raise InvalidRun(f"aligned {len(out)} of {len(FIXTURES)} fixtures")
+    except InvalidRun:
+        raise
+    except Exception as exc:
+        raise InvalidRun(f"run failed: {exc}") from exc
+    return out
 ```
 
-where `config` is in scope from `main()` (pass it into `run_once`, or read `est`'s config). Since `run_once(est)` does not currently receive `config`, change its signature to `run_once(est, anchor_floor)` and pass `config.estimator_anchor_floor` from `main()`; use `anchor_floor` in the `_anchor_floor` call. This makes baseline (anchor_floor absent in config → None) vs candidate (config has the block) an explicit disabled-vs-enabled comparison.
+- [ ] **Step 3: main computes paired metrics + fail-closed gate**
 
-- [ ] **Step 3: Add the fail-closed acceptance gate**
-
-At the end of `main()`, after the SUMMARY block is printed, add an acceptance check that exits non-zero when criteria fail. Insert before the final provenance print (so provenance still shows on failure, then exit):
+Replace the metric/summary section of `main` with a per-policy computation. Add this helper above `main`:
 
 ```python
-    # Acceptance gate (only meaningful when anchor_floor is enabled in config).
-    if config.estimator_anchor_floor is not None:
-        mean_signed = statistics.mean(signed_vals) if signed_vals else 0.0
-        failures = []
-        # signed err magnitude must be materially better than the known ~-10% baseline.
-        if mean_signed <= -7.0:
-            failures.append(f"mean signed err {mean_signed:+.1f}% not improved (want > -7%)")
-        if failures:
+def _metrics(runs: list[dict[str, tuple[Any, list[int], int]]], cfg) -> dict[str, Any]:
+    """Apply (or skip) the floor per policy on the SAME chat outputs, then snap;
+    return aggregate metrics + the no-estimate set."""
+    per_abs: dict[str, list[float]] = {q: [] for q, _ in FIXTURES}
+    per_signed: dict[str, list[float]] = {q: [] for q, _ in FIXTURES}
+    covered: dict[str, int] = {q: 0 for q, _ in FIXTURES}
+    no_estimate: set[str] = set()
+    for run in runs:
+        for query, (est_obj, prices, official) in run.items():
+            if est_obj.suggested_price_jpy == 0:
+                no_estimate.add(query)
+            floored = _anchor_floor(query, est_obj, prices, cfg) if cfg else est_obj
+            snapped = _snap_estimate(floored)
+            p = snapped.suggested_price_jpy
+            per_abs[query].append(abs(p - official) / official * 100.0)
+            per_signed[query].append((p - official) / official * 100.0)
+            if snapped.price_range_jpy.min <= official <= snapped.price_range_jpy.max:
+                covered[query] += 1
+    majority = len(runs) // 2 + 1
+    est_qs = [q for q, _ in FIXTURES if q not in no_estimate]
+    abs_means = [statistics.mean(per_abs[q]) for q in est_qs]
+    signed_means = [statistics.mean(per_signed[q]) for q in est_qs]
+    return {
+        "mape": statistics.mean(abs_means) if abs_means else 0.0,
+        "signed": statistics.mean(signed_means) if signed_means else 0.0,
+        "coverage": sum(1 for q in est_qs if covered[q] >= majority),
+        "n_est": len(est_qs),
+        "no_estimate": no_estimate,
+    }
+```
+
+In `main`, after collecting `runs` (the `per_fixture` accumulation loop is replaced by `runs = [run_once(est) for _ in range(args.runs)]` inside the existing try/except InvalidRun), compute and print:
+
+```python
+    baseline = _metrics(runs, None)
+    cfg = config.estimator_anchor_floor
+    candidate = _metrics(runs, cfg) if cfg is not None else None
+
+    def _show(label, m):
+        print(f"\n========== {label} ==========")
+        print(f"  MAPE {m['mape']:.1f}%  signed {m['signed']:+.1f}%  "
+              f"coverage {m['coverage']}/{m['n_est']}  "
+              f"no-estimate {sorted(m['no_estimate'])}")
+
+    _show("BASELINE (floor disabled)", baseline)
+    if candidate is not None:
+        _show("CANDIDATE (floor enabled)", candidate)
+
+    # provenance (existing block) prints here, BEFORE any acceptance exit.
+    # ... keep the existing PROVENANCE print ...
+
+    if candidate is not None:
+        fails = []
+        if not (candidate["signed"] > baseline["signed"] + 1.0):
+            fails.append(f"signed not improved ({baseline['signed']:+.1f} -> {candidate['signed']:+.1f})")
+        if candidate["mape"] > baseline["mape"] + 2.0:
+            fails.append(f"MAPE worse ({baseline['mape']:.1f} -> {candidate['mape']:.1f}, > +2pp)")
+        if candidate["coverage"] < baseline["coverage"]:
+            fails.append(f"coverage dropped ({baseline['coverage']} -> {candidate['coverage']})")
+        if not candidate["no_estimate"].issubset(baseline["no_estimate"]):
+            fails.append("no-estimate set grew beyond baseline")
+        if fails:
             print("\n========== ACCEPTANCE: FAIL ==========", file=sys.stderr)
-            for f in failures:
+            for f in fails:
                 print(f"  - {f}", file=sys.stderr)
             sys.exit(3)
         print("\n========== ACCEPTANCE: PASS ==========")
 ```
 
-> NOTE: This gate runs the **enabled** config. The operator runs eval twice — once with `anchor_floor` absent (baseline numbers) and once present (candidate + gate) — and records both in the stage-2 commit (Task 9). The MAPE/coverage/no-estimate comparisons remain a human read of the two stdout blocks per the spec; the machine gate enforces the primary signed-error criterion fail-closed so a regressed candidate cannot exit 0.
+> Both runs are VALID by construction (a non-VALID run raises `InvalidRun` → exit 2 before this point). The gate exits non-zero (3) if the enabled candidate regresses on signed err, MAPE (+2pp), coverage, or the no-estimate subset. When `anchor_floor` is absent (baseline only), no gate runs — useful for recording the disabled baseline numbers.
 
-- [ ] **Step 4: Verify the script still type-checks, lints, and imports**
+- [ ] **Step 4: Type-check, lint, and a smoke import**
 
 Run: `.venv/bin/basedpyright scripts/analysis/eval_estimate.py && uvx ruff check scripts/analysis/eval_estimate.py`
-Expected: 0 errors in production code (`estimator_king/`); ruff clean. (basedpyright may emit `reportPrivateUsage` on `est._rerank` etc.; the file already carries `# pyright: reportPrivateUsage=false`.)
+Expected: 0 errors in production code (`estimator_king/`); ruff clean. (`# pyright: reportPrivateUsage=false` already heads the file.)
 
 - [ ] **Step 5: Commit (via git-master)**
 
 ```bash
 git add scripts/analysis/eval_estimate.py
-git commit -m "feat(eval): apply anchor floor and add fail-closed acceptance gate"
+git commit -m "feat(eval): paired baseline-vs-candidate floor metrics with fail-closed gate"
 ```
 
 ---
 
-### Task 7: experiment_anchor_floor.py reads config tiers + reports bucketed by ref count
+### Task 7: experiment_anchor_floor.py — candidate config from CLI, bucketed pass/fail
+
+The experiment is a **calibration** tool. It must run **candidate** values even while the shipped config has `anchor_floor` absent. So it builds an `AnchorFloorConfig` from CLI flags (defaults = spec starting values), applies the real `_anchor_floor` paired against no-floor, and reports metrics bucketed by same-type ref count with a pass/fail (powered AND not regressing).
 
 **Files:**
 - Modify: `scripts/analysis/experiment_anchor_floor.py`
 
-- [ ] **Step 1: Drive the floor from config, not the hard-coded sweep**
+- [ ] **Step 1: Build the candidate config from CLI args**
 
-In `scripts/analysis/experiment_anchor_floor.py`, replace the hard-coded `PREMIUM_KW` + single-percentile sweep machinery so it applies the real `_anchor_floor` with `config.estimator_anchor_floor`. Import `_anchor_floor` from `estimator_king.bot.estimator`. `build_context` already returns `same_type_prices`; keep that. For each fixture, compute the floored estimate via `_anchor_floor(query, est_obj, same_type_prices, config.estimator_anchor_floor)` then `_snap_estimate`.
-
-- [ ] **Step 2: Report metrics bucketed by same-type ref count**
-
-Add buckets `n<min_refs (skipped)`, `n in [min_refs, full_percentile_min_refs)`, `n in [full_percentile_min_refs, ...)`. For each bucket print: bucket label, **bucket N** (fixtures landing there), **skipped-by-min_refs count**, **floor-applied count**, mean signed err, MAPE, and a **pass/fail** marker (`floor-applied count >= 5` = powered). This output feeds the §5 stage-2 gate decision. Keep the per-fixture table for eyeballing.
+Replace the hard-coded `PREMIUM_KW`, `percentile`, `floor_at`, `apply_floor`, `PCTS`, `subset_metrics`, `is_premium`, `label` machinery with a CLI-driven candidate config and reuse of production `_anchor_floor`/`_snap_estimate`. Imports: `from estimator_king.bot.estimator import SYSTEM_PROMPT, Estimator, _snap_estimate, _anchor_floor`; `from estimator_king.config_schema import AnchorFloorConfig, AnchorTier`. Add argparse flags in `main`:
 
 ```python
-def bucket_of(n: int, cfg) -> str:
-    if cfg is None or n < cfg.min_refs:
+    parser.add_argument("--general", type=int, default=60)
+    parser.add_argument("--premium", type=int, default=70)
+    parser.add_argument("--premium-keywords", default="温感,もこもこ,あったか,なりきり")
+    parser.add_argument("--min-refs", type=int, default=3)
+    parser.add_argument("--full-min-refs", type=int, default=5)
+    parser.add_argument("--max-lift", type=float, default=1.6)
+```
+
+and build:
+
+```python
+    cand = AnchorFloorConfig(
+        general_percentile=args.general, min_refs=args.min_refs,
+        full_percentile_min_refs=args.full_min_refs, max_lift_ratio=args.max_lift,
+        premium_tiers=(AnchorTier(percentile=args.premium,
+                                  keywords=tuple(k for k in args.premium_keywords.split(",") if k)),),
+    )
+    cand.validate()
+```
+
+`build_context` already returns `same_type_prices` (keep it). `run_once` should return, per fixture, `(raw_estimate, same_type_prices, official)` — identical shape to Task 6's `run_once`; reuse that structure.
+
+- [ ] **Step 2: Bucket by ref count, report paired baseline-vs-candidate + pass/fail**
+
+Add:
+
+```python
+MIN_BUCKET_N = 5
+
+
+def bucket_of(n: int, cfg: AnchorFloorConfig) -> str:
+    if n < cfg.min_refs:
         return "skipped(<min_refs)"
     if n < cfg.full_percentile_min_refs:
         return f"small[{cfg.min_refs},{cfg.full_percentile_min_refs})"
     return f"full[>={cfg.full_percentile_min_refs}]"
 ```
 
-Accumulate per-bucket lists of (signed%, abs%, applied?) and print the summary described above. `MIN_BUCKET_N = 5`.
+In `main`, for each fixture across runs compute baseline (no floor) and candidate (floor) snapped prices from the same raw output, assign the fixture to a bucket by its same-type ref count, and accumulate per-bucket lists of `(baseline_signed, baseline_abs, cand_signed, cand_abs, applied_bool)`. Then print, per bucket: label, **bucket N**, **floor-applied count**, baseline vs candidate mean signed%/MAPE, and a **pass/fail**:
+- `skipped(...)` bucket: informational (floor never applies there).
+- active buckets (`small[...]`, `full[...]`): **PASS** iff `floor_applied_count >= MIN_BUCKET_N` (powered) AND `cand_signed` is closer to 0 than `baseline_signed` AND `cand_mape <= baseline_mape + 2.0` (not regressing); otherwise **FAIL** (underpowered or regressing → that bucket must not be opened to the aggressive percentile).
 
-- [ ] **Step 3: Verify type-check, lint, and a dry run**
+Keep a per-fixture table: query, official, ref-count `n`, bucket, baseline suggested, candidate suggested, and a marker (`lifted` / `clamped` / `skip:min_refs` / `skip:lift` / `unchanged`).
+
+- [ ] **Step 3: Type-check + lint**
 
 Run: `.venv/bin/basedpyright scripts/analysis/experiment_anchor_floor.py && uvx ruff check scripts/analysis/experiment_anchor_floor.py`
-Expected: 0 errors in production code; ruff clean.
-
-(A live run needs `.env` + chroma and chat API; it is run during stage-2 calibration, not in this task's verification.)
+Expected: 0 errors in production code; ruff clean. (A live run needs `.env` + chroma + chat; it runs during Task 9 calibration, not here.)
 
 - [ ] **Step 4: Commit (via git-master)**
 
 ```bash
 git add scripts/analysis/experiment_anchor_floor.py
-git commit -m "feat(analysis): drive anchor-floor experiment from config, report by ref-count bucket"
+git commit -m "feat(analysis): candidate-config CLI + bucketed pass/fail for anchor floor"
 ```
 
 ---
@@ -866,13 +1026,25 @@ git commit -m "feat(analysis): drive anchor-floor experiment from config, report
 - [ ] **Step 1: Locate the reconcile→snap region**
 
 Run: `grep -n "reconcile\|_snap_estimate\|snap_to_tax_grid\|chat-estimate" docs/data-pipeline.md`
-Expected: find the query-path stage covering reconcile + snap (stages 13–14 region).
+Expected: find the query-path stage covering reconcile + snap.
 
 - [ ] **Step 2: Insert the anchor-floor stage**
 
-Between the reconcile and snap stages, add a stage entry documenting `_anchor_floor` with: the controlling config key (`estimator.anchor_floor`), the function reference (`estimator_king/bot/estimator.py` `_anchor_floor`), and the mechanics — keyed by original query; NFKC+casefold keyword match; `min_refs` sparse no-op; `full_percentile_min_refs` small-sample median clamp; `effective_pct = max(general, matched tiers)`; `max_lift_ratio` outlier no-op; raise-only; range recomputed with confidence-based upward skew; rationale-prefixed provenance; その他/sentinel/None no-op; alignment length guard fail-closed. Match the existing doc's table/format (limit · config key · function · "why"). Note the two-stage rollout (disabled by default; enabled via config after the eval gate).
+Between reconcile and snap, add a stage documenting `_anchor_floor` (match the doc's existing format: limit/condition · config key · function `file:line` · "why"). Cover all mechanics:
+- controlling config key `estimator.anchor_floor` (floor **disabled** unless present; two-stage rollout — enabled via a separate config commit after the eval gate);
+- function `estimator_king/bot/estimator.py` `_anchor_floor`, applied in `estimate_products` between `_reconcile` and `_snap_estimate`, keyed by the **original query**;
+- keyword match via NFKC+casefold on both sides;
+- `min_refs` sparse no-op; `full_percentile_min_refs` small-sample median clamp; `effective_pct = max(general, matched tiers)`; `max_lift_ratio` outlier no-op; raise-only;
+- range recomputed with confidence-based upward skew; provenance **prepended** to rationale (survives the 297-char embed truncation);
+- **audit log**: `logger.info` on floor applied and on max_lift_ratio skip (query, original→floored, effective pct, ref count);
+- no-op on その他 (`classify_query == []` → empty same-type set), sentinel, cfg None; batch-level alignment length guard fail-closes (logs error, skips floor for the whole batch).
 
-- [ ] **Step 3: Commit (via git-master)**
+- [ ] **Step 3: Verify it landed**
+
+Run: `grep -n "anchor_floor\|anchor floor" docs/data-pipeline.md`
+Expected: the new stage appears in the reconcile→snap region.
+
+- [ ] **Step 4: Commit (via git-master)**
 
 ```bash
 git add docs/data-pipeline.md
@@ -883,22 +1055,17 @@ git commit -m "docs(data-pipeline): document anchor-floor post-processing stage"
 
 ### Task 9: Stage-2 enablement (separate commit, AFTER the eval gate passes)
 
-> **Do NOT do this in the implementation PR.** This is the second rollout stage. Run it only after Tasks 1–8 are merged and the calibration/eval gate passes. This task changes `stores_config.yaml` only.
+> **Do NOT do this in the implementation PR.** Second rollout stage; run only after Tasks 1–8 are merged. Changes `stores_config.yaml` only.
 
-- [ ] **Step 1: Run the calibration experiment**
+- [ ] **Step 1: Calibrate candidate values (config still disabled)**
 
-Run: `set -a; source .env; set +a; PYTHONPATH=. .venv/bin/python scripts/analysis/experiment_anchor_floor.py --runs 3`
-Inspect the per-bucket report. Confirm the `small[...]` and `full[...]` buckets that the chosen `general/premium/min_refs/full_percentile_min_refs` would activate are **powered** (floor-applied count ≥ 5) and not regressing. If a small bucket is empty/underpowered, raise `full_percentile_min_refs` (or `min_refs`) so those cases stay clamped/no-op.
+The experiment takes candidate values from CLI, so it works while `stores_config.yaml` has no `anchor_floor`:
+Run: `set -a; source .env; set +a; PYTHONPATH=. .venv/bin/python scripts/analysis/experiment_anchor_floor.py --runs 3 --general 60 --premium 70 --min-refs 3 --full-min-refs 5 --max-lift 1.6`
+Read the per-bucket report. Every **active** bucket (`small[...]`, `full[...]`) you intend to enable must be **PASS** (powered ≥5 AND not regressing). If a small bucket is FAIL (underpowered/regressing), raise `--full-min-refs` (keep those n clamped to median) or `--min-refs` (no-op) and re-run until active buckets pass. Record the final values.
 
-- [ ] **Step 2: Run the baseline (disabled) eval**
+- [ ] **Step 2: Add the config block with the calibrated values**
 
-With `anchor_floor` **absent** from `stores_config.yaml`:
-Run: `set -a; source .env; set +a; PYTHONPATH=. .venv/bin/python scripts/analysis/eval_estimate.py --runs 3 | tee /tmp/eval_baseline.txt`
-Record MAPE / mean signed err / coverage / no-estimate set.
-
-- [ ] **Step 3: Add the config block**
-
-Add to `stores_config.yaml` under `estimator:` (use the values confirmed in Step 1):
+Add to `stores_config.yaml` under `estimator:` (use the values confirmed in Step 1; example shows the spec starting values):
 
 ```yaml
   anchor_floor:
@@ -911,25 +1078,25 @@ Add to `stores_config.yaml` under `estimator:` (use the values confirmed in Step
         keywords: ["温感", "もこもこ", "あったか", "なりきり"]
 ```
 
-- [ ] **Step 4: Run the candidate (enabled) eval gate**
+- [ ] **Step 3: Run the eval acceptance gate (does baseline-vs-candidate internally)**
 
-Run: `set -a; source .env; set +a; PYTHONPATH=. .venv/bin/python scripts/analysis/eval_estimate.py --runs 3 | tee /tmp/eval_candidate.txt`
-Expected: exits 0 with `ACCEPTANCE: PASS`. Compare `/tmp/eval_candidate.txt` vs `/tmp/eval_baseline.txt`: signed err materially less negative; MAPE not worse beyond +2pp; coverage not worse; no-estimate a subset. If the gate exits non-zero, adjust percentiles and repeat — do **not** commit.
+Run: `set -a; source .env; set +a; PYTHONPATH=. .venv/bin/python scripts/analysis/eval_estimate.py --runs 3 | tee /tmp/eval_anchor.txt; echo "exit=$?"`
+Expected: prints BASELINE and CANDIDATE blocks and ends `ACCEPTANCE: PASS` with `exit=0`. The gate already enforces signed/MAPE/coverage/no-estimate fail-closed (Task 6), so a regressed candidate exits non-zero — **if it does not pass, revert the Step 2 edit, adjust values, and repeat; do not commit.**
 
-- [ ] **Step 5: Commit the enablement with evidence (via git-master)**
+- [ ] **Step 4: Commit the enablement with evidence (via git-master)**
 
 ```bash
 git add stores_config.yaml
-git commit  # message body: paste baseline-vs-candidate signed/MAPE/coverage/no-estimate numbers
+git commit  # body: paste the BASELINE vs CANDIDATE block from /tmp/eval_anchor.txt (signed/MAPE/coverage/no-estimate) + ACCEPTANCE: PASS
 ```
 
-Message summarizes: "feat(config): enable anchor_floor" + the before/after acceptance data proving the gate passed.
+Message: `feat(config): enable anchor_floor` + the recorded before/after acceptance data.
 
-- [ ] **Step 6: Restart the bot** to load the enabled config. Rollback at any time = remove the `anchor_floor` block + restart.
+- [ ] **Step 5: Restart the bot** to load the enabled config. Rollback at any time = remove the `anchor_floor` block + restart.
 
 ---
 
 ## Done criteria
 
 - Tasks 1–8 merged: code present, floor **disabled** (no `anchor_floor` in `stores_config.yaml`), full suite green, type-check + lint clean, docs synced.
-- Task 9 (separate commit): eval acceptance gate passed, config block added with recorded before/after data, bot restarted.
+- Task 9 (separate commit): experiment buckets PASS, `eval_estimate.py` exits 0 with `ACCEPTANCE: PASS`, config block added with recorded before/after data, bot restarted.
