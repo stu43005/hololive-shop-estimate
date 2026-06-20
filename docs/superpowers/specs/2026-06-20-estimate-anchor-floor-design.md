@@ -89,7 +89,7 @@ estimator:
 1. **取數基準**：同類 refs = 送進模型的 **top_k context 中 `item_type ∈ classify_query(query)` 且 `price_jpy > 0`** 的 ref 價格清單。這些是模型實際被 grounding 的同類比價。
 1b. **稀疏守門（必要前置）**：若同類 ref 數 `< cfg.min_refs`（含空清單）→ floor **no-op**，直接信任模型估價。理由：樣本太少時百分位不可靠，單一貴 ref（first-run / 罕見 type / `その他` 噪音）會被當權威把 suggested 硬抬、再圍它撐寬 range，把 retrieval 噪音變成不可逆上錨。
    - **不宣稱百分位本身免疫離群**：須明確認知在**小樣本邊界**（例如 `n == 3`）下，p70 仍幾乎由最高那筆 ref 決定，`min_refs` + 百分位**並不**保證避免單 ref 過錨。因此 `min_refs` 的安全值（與各百分位在小樣本下是否安全）**由分層校準實證決定，不由本 spec 斷言**（見 §5：校準須按同類 ref 數分桶回報，floor 僅在小樣本桶不退步時才上線）。
-   - **小樣本收斂槓桿（若校準顯示小桶過錨，採任一）**：提高 `min_refs`；或對 `n` 低於某門檻的樣本把 `effective_pct` 夾為 ≤ 50（退回 median，少受最高 ref 主導）。門檻與是否啟用由校準決定，非預先寫死。
+   - **小樣本收斂槓桿**：(1) **預設、in-scope**：提高 `min_refs`（既有 config 欄位即可，使欠證據的小樣本直接 no-op）。(2) **可選、需新增 config key 故預設不實作（YAGNI，校準證明提高 min_refs 太鈍才做）**：對 `n` 低於某門檻的樣本把 `effective_pct` 夾為 ≤ 50（median）；此 lever 一旦採用需在 `AnchorFloorConfig` 增 `small_sample_median_below: int`，列為後續迭代而非本輪預設路徑。
 2. **決定有效百分位**（同時 resolve「多組命中」）：
    ```
    effective_pct = max( general_percentile,
@@ -177,13 +177,18 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 - 關鍵字子字串可能誤命中（罕見）→ 由 config 清單控制，接受。
 - **rationale 文字微幅落後**：floor 抬高 suggested 後，`confidence` 與 `rationale` 文字未隨之改寫（仍描述上錨前的估價）。`confidence` 只被用來選 range 上偏帶不致誤導；rationale 為模型 prose，deterministic 改寫成本高且非本輪目標——列為接受殘差。可稽核性由 §3(f) audit log 提供（runtime 可分辨哪些估價被上錨、幅度多少），range 已由 §2 step 4 重算以維持覆蓋率（硬驗收條件），故此殘差僅影響 rationale 用語、不影響數值正確性與可稽核性。
 
-**eval 對齊（有效性關鍵）**：[eval_estimate.py](../../../scripts/analysis/eval_estimate.py) 的 `build_context` 比照 [experiment_anchor_floor.py](../../../scripts/analysis/experiment_anchor_floor.py) 多收集同類 ref 價格，並在 `run_once` 對每筆套用 `_anchor_floor`（用與 production 相同的 `config.estimator_anchor_floor`），否則 before/after 量到的不是上線行為。`experiment_anchor_floor.py` 改為：(1) 讀 config 的 `premium_tiers`/`min_refs`（取代寫死的 `PREMIUM_KW` 與單一百分位 sweep）；(2) **按同類 ref 數分桶回報指標**（如 `n=3–4 / 5–6 / 7+`），讓小樣本桶的過錨風險可見、供 §5 閘門判定。作為校準台。
+**eval 對齊（有效性關鍵）**：[eval_estimate.py](../../../scripts/analysis/eval_estimate.py) 的 `build_context` 比照 [experiment_anchor_floor.py](../../../scripts/analysis/experiment_anchor_floor.py) 多收集同類 ref 價格，並在 `run_once` 對每筆套用 `_anchor_floor`（用與 production 相同的 `config.estimator_anchor_floor`），否則 before/after 量到的不是上線行為。`experiment_anchor_floor.py` 改為：(1) 讀 config 的 `premium_tiers`/`min_refs`（取代寫死的 `PREMIUM_KW` 與單一百分位 sweep）；(2) **按同類 ref 數分桶回報**（如 `n=3–4 / 5–6 / 7+`），每桶輸出 §5 閘門所需欄位（bucket N、因 `min_refs` skip 數、floor 生效數、signed/MAPE、pass/fail），讓小樣本桶的過錨風險與**樣本是否足夠**可見、供 §5 fail-closed 閘門判定。作為校準台。
 
 ## §5 部署、回滾、校準、非目標
 
 - **部署/回滾**：改動為 config 段 + `estimator.py`/`config_schema.py` 程式。floor 由 `anchor_floor` config 段控制：刪掉該段 + 重啟 bot 即停用。**不動 retrieval / embedding / vector ID / SQLite schema → 切換前後 chroma/SQLite 完全相容，回滾不需 `rm -rf chroma/` 或 `--force-refetch`**（對照 CLAUDE.md「Re-index on indexing-model change」僅適用索引層改動）。
 - **校準（上線前必做）**：`general=60 / premium=70 / min_refs=3` 為**待驗起始點、非已證安全值**。以對齊後的 `experiment_anchor_floor.py`（讀 config 分層 + `min_refs` 守門 + **按同類 ref 數分桶回報**）確認：分層 signed err、稀疏守門對命中率/穩定度的影響、以及**小樣本桶（n 接近 `min_refs`）是否出現過錨**。再以 `eval_estimate.py --runs ≥ 3` 取 before/after，數據記入 PR / commit。
-- **稀疏守門閘門（上線條件）**：floor 僅在**小樣本桶不退步**時上線。若分層校準顯示小桶過錨（signed 翻正/MAPE 升），採 §2 step 1b 的收斂槓桿（提高 `min_refs`，或對小樣本將 `effective_pct` 夾為 ≤ 50）後重校，直到小桶不退步。`min_refs` 太高會讓 floor 鮮少生效（top_k=10 下許多 query 同類 ref 不多）、太低則放行噪音，由分桶數據定值。
+- **稀疏守門閘門（fail-closed，上線條件）**：「小桶不退步」必須以足夠樣本判定，否則空桶/欠樣會假性通過、放行它要防的風險。具體規則：
+  - **校準腳本每桶必出欄位**：bucket 範圍、bucket N（落入該桶的 fixture 數）、因 `min_refs` 被 skip 的數、floor 實際生效數、signed/MAPE、**該桶 pass/fail 判定**。
+  - **powered 桶定義**：該桶 **floor 生效數 ≥ `MIN_BUCKET_N`（取 5）** 才算「有證據」。
+  - **fail-closed**：任一**小樣本桶**（`n` 在 `[min_refs, min_refs+1]`）為**空或欠樣**（floor 生效數 `< MIN_BUCKET_N`）→ **視為未通過**，不得在該 ref-count 範圍套用激進百分位。此時採 §2 step 1b 的保守槓桿：**預設（in-scope）提高 `min_refs`** 使欠證據的小樣本變 no-op；median-clamp 為需新 config key 的 deferred 選項。即「無證據 → 退保守」，永不「無證據 → 套 p70」。
+  - 僅 **powered 且不退步** 的 ref-count 範圍才啟用 p60/p70；欠樣範圍維持保守，直到日後擴充 fixtures 取得證據再放開。
+  - `min_refs` 太高會讓 floor 鮮少生效（top_k=10 下許多 query 同類 ref 不多）、太低則放行噪音，最終值由上述分桶證據定。
 - **相對驗收準則**（延續第二輪精神，25 筆手標樣本上設絕對門檻無意義）：candidate 相對 baseline 同時滿足——
   - **mean signed err 絕對值實質下降**（本輪首要目標；預期由 ≈ −10% 收斂到 |signed| ≤ 約 3%）；
   - **MAPE 不顯著變差**（允許 ≤ baseline + 2pp 的抽樣雜訊；超過則回頭調百分位）；
