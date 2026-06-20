@@ -117,7 +117,7 @@ estimator:
 7. **哨兵保留**：`suggested_price_jpy == 0`（`_reconcile` 的 no-estimate 哨兵）→ floor **no-op**，不破壞哨兵語意。
 8. **cfg 為 None**（未設定 / 停用）→ floor **no-op**。
 
-關鍵字判定：對 query 與設定關鍵字**兩側都先做 NFKC 正規化再 casefold**（`unicodedata.normalize("NFKC", s).casefold()`），再做子字串包含。理由：生字串 `keyword in query` 依賴輸入恰好用設定的全形/半形/拼寫形式，等效寬度（全形/半形）、大小寫、相容字元變體會靜默退回 general percentile——正是溢價層要修的失敗模式（對抗審查 finding）。NFKC 統一全/半形與相容字元、casefold 處理大小寫，使常見變體仍命中。此為**專供 tier 比對的輕量正規化**，與 `normalize_text`（服務商品名去重、行為不同）分開定義，避免互相牽動。空白/特殊拼寫差異仍可能漏判 → 由 config 關鍵字清單涵蓋（必要時加別名），並由 §4 變體測試把關。
+關鍵字判定：對 query 與設定關鍵字**兩側都先做 NFKC 正規化再 casefold**（`unicodedata.normalize("NFKC", s).casefold()`），再做子字串包含。理由：生字串 `keyword in query` 依賴輸入恰好用設定的全形/半形/拼寫形式，等效寬度（全形/半形）、大小寫、相容字元變體會靜默退回 general percentile——正是溢價層要修的失敗模式（對抗審查 finding）。NFKC 統一全/半形與相容字元、casefold 處理大小寫，使常見變體仍命中。此為**專供 tier 比對的輕量正規化**，與 `normalize_text`（服務商品名去重、行為不同）分開定義，避免互相牽動。**NFKC 不轉換 script**：平假名 `もこもこ` 與片假名 `モコモコ` 互不折疊（半形片假名 `ﾓｺﾓｺ` 只折成片假名 `モコモコ`，不會變平假名），故若同義詞有平/片假名兩種寫法、或空白/特殊拼寫差異，須在 config 關鍵字清單各列（必要時加別名），並由 §4 變體測試把關。
 
 `_percentile(values, pct)`：純函式，線性內插（與 [experiment_anchor_floor.py](../../../scripts/analysis/experiment_anchor_floor.py) 的 `percentile` 同定義）。`pct` 為 0–100，內部轉 0–1。空清單回傳 `None`；單元素回傳該值。
 
@@ -182,7 +182,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
   - **`その他` no-op**：`classify_query` 回 `[]`（同類集合空）→ floor no-op，維持原估價（鎖死契約、防實作 drift）；
   - **小樣本安全夾**：ref 數在 `[min_refs, full_percentile_min_refs)` 時，即使命中 premium p70 或 general p60，`effective_pct` 仍被夾為 ≤ 50（用 median 算 floor）；ref 數 ≥ `full_percentile_min_refs` 才套完整 p60/p70（防 high finding 回歸，鎖死 runtime 不變式）；
   - **離群上限 no-op**：refs 含一個極端高價使 `floor_value > 原 suggested × max_lift_ratio` → floor **no-op**（suggested/range 不變）、發 skip audit log；floor_value 在倍率內 → 正常套用（鎖死 bounded-failure）；
-  - **關鍵字變體比對（NFKC + casefold）**：給溢價關鍵字的全形/半形變體（如半形 `ﾓｺﾓｺ` vs 全形 `もこもこ` 對應、含拉丁字大小寫 `Big`/`BIG`）的 query，驗證仍命中 premium tier；無關字串不誤命中（防 finding 2 回歸）；
+  - **關鍵字變體比對（NFKC + casefold）**：給「NFKC 確實統一」的變體 query，驗證仍命中 premium tier——半形片假名 `ﾓｺﾓｺ` 命中**片假名**關鍵字 `モコモコ`（NFKC 全/半形片假名統一）、全形拉丁 `ＢＩＧ` 命中 `big`（NFKC 全形拉丁→ASCII + casefold）；無關字串不誤命中（防 finding 2 回歸）。**注意**：平假名 `もこもこ` 與片假名 `モコモコ` 屬不同 script，NFKC **不**互轉，若兩種寫法都要命中須在 config 各列；
   - **audit log**：floor 生效時發 `logger.info` 含 query / 原→floored / effective_pct / floor_value / ref 數（可用 caplog 斷言生效時有記、no-op 時無記）；
   - **rationale provenance 前綴**：floor 生效 → `rationale` **開頭**含 provenance 註記（原→floored、effective_pct、ref 數）；floor no-op/skip → rationale 不變（防回歸）；
   - **provenance 抗截斷（formatter 測試）**：對一筆 rationale 長度 > 300 字、且已被 floor 前綴 provenance 的估價跑 `commands.py` 的格式化（300 字截斷），斷言 provenance 註記仍出現在輸出（前綴在 297 字視窗內、不被截掉；防 finding 回歸）；
