@@ -152,11 +152,12 @@ def test_anchor_floor_parsed(tmp_path, monkeypatch):
                 keywords: ["温感", "もこもこ"]
 """)
     af = cfg.estimator_anchor_floor
-    assert af is not None
+    assert isinstance(af, AnchorFloorConfig)
     assert af.general_percentile == 60
     assert af.min_refs == 3
     assert af.full_percentile_min_refs == 5
     assert af.max_lift_ratio == 1.6
+    assert isinstance(af.premium_tiers[0], AnchorTier)
     assert af.premium_tiers[0].percentile == 70
     assert af.premium_tiers[0].keywords == ("温感", "もこもこ")
 
@@ -180,6 +181,7 @@ def test_anchor_floor_defaults(tmp_path, monkeypatch):
     "anchor_floor:\n            general_percentile: 60\n            full_percentile_min_refs: 2",
     "anchor_floor:\n            general_percentile: 60\n            max_lift_ratio: 0.5",
     "anchor_floor:\n            general_percentile: 60\n            premium_tiers:\n              - percentile: 70\n                keywords: []",
+    "anchor_floor:\n            general_percentile: 60\n            premium_tiers:\n              - percentile: 70\n                keywords: 温感",  # scalar string, not a list
 ])
 def test_anchor_floor_validate_rejects(tmp_path, monkeypatch, block):
     with pytest.raises(ValueError):
@@ -208,6 +210,13 @@ def _req_num(name: str, value: object) -> float:
     return float(value)
 
 
+def _req_str_list(name: str, value: object) -> tuple[str, ...]:
+    if (not isinstance(value, list) or not value
+            or any(not isinstance(k, str) or not k for k in value)):
+        raise ValueError(f"anchor_floor.{name} must be a non-empty list of non-empty strings")
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class AnchorTier:
     """One premium anchor-floor tier: a percentile + the keywords that select it."""
@@ -216,6 +225,8 @@ class AnchorTier:
     keywords: tuple[str, ...]
 
     def validate(self):
+        if isinstance(self.percentile, bool) or not isinstance(self.percentile, int):
+            raise ValueError("anchor_floor tier percentile must be an integer")
         if not (0 <= self.percentile <= 100):
             raise ValueError("anchor_floor tier percentile must be 0-100")
         if not self.keywords or any(not isinstance(k, str) or not k for k in self.keywords):
@@ -235,6 +246,12 @@ class AnchorFloorConfig:
     premium_tiers: tuple[AnchorTier, ...] = ()
 
     def validate(self):
+        for name in ("general_percentile", "min_refs", "full_percentile_min_refs"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise ValueError(f"anchor_floor.{name} must be an integer")
+        if isinstance(self.max_lift_ratio, bool) or not isinstance(self.max_lift_ratio, (int, float)):
+            raise ValueError("anchor_floor.max_lift_ratio must be a number")
         if not (0 <= self.general_percentile <= 100):
             raise ValueError("anchor_floor.general_percentile must be 0-100")
         if self.min_refs < 1:
@@ -274,7 +291,7 @@ In `load_config`, after `est = yaml_data.get("estimator", {}) or {}` (line 290),
             premium_tiers=tuple(
                 AnchorTier(
                     percentile=_req_int("tier.percentile", t["percentile"]),
-                    keywords=tuple(t.get("keywords", []) or []),
+                    keywords=_req_str_list("tier.keywords", t.get("keywords", [])),
                 )
                 for t in (af.get("premium_tiers", []) or [])
             ),
@@ -346,7 +363,7 @@ _CFG = AnchorFloorConfig(
     general_percentile=60, min_refs=3, full_percentile_min_refs=5, max_lift_ratio=1.6,
     premium_tiers=(AnchorTier(percentile=70, keywords=("温感", "もこもこ")),),
 )
-_REFS5 = [2000, 2500, 3000, 3500, 4000]  # p60=3200, p70=3600, median=3000
+_REFS5 = [2000, 2500, 3000, 3500, 4000]  # linear: p50=3000, p60=3200, p70=3400
 
 
 def test_anchor_floor_no_op_when_cfg_none():
@@ -384,13 +401,13 @@ def test_anchor_floor_never_lowers():
 def test_anchor_floor_premium_uses_higher_tier():
     e = _est_full("温感マグカップ", 2200, 1800, 2900)
     out = _anchor_floor("温感マグカップ", e, _REFS5, _CFG)
-    assert out.suggested_price_jpy == 3600  # p70
+    assert out.suggested_price_jpy == 3400  # p70
 
 
 def test_anchor_floor_premium_keyed_on_query_not_product_name():
     e = _est_full("rewritten name", 2200, 1800, 2900)
     out = _anchor_floor("温感マグカップ", e, _REFS5, _CFG)
-    assert out.suggested_price_jpy == 3600
+    assert out.suggested_price_jpy == 3400
 
 
 def test_anchor_floor_multi_tier_takes_max():
@@ -400,7 +417,7 @@ def test_anchor_floor_multi_tier_takes_max():
                        AnchorTier(percentile=70, keywords=("もこもこ",))))
     e = _est_full("温感もこもこ", 2200, 1800, 2900)
     out = _anchor_floor("温感もこもこ", e, _REFS5, cfg)
-    assert out.suggested_price_jpy == 3600  # max(65,70)=70
+    assert out.suggested_price_jpy == 3400  # max(65,70)=70 -> p70
 
 
 def test_anchor_floor_keyword_nfkc_fullwidth_latin():
@@ -410,7 +427,7 @@ def test_anchor_floor_keyword_nfkc_fullwidth_latin():
         premium_tiers=(AnchorTier(percentile=70, keywords=("big",)),))
     e = _est_full("ＢＩＧぬいぐるみ", 2200, 1800, 2900)
     out = _anchor_floor("ＢＩＧぬいぐるみ", e, _REFS5, cfg)
-    assert out.suggested_price_jpy == 3600
+    assert out.suggested_price_jpy == 3400
 
 
 def test_anchor_floor_small_sample_clamped_to_median():
@@ -503,7 +520,7 @@ def _anchor_floor(query: str, est: ProductEstimate, same_type_prices: list[int],
     suggested = est.suggested_price_jpy
     if floor_int <= suggested:
         return est
-    if floor_int > round(suggested * cfg.max_lift_ratio):
+    if floor_value > round(suggested * cfg.max_lift_ratio):
         logger.info("anchor_floor skip lift>%.2f: %r %d->%d @p%d n=%d",
                     cfg.max_lift_ratio, query, suggested, floor_int, effective, n)
         return est
@@ -750,13 +767,9 @@ The provenance is **prepended** in `_anchor_floor` (Task 3), so it lands inside 
 
 - [ ] **Step 1: Write the test**
 
-Append to `tests/test_bot_commands.py` (it already imports from `estimator_king.bot.commands`):
+Append **only the function** to `tests/test_bot_commands.py`. It already imports `format_estimates` (from `estimator_king.bot.commands`) and `EstimateBatch`, `PriceRange`, `ProductEstimate` (from `estimator_king.llm.chat`) at the top — do **not** re-import them (ruff F811/F401 would fail):
 
 ```python
-from estimator_king.bot.commands import format_estimates
-from estimator_king.llm.chat import EstimateBatch, ProductEstimate, PriceRange
-
-
 def test_floor_provenance_survives_rationale_truncation():
     long_tail = "あ" * 400  # model rationale far over the 297-char cap
     est = ProductEstimate(
@@ -860,12 +873,12 @@ def run_once(est: Estimator) -> dict[str, tuple[Any, list[int], int]]:
 
 - [ ] **Step 3: main computes paired metrics + fail-closed gate**
 
-Replace the metric/summary section of `main` with a per-policy computation. Add this helper above `main`:
+Add this helper above `main`:
 
 ```python
 def _metrics(runs: list[dict[str, tuple[Any, list[int], int]]], cfg) -> dict[str, Any]:
     """Apply (or skip) the floor per policy on the SAME chat outputs, then snap;
-    return aggregate metrics + the no-estimate set."""
+    return aggregate metrics + the no-estimate set (raw suggested==0 in any run)."""
     per_abs: dict[str, list[float]] = {q: [] for q, _ in FIXTURES}
     per_signed: dict[str, list[float]] = {q: [] for q, _ in FIXTURES}
     covered: dict[str, int] = {q: 0 for q, _ in FIXTURES}
@@ -894,14 +907,23 @@ def _metrics(runs: list[dict[str, tuple[Any, list[int], int]]], cfg) -> dict[str
     }
 ```
 
-In `main`, after collecting `runs` (the `per_fixture` accumulation loop is replaced by `runs = [run_once(est) for _ in range(args.runs)]` inside the existing try/except InvalidRun), compute and print:
+Then **replace the entire body of `main` after the `Estimator(...)` is constructed** (i.e. remove the old `per_fixture` accumulation loop, the PER-FIXTURE table, the old SUMMARY block, and the no-estimate computation — keep only the argparse + `load_config` + `build_providers` + `Estimator(...)` setup) with:
 
 ```python
+    runs: list[dict[str, tuple[Any, list[int], int]]] = []
+    try:
+        for r in range(args.runs):
+            print(f"\n===== run {r + 1}/{args.runs} =====")
+            runs.append(run_once(est))
+    except InvalidRun as exc:
+        print(f"\nINVALID run: {exc}; not reporting.", file=sys.stderr)
+        sys.exit(2)
+
     baseline = _metrics(runs, None)
     cfg = config.estimator_anchor_floor
     candidate = _metrics(runs, cfg) if cfg is not None else None
 
-    def _show(label, m):
+    def _show(label: str, m: dict[str, Any]) -> None:
         print(f"\n========== {label} ==========")
         print(f"  MAPE {m['mape']:.1f}%  signed {m['signed']:+.1f}%  "
               f"coverage {m['coverage']}/{m['n_est']}  "
@@ -911,13 +933,20 @@ In `main`, after collecting `runs` (the `per_fixture` accumulation loop is repla
     if candidate is not None:
         _show("CANDIDATE (floor enabled)", candidate)
 
-    # provenance (existing block) prints here, BEFORE any acceptance exit.
-    # ... keep the existing PROVENANCE print ...
+    prompt_hash = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:8]
+    print("\n========== PROVENANCE ==========")
+    print(f"  prompt_hash: {prompt_hash}")
+    print(f"  git_commit: {_git(['rev-parse', '--short', 'HEAD'])}   "
+          f"dirty: {bool(_git(['status', '--porcelain']))}")
+    print(f"  embedding_model: {config.embedding_model}   chat_model: {config.chat_model}")
+    print(f"  fixtures: {len(FIXTURES)}   runs: {args.runs}   "
+          f"anchor_floor: {'on' if cfg is not None else 'off'}")
 
     if candidate is not None:
         fails = []
-        if not (candidate["signed"] > baseline["signed"] + 1.0):
-            fails.append(f"signed not improved ({baseline['signed']:+.1f} -> {candidate['signed']:+.1f})")
+        # spec: |signed| must substantially decrease (handles over-correction either sign).
+        if abs(candidate["signed"]) > abs(baseline["signed"]) - 1.0:
+            fails.append(f"|signed| not improved ({baseline['signed']:+.1f} -> {candidate['signed']:+.1f})")
         if candidate["mape"] > baseline["mape"] + 2.0:
             fails.append(f"MAPE worse ({baseline['mape']:.1f} -> {candidate['mape']:.1f}, > +2pp)")
         if candidate["coverage"] < baseline["coverage"]:
@@ -932,9 +961,11 @@ In `main`, after collecting `runs` (the `per_fixture` accumulation loop is repla
         print("\n========== ACCEPTANCE: PASS ==========")
 ```
 
-> Both runs are VALID by construction (a non-VALID run raises `InvalidRun` → exit 2 before this point). The gate exits non-zero (3) if the enabled candidate regresses on signed err, MAPE (+2pp), coverage, or the no-estimate subset. When `anchor_floor` is absent (baseline only), no gate runs — useful for recording the disabled baseline numbers.
+(Keep the module's existing helpers `_git`, `InvalidRun`, `build_context`, and the imports of `hashlib`/`statistics`/`sys`. The PER-FIXTURE per-query table is dropped in favor of the BASELINE/CANDIDATE summary; that is intentional.)
 
-- [ ] **Step 4: Type-check, lint, and a smoke import**
+> The gate is **abs-based**: `|signed|` must drop by at least 1pp (so over-correcting to a large positive bias also fails), MAPE must not worsen beyond +2pp, coverage must not drop, and the no-estimate set must stay a subset. Both runs are VALID by construction (`InvalidRun` → exit 2 earlier). When `anchor_floor` is absent, only BASELINE prints and no gate runs (used to record disabled baseline numbers).
+
+- [ ] **Step 4: Type-check + lint**
 
 Run: `.venv/bin/basedpyright scripts/analysis/eval_estimate.py && uvx ruff check scripts/analysis/eval_estimate.py`
 Expected: 0 errors in production code (`estimator_king/`); ruff clean. (`# pyright: reportPrivateUsage=false` already heads the file.)
@@ -948,72 +979,191 @@ git commit -m "feat(eval): paired baseline-vs-candidate floor metrics with fail-
 
 ---
 
-### Task 7: experiment_anchor_floor.py — candidate config from CLI, bucketed pass/fail
+### Task 7: experiment_anchor_floor.py — candidate config (multi-tier) + ref-count bands
 
-The experiment is a **calibration** tool. It must run **candidate** values even while the shipped config has `anchor_floor` absent. So it builds an `AnchorFloorConfig` from CLI flags (defaults = spec starting values), applies the real `_anchor_floor` paired against no-floor, and reports metrics bucketed by same-type ref count with a pass/fail (powered AND not regressing).
+The experiment is a **calibration** tool. It must test **candidate** values while the shipped config has `anchor_floor` absent. It loads a candidate `AnchorFloorConfig` either from a YAML file (arbitrary multi-tier, via the same `load_config` parser) or from CLI flags (single tier, defaults = spec starting values), reuses `eval_estimate.run_once` (one chat pass) and the production `_anchor_floor`, and reports paired baseline-vs-candidate metrics **per same-type ref count** with a powered/non-regressing pass/fail.
 
 **Files:**
-- Modify: `scripts/analysis/experiment_anchor_floor.py`
+- Rewrite: `scripts/analysis/experiment_anchor_floor.py` (replace the whole file body below the module docstring + `# pyright: reportPrivateUsage=false` header)
 
-- [ ] **Step 1: Build the candidate config from CLI args**
+- [ ] **Step 1: Replace the script body with the candidate-config + banded reporter**
 
-Replace the hard-coded `PREMIUM_KW`, `percentile`, `floor_at`, `apply_floor`, `PCTS`, `subset_metrics`, `is_premium`, `label` machinery with a CLI-driven candidate config and reuse of production `_anchor_floor`/`_snap_estimate`. Imports: `from estimator_king.bot.estimator import SYSTEM_PROMPT, Estimator, _snap_estimate, _anchor_floor`; `from estimator_king.config_schema import AnchorFloorConfig, AnchorTier`. Add argparse flags in `main`:
+Replace everything after the file's docstring/header with this complete implementation (it deletes the old `PREMIUM_KW`, `percentile`, `floor_at`, `apply_floor`, `PCTS`, `subset_metrics`, `is_premium`, `label`, `build_context`, `run_once` machinery and reuses `eval_estimate`):
 
 ```python
+from __future__ import annotations
+
+import argparse
+import statistics
+import sys
+from typing import Any
+
+from estimator_king.bot.estimator import _anchor_floor, _snap_estimate
+from estimator_king.config_schema import (
+    AnchorFloorConfig, AnchorTier, load_config,
+)
+from estimator_king.runtime import build_providers
+from scripts.analysis.eval_estimate import FIXTURES, InvalidRun, run_once
+
+MIN_BUCKET_N = 5
+
+
+def _candidate_from_cli(args: argparse.Namespace) -> AnchorFloorConfig:
+    if args.candidate_config:
+        cfg = load_config(args.candidate_config).estimator_anchor_floor
+        if cfg is None:
+            raise SystemExit(f"{args.candidate_config} has no estimator.anchor_floor block")
+        return cfg
+    cfg = AnchorFloorConfig(
+        general_percentile=args.general, min_refs=args.min_refs,
+        full_percentile_min_refs=args.full_min_refs, max_lift_ratio=args.max_lift,
+        premium_tiers=(AnchorTier(
+            percentile=args.premium,
+            keywords=tuple(k for k in args.premium_keywords.split(",") if k)),),
+    )
+    cfg.validate()
+    return cfg
+
+
+def _suggested(query: str, est_obj: Any, prices: list[int],
+               cfg: AnchorFloorConfig | None) -> tuple[int, bool]:
+    """Return (snapped suggested, floor_applied) for one fixture under a policy."""
+    floored = _anchor_floor(query, est_obj, prices, cfg) if cfg else est_obj
+    return _snap_estimate(floored).suggested_price_jpy, (floored is not est_obj)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Anchor-floor calibration by ref-count band.")
+    parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--candidate-config",
+                        help="YAML file with estimator.anchor_floor (multi-tier); "
+                             "overrides the single-tier CLI flags below")
     parser.add_argument("--general", type=int, default=60)
     parser.add_argument("--premium", type=int, default=70)
     parser.add_argument("--premium-keywords", default="温感,もこもこ,あったか,なりきり")
     parser.add_argument("--min-refs", type=int, default=3)
     parser.add_argument("--full-min-refs", type=int, default=5)
     parser.add_argument("--max-lift", type=float, default=1.6)
-```
+    args = parser.parse_args()
+    if args.runs < 1:
+        parser.error("--runs must be >= 1")
 
-and build:
-
-```python
-    cand = AnchorFloorConfig(
-        general_percentile=args.general, min_refs=args.min_refs,
-        full_percentile_min_refs=args.full_min_refs, max_lift_ratio=args.max_lift,
-        premium_tiers=(AnchorTier(percentile=args.premium,
-                                  keywords=tuple(k for k in args.premium_keywords.split(",") if k)),),
+    cfg = _candidate_from_cli(args)
+    config = load_config()
+    providers = build_providers(config, with_chat=True)
+    assert providers.chat is not None, "needs chat; check chat_api_key in .env"
+    from estimator_king.bot.estimator import Estimator
+    est = Estimator(
+        providers.embedder, providers.chat, providers.vector_store,
+        providers.typing_provider,
+        item_types=config.item_types, item_types_version=config.item_types_version,
+        top_k=config.estimator_top_k, recency_weight=config.estimator_recency_weight,
+        diversity_weight=config.estimator_diversity_weight,
+        fetch_multiplier=config.estimator_fetch_multiplier,
     )
-    cand.validate()
+
+    try:
+        runs = [run_once(est) for _ in range(args.runs)]
+    except InvalidRun as exc:
+        print(f"INVALID run: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    # Per fixture, paired baseline vs candidate from the same chat output.
+    # rows[query] = (n, base_signed_mean, base_abs_mean, cand_signed_mean,
+    #                cand_abs_mean, applied_any, base_sugg, cand_sugg)
+    rows: dict[str, tuple[Any, ...]] = {}
+    for query, official in FIXTURES:
+        n = len(runs[0][query][1]) if query in runs[0] else 0
+        b_signed, b_abs, c_signed, c_abs = [], [], [], []
+        applied_any = False
+        last_base = last_cand = 0
+        for run in runs:
+            est_obj, prices, off = run[query]
+            n = len(prices)
+            if est_obj.suggested_price_jpy == 0:
+                continue
+            bs, _ = _suggested(query, est_obj, prices, None)
+            cs, applied = _suggested(query, est_obj, prices, cfg)
+            applied_any = applied_any or applied
+            last_base, last_cand = bs, cs
+            b_signed.append((bs - off) / off * 100.0)
+            b_abs.append(abs(bs - off) / off * 100.0)
+            c_signed.append((cs - off) / off * 100.0)
+            c_abs.append(abs(cs - off) / off * 100.0)
+        if not b_signed:  # sentinel / no-estimate in every run
+            rows[query] = (n, None, None, None, None, False, 0, 0)
+            continue
+        rows[query] = (n, statistics.mean(b_signed), statistics.mean(b_abs),
+                       statistics.mean(c_signed), statistics.mean(c_abs),
+                       applied_any, last_base, last_cand)
+
+    # Per-fixture table.
+    print(f"\n========== PER-FIXTURE (candidate vs baseline) ==========")
+    print(f"  {'query':<34} {'n':>2} {'base':>6} {'cand':>6} marker")
+    skipped_min_refs = 0
+    for query, _ in FIXTURES:
+        n, _bs, _ba, _cs, _ca, applied, base_s, cand_s = rows[query]
+        if _bs is None:
+            marker = "sentinel"
+        elif n < cfg.min_refs:
+            marker = "skip:min_refs"; skipped_min_refs += 1
+        elif applied:
+            marker = "clamped" if n < cfg.full_percentile_min_refs else "lifted"
+        else:
+            marker = "no-lift"  # floor <= suggested, or capped by max_lift_ratio
+        print(f"  {query[:34]:<34} {n:>2} {base_s:>6} {cand_s:>6} {marker}")
+
+    # Bands by exact same-type ref count (fine-grained so each small-n bucket is visible).
+    bands: dict[int, list[tuple[float, float, float, float, bool]]] = {}
+    for query, _ in FIXTURES:
+        n, bs, ba, cs, ca, applied, *_ = rows[query]
+        if bs is None:
+            continue
+        bands.setdefault(n, []).append((bs, ba, cs, ca, applied))
+
+    print(f"\n========== BANDS by same-type ref count (MIN_BUCKET_N={MIN_BUCKET_N}) ==========")
+    print(f"  skipped by min_refs (n<{cfg.min_refs}): {skipped_min_refs} fixtures")
+    print(f"  {'n':>3} {'N':>3} {'applied':>7} {'baseSgn':>8} {'candSgn':>8} "
+          f"{'baseMAPE':>8} {'candMAPE':>8} {'region':>7} {'verdict':>9}")
+    for n in sorted(bands):
+        rs = bands[n]
+        N = len(rs)
+        applied_n = sum(1 for r in rs if r[4])
+        b_sgn = statistics.mean(r[0] for r in rs)
+        c_sgn = statistics.mean(r[2] for r in rs)
+        b_mape = statistics.mean(r[1] for r in rs)
+        c_mape = statistics.mean(r[3] for r in rs)
+        if n < cfg.min_refs:
+            region, verdict = "skip", "n/a"
+        else:
+            region = "clamp" if n < cfg.full_percentile_min_refs else "full"
+            powered = applied_n >= MIN_BUCKET_N
+            not_regressing = abs(c_sgn) <= abs(b_sgn) + 1.0 and c_mape <= b_mape + 2.0
+            verdict = "PASS" if (powered and not_regressing) else (
+                "underpow" if not powered else "REGRESS")
+        print(f"  {n:>3} {N:>3} {applied_n:>7} {b_sgn:>+7.1f}% {c_sgn:>+7.1f}% "
+              f"{b_mape:>7.1f}% {c_mape:>7.1f}% {region:>7} {verdict:>9}")
+
+    print("\nREAD: only open the aggressive percentile to a ref-count band whose verdict is")
+    print("PASS (>= MIN_BUCKET_N floor-applied AND |signed| not worse AND MAPE within +2pp).")
+    print("An 'underpow'/'REGRESS' band must stay clamped (raise full_percentile_min_refs)")
+    print("or no-op (raise min_refs).")
+
+
+if __name__ == "__main__":
+    main()
 ```
 
-`build_context` already returns `same_type_prices` (keep it). `run_once` should return, per fixture, `(raw_estimate, same_type_prices, official)` — identical shape to Task 6's `run_once`; reuse that structure.
-
-- [ ] **Step 2: Bucket by ref count, report paired baseline-vs-candidate + pass/fail**
-
-Add:
-
-```python
-MIN_BUCKET_N = 5
-
-
-def bucket_of(n: int, cfg: AnchorFloorConfig) -> str:
-    if n < cfg.min_refs:
-        return "skipped(<min_refs)"
-    if n < cfg.full_percentile_min_refs:
-        return f"small[{cfg.min_refs},{cfg.full_percentile_min_refs})"
-    return f"full[>={cfg.full_percentile_min_refs}]"
-```
-
-In `main`, for each fixture across runs compute baseline (no floor) and candidate (floor) snapped prices from the same raw output, assign the fixture to a bucket by its same-type ref count, and accumulate per-bucket lists of `(baseline_signed, baseline_abs, cand_signed, cand_abs, applied_bool)`. Then print, per bucket: label, **bucket N**, **floor-applied count**, baseline vs candidate mean signed%/MAPE, and a **pass/fail**:
-- `skipped(...)` bucket: informational (floor never applies there).
-- active buckets (`small[...]`, `full[...]`): **PASS** iff `floor_applied_count >= MIN_BUCKET_N` (powered) AND `cand_signed` is closer to 0 than `baseline_signed` AND `cand_mape <= baseline_mape + 2.0` (not regressing); otherwise **FAIL** (underpowered or regressing → that bucket must not be opened to the aggressive percentile).
-
-Keep a per-fixture table: query, official, ref-count `n`, bucket, baseline suggested, candidate suggested, and a marker (`lifted` / `clamped` / `skip:min_refs` / `skip:lift` / `unchanged`).
-
-- [ ] **Step 3: Type-check + lint**
+- [ ] **Step 2: Type-check + lint**
 
 Run: `.venv/bin/basedpyright scripts/analysis/experiment_anchor_floor.py && uvx ruff check scripts/analysis/experiment_anchor_floor.py`
-Expected: 0 errors in production code; ruff clean. (A live run needs `.env` + chroma + chat; it runs during Task 9 calibration, not here.)
+Expected: 0 errors in production code; ruff clean. (Live run needs `.env` + chroma + chat; it runs during Task 9 calibration, not here. If `eval_estimate.py` keeps its `# pyright: reportPrivateUsage=false` header, mirror it here since this file also touches `est._*` via the reused `run_once`.)
 
-- [ ] **Step 4: Commit (via git-master)**
+- [ ] **Step 3: Commit (via git-master)**
 
 ```bash
 git add scripts/analysis/experiment_anchor_floor.py
-git commit -m "feat(analysis): candidate-config CLI + bucketed pass/fail for anchor floor"
+git commit -m "feat(analysis): candidate-config calibration with per-ref-count bands"
 ```
 
 ---
@@ -1033,11 +1183,13 @@ Expected: find the query-path stage covering reconcile + snap.
 Between reconcile and snap, add a stage documenting `_anchor_floor` (match the doc's existing format: limit/condition · config key · function `file:line` · "why"). Cover all mechanics:
 - controlling config key `estimator.anchor_floor` (floor **disabled** unless present; two-stage rollout — enabled via a separate config commit after the eval gate);
 - function `estimator_king/bot/estimator.py` `_anchor_floor`, applied in `estimate_products` between `_reconcile` and `_snap_estimate`, keyed by the **original query**;
+- **the floor value = a percentile (`effective_pct`) of the same-type top_k reference prices** (the refs the model was grounded on — `item_type ∈ classify_query(query)`, `price_jpy > 0`), lifting `suggested` to it;
 - keyword match via NFKC+casefold on both sides;
 - `min_refs` sparse no-op; `full_percentile_min_refs` small-sample median clamp; `effective_pct = max(general, matched tiers)`; `max_lift_ratio` outlier no-op; raise-only;
 - range recomputed with confidence-based upward skew; provenance **prepended** to rationale (survives the 297-char embed truncation);
 - **audit log**: `logger.info` on floor applied and on max_lift_ratio skip (query, original→floored, effective pct, ref count);
-- no-op on その他 (`classify_query == []` → empty same-type set), sentinel, cfg None; batch-level alignment length guard fail-closes (logs error, skips floor for the whole batch).
+- no-op on その他 (`classify_query == []` → empty same-type set), sentinel, cfg None; batch-level alignment length guard fail-closes (logs error, skips floor for the whole batch);
+- **設計理由 (why)**: prompt-level anchoring failed to move the directional bias on gpt-5.4-mini (two rounds, signed err stuck ~−10%), so this deterministic post-processing hardens it; the floor is **tiered** because the calibrated optimal percentile for ordinary items (~p60) and premium items (~p70) differ by roughly 10pp.
 
 - [ ] **Step 3: Verify it landed**
 
@@ -1059,9 +1211,9 @@ git commit -m "docs(data-pipeline): document anchor-floor post-processing stage"
 
 - [ ] **Step 1: Calibrate candidate values (config still disabled)**
 
-The experiment takes candidate values from CLI, so it works while `stores_config.yaml` has no `anchor_floor`:
+The experiment takes candidate values from CLI (single tier) or `--candidate-config <yaml>` (arbitrary multi-tier), so it works while `stores_config.yaml` has no `anchor_floor`:
 Run: `set -a; source .env; set +a; PYTHONPATH=. .venv/bin/python scripts/analysis/experiment_anchor_floor.py --runs 3 --general 60 --premium 70 --min-refs 3 --full-min-refs 5 --max-lift 1.6`
-Read the per-bucket report. Every **active** bucket (`small[...]`, `full[...]`) you intend to enable must be **PASS** (powered ≥5 AND not regressing). If a small bucket is FAIL (underpowered/regressing), raise `--full-min-refs` (keep those n clamped to median) or `--min-refs` (no-op) and re-run until active buckets pass. Record the final values.
+Read the **BANDS by same-type ref count** table. The `region` column shows `clamp` (n in `[min_refs, full_percentile_min_refs)`, forced to median) vs `full` (n ≥ `full_percentile_min_refs`, gets the configured percentile). Every band you are **opening to the aggressive percentile** — i.e. every `full` band, plus any band you would move from `clamp` to `full` by lowering `--full-min-refs` — must read `verdict = PASS` (≥ `MIN_BUCKET_N` floor-applied AND `|signed|` not worse AND MAPE within +2pp). If a band reads `underpow` or `REGRESS`, do **not** open it: raise `--full-min-refs` (keep those n clamped to median) or `--min-refs` (no-op). Re-run until every opened band is PASS. Record the final values for Step 2.
 
 - [ ] **Step 2: Add the config block with the calibrated values**
 
@@ -1080,8 +1232,9 @@ Add to `stores_config.yaml` under `estimator:` (use the values confirmed in Step
 
 - [ ] **Step 3: Run the eval acceptance gate (does baseline-vs-candidate internally)**
 
-Run: `set -a; source .env; set +a; PYTHONPATH=. .venv/bin/python scripts/analysis/eval_estimate.py --runs 3 | tee /tmp/eval_anchor.txt; echo "exit=$?"`
-Expected: prints BASELINE and CANDIDATE blocks and ends `ACCEPTANCE: PASS` with `exit=0`. The gate already enforces signed/MAPE/coverage/no-estimate fail-closed (Task 6), so a regressed candidate exits non-zero — **if it does not pass, revert the Step 2 edit, adjust values, and repeat; do not commit.**
+Run: `set -a; source .env; set +a; PYTHONPATH=. set -o pipefail; .venv/bin/python scripts/analysis/eval_estimate.py --runs 3 2>&1 | tee /tmp/eval_anchor.txt; echo "exit=${PIPESTATUS[0]}"`
+(`${PIPESTATUS[0]}` reports the eval process status, not `tee`'s — `| tee` would otherwise always report 0.)
+Expected: prints BASELINE and CANDIDATE blocks and ends `ACCEPTANCE: PASS` with `exit=0`. The gate already enforces |signed|/MAPE/coverage/no-estimate fail-closed (Task 6), so a regressed candidate exits non-zero — **if `exit` is not 0, revert the Step 2 edit, adjust values, and repeat; do not commit.**
 
 - [ ] **Step 4: Commit the enablement with evidence (via git-master)**
 
