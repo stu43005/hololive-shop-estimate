@@ -82,7 +82,7 @@ estimator:
 - **離群/上限守門** = `max_lift_ratio`（float ≥ 1.0，預設 1.6）：即使樣本足夠，corrupted/誤分類/包款等不可比的高價 ref 仍可能主導 top_k≤10 的 p60/p70。若 `floor_value > round(原 suggested × max_lift_ratio)`（floor 想把價格抬高超過該倍率）→ floor **no-op + audit log**（視為模型與 refs 嚴重不一致、不可信，退回信任模型）。因 floor 只抬不壓，此倍率上限把**單一壞 ref 造成的 user-visible 過估**限縮為「至多不發生」，是有界失敗（bounded-failure）保證。倍率由校準定（太低會擋掉合法大幅修正、太高失去守門意義）。
 - **清單** = `premium_tiers`，每組 = `{percentile: int, keywords: list[str]}`，可任意多組、各設不同旋鈕與不同關鍵字。
 - 關鍵字清單**完全在 config**，程式不寫死。
-- 整段 `anchor_floor` 省略（或缺）→ floor **關閉**（向後相容；回滾 = 刪掉這段）。
+- **實作時直接把上方整段 `anchor_floor` 加入 [stores_config.yaml](../../../stores_config.yaml)**（用起始值啟用 floor）。程式端**維持「省略此段 → floor 關閉」規則**（向後相容；回滾 = 刪掉這段 + 重啟）。即：shipped config 啟用、但「absent → disabled」契約不變，停用/回滾只需移除該段。
 - 百分位採 0–100 整數（`p60` 寫 `60`），與「百分位」語意一致；不與 `recency_weight`（0–1 weight）強求格式一致，因兩者語意不同。
 - 起始值 `general=60 / premium=70 / min_refs=3` 取自 sweep 與稀疏守門考量，上線前再校準（見 §5）。
 
@@ -112,8 +112,8 @@ estimator:
    - `new_min = min(原 min, round(new_suggested × (1 − down)))`
    - `new_max = max(原 max, round(new_suggested × (1 + up)))`
    floor 未生效（`new_suggested == 原 suggested`）→ range 不動。如此抬高後 suggested 不會貼在區間上緣，保留上方 headroom，覆蓋率不因上錨而退步。
-5. **不就地修改**：以 `model_copy(update={...})` 產生新物件（更新 `suggested_price_jpy`，floor 生效時一併更新 `price_range_jpy`）。最終既有的 `_snap_estimate` 仍負責格點正規化與 `min ≤ suggested ≤ max` 收尾。
-6. **confidence / rationale 不改寫**：floor 是 deterministic 上錨，`confidence` 僅用於選 range 上偏帶；rationale 文字維持模型原輸出（可能微幅落後於上錨後的 suggested）——屬接受的次要殘差（見 §4），不在本輪重寫。
+5. **不就地修改**：以 `model_copy(update={...})` 產生新物件（更新 `suggested_price_jpy`，floor 生效時一併更新 `price_range_jpy` 與 `rationale`）。最終既有的 `_snap_estimate` 仍負責格點正規化與 `min ≤ suggested ≤ max` 收尾。
+6. **rationale 附加 provenance（持久化稽核）**：floor 生效時，在 `rationale` **尾端附加**一行 deterministic 註記（如 `[anchor floor: ¥2750→¥3410 @p60, n=6]`，記原→floored、effective_pct、同類 ref 數）。因估價唯一持久化的成品是 Discord embed，把 provenance 寫進 rationale 使**該成品自帶稽核資訊**（不依賴 log 留存），同時化解「rationale 用語落後於上錨後價格」的殘差。`confidence` 不改（僅用於選 range 上偏帶）；未生效/skip 不附加。此為文字附加、非重寫模型 prose。
 7. **哨兵保留**：`suggested_price_jpy == 0`（`_reconcile` 的 no-estimate 哨兵）→ floor **no-op**，不破壞哨兵語意。
 8. **cfg 為 None**（未設定 / 停用）→ floor **no-op**。
 
@@ -135,21 +135,20 @@ _anchor_floor(query: str, est: ProductEstimate, same_type_prices: list[int],
 
 **(c) `estimate_products` 串接**（順序為正確性關鍵）
 
-`_reconcile` 逐 `product_names` 行輸出（matched 或補哨兵）、回傳與 `product_names` **1:1 同序**對齊。對齊用 `zip(product_names, reconciled)` 取回原始 query（關鍵字比對與同類價查找皆以原始 query 為鍵，不用 `est.product_name`）。**但此 1:1 同序不變式必須機器斷言、fail-closed，不可只靠隱性契約**（對抗審查 finding）：
+**對齊不變式（精確版，回應對抗審查）**：本設計**不依賴模型回傳名稱對齊**。`_reconcile`（[estimator.py:289–300](../../../estimator_king/bot/estimator.py)）以 `for line in product_names:` 順序建 `out`，每行恰 append 一筆——matched（`by_name.get(normalize_text(line))`）或哨兵。因此 **`reconciled[i]` 在位置 i 必對應 `product_names[i]`，這是建構保證、與模型有無改寫名稱無關**。floor 對位置 i 的呼叫 `_anchor_floor(product_names[i], reconciled[i], prices_by_name[norm(product_names[i])], cfg)`：query/關鍵字/同類價**三者全部取自 `product_names[i]`**，套用對象是位置 i 的估價——兩者同位、同源，**不存在「把 p70/錯誤 ref 套到錯商品」的語意錯位路徑**。又因哨兵（`suggested==0`）被 floor no-op 跳過，floor 實際只作用在「模型確有對 `product_names[i]` 產出估價」的 matched 列。即「只對證明對應到同一原始請求項的列上錨」已由**位置建構 + 哨兵跳過**達成，**毋須** per-item ID（引入它需改 `_reconcile`/`ProductEstimate` 契約，無收益）。
 ```
-reconciled = self._reconcile(product_names, all_estimates)              # 既有，宣稱與 product_names 同序
+reconciled = self._reconcile(product_names, all_estimates)              # 既有：out[i] ↔ product_names[i]
 if self._anchor_floor is not None and len(reconciled) == len(product_names):
     reconciled = [_anchor_floor(line, e,
                                 prices_by_name.get(normalize_text(line), []),
                                 self._anchor_floor)
-                  for line, e in zip(product_names, reconciled)]        # 新增：先上錨（以原始 query 為鍵）
-elif self._anchor_floor is not None:                                    # 長度不符 → 整批跳過 floor、fail-closed
+                  for line, e in zip(product_names, reconciled)]        # 先上錨（key 全取自 product_names[i]）
+elif self._anchor_floor is not None:                                    # 契約破裂 → 整批跳過 floor
     logger.error("anchor_floor skipped: reconcile len %d != names %d",
                  len(reconciled), len(product_names))
 reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有：再格點收尾
 ```
-- **fail-closed 對齊守門**：若 `len(reconciled) != len(product_names)`（未來 `_reconcile` 改動、重複輸入、模型漏回/多回導致對齊破裂）→ **整批跳過 anchor_floor**（回退到未上錨的模型估價）並 `logger.error`，**絕不**用可能錯位的 `zip` 把 p70/錯誤 ref 價套到錯的商品。`_snap_estimate` 仍照常套用。floor 停用（cfg None）時也跳過整段、零影響。
-- 之所以用「長度相等 → 同序對齊」而非 per-item ID：`_reconcile` 既有契約就是逐 `product_names` 順序輸出一筆（matched 或哨兵），長度相等即同序對齊；引入 stable request-item-ID 需改 `_reconcile`/`ProductEstimate` 契約，超出本輪範圍。長度斷言已把「靜默錯位」轉為「安全 no-op + error log」。
+- **長度檢查 = 前哨、非主要機制**：現行 `_reconcile` 必回 `len == len(product_names)`，故此檢查目前恆真；它的價值是**未來 `_reconcile` 若被改成非「每行一筆」就 fail-closed**（整批跳過 floor + `logger.error`），把潛在 regression 轉成安全 no-op，而非靠人記得。**正確性的真正來源是上述「位置建構 + 哨兵跳過 + key 取自 product_names[i]」**，不是長度數字。floor 停用（cfg None）時整段跳過、零影響。
 
 `prices_by_name: dict[str, list[int]]` 由各 chunk 的 `_estimate_chunk` 第二回傳值累積合併，鍵為 `normalize_text(原始 query)`（`_estimate_chunk` 本就以 `product_names` 的原始 name 迭代，line 201），同名以先到為準，與 `_reconcile` 的 `setdefault` 去重語意一致。
 
@@ -161,9 +160,10 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 - `from_yaml` 解析 `estimator.anchor_floor`：缺 → `None`；存在 → 建 `AnchorFloorConfig`（`min_refs` 缺省 3、`full_percentile_min_refs` 缺省 5、`max_lift_ratio` 缺省 1.6、`premium_tiers` 缺省為空 list）。
 - `config.validate()`（結構驗證）：若 `estimator_anchor_floor` 非 None，檢查 `general_percentile` 與每個 tier 的 `percentile` 為 0–100 整數、`min_refs` 為 ≥ 1 的整數、**`full_percentile_min_refs` 為 ≥ `min_refs` 的整數**（強制小樣本安全夾有效性）、**`max_lift_ratio` 為 ≥ 1.0 的數**、每個 tier 的 `keywords` 為非空的非空字串清單；違反則拋與既有結構驗證一致的錯誤。
 
-**(f) 可稽核性（audit log）**：floor 生效（`new_suggested > 原 suggested`）或被 `max_lift_ratio` skip 時，發一條 `logger.info` 記錄 `query`、原 suggested → floored suggested（skip 則記原值與被擋的 `floor_value`）、`effective_pct`、`floor_value`、同類 ref 數、是否 skip，沿用本專案既有「以 log 做 runtime 歸因」的模式（對照 prompt_hash 日誌）。runtime log 可分辨「模型估價」與「floor 調整過的估價」、以及哪些被上限擋下。
-
-**為何不持久化 provenance 到 `ProductEstimate`（scope 決定，非疏漏）**：本 bot 的估價結果**不被持久化**——`/estimate` 拿到 `EstimateBatch` 後直接格式化為 Discord embed 回覆（[commands.py:172](../../../estimator_king/bot/commands.py) → `_format` embeds），無任何 estimate 寫入 DB/repo。既無「持久化的歷史估價」可供事後 reprocess，audit **log 即是 durable record**（搭配既有 prompt_hash）；回滾 = 刪 config + 重啟，過往 Discord 訊息本就不會被重算。故在只序列化進 Discord 訊息的 `ProductEstimate` 上加 provenance 欄位屬 YAGNI、且會無謂牽動 chat schema 與 bot 輸出。若日後改為持久化估價，再評估把 provenance 入庫。
+**(f) 可稽核性（雙軌：持久化 rationale + runtime log）**：
+- **持久化（user-facing）**：floor 生效時把 provenance 附加進 `rationale`（§2 step 6），隨 Discord embed 一起成為**唯一持久化成品的一部分**——使用者日後質疑某筆估價時，embed 本身即顯示它是模型原生還是被 floor 上修、幅度與百分位，不依賴 log 留存假設。
+- **runtime log**：floor 生效或被 `max_lift_ratio` skip 時，另發一條 `logger.info` 記 `query`、原→floored（skip 記原值與被擋的 `floor_value`）、`effective_pct`、`floor_value`、同類 ref 數、是否 skip，沿用既有 prompt_hash 歸因模式，供營運/除錯。
+- **不加 `ProductEstimate` 新欄位**：provenance 走既有 `rationale` 字串欄位即足夠（embed 已顯示 rationale），毋須改 chat schema／bot 輸出；估價本就不寫入 DB（[commands.py:172](../../../estimator_king/bot/commands.py) 直接轉 embed），無持久化估價需 reprocess。若日後改為入庫估價，再評估結構化 provenance 欄位。
 
 ### §4 測試與邊界
 
@@ -184,6 +184,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
   - **離群上限 no-op**：refs 含一個極端高價使 `floor_value > 原 suggested × max_lift_ratio` → floor **no-op**（suggested/range 不變）、發 skip audit log；floor_value 在倍率內 → 正常套用（鎖死 bounded-failure）；
   - **關鍵字變體比對（NFKC + casefold）**：給溢價關鍵字的全形/半形變體（如半形 `ﾓｺﾓｺ` vs 全形 `もこもこ` 對應、含拉丁字大小寫 `Big`/`BIG`）的 query，驗證仍命中 premium tier；無關字串不誤命中（防 finding 2 回歸）；
   - **audit log**：floor 生效時發 `logger.info` 含 query / 原→floored / effective_pct / floor_value / ref 數（可用 caplog 斷言生效時有記、no-op 時無記）；
+  - **rationale provenance 附加**：floor 生效 → `rationale` 尾端含 provenance 註記（原→floored、effective_pct、ref 數）；floor no-op/skip → rationale 不變（防回歸）；
   - 哨兵 `suggested == 0` → 不變；
   - `cfg is None` → 不變；
   - 回傳為新物件、原物件未就地修改；
@@ -196,13 +197,14 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 - query 落 `その他`（`classify_query == []`）→ 同類集合恆空 → floor **一律 no-op**，維持模型原估價（見 §2 step 1）。`その他` 不在 floor 範圍，亦不另立 OTHER 桶；屬明確契約而非殘差。
 - **結構性低估不在本輪解決範圍**：`ポーチ`/`ピンバッジ`/`SKNB` 等「排除本尊後真價高於所有保留同類 refs」的案例，任何 ref-based floor 都搆不到（floor 上限 = 同類 refs 的百分位，仍低於真價）。明確列為已知限制，不在本輪追求消除。
 - 關鍵字子字串可能誤命中（罕見）→ 由 config 清單控制，接受。
-- **rationale 文字微幅落後**：floor 抬高 suggested 後，`confidence` 與 `rationale` 文字未隨之改寫（仍描述上錨前的估價）。`confidence` 只被用來選 range 上偏帶不致誤導；rationale 為模型 prose，deterministic 改寫成本高且非本輪目標——列為接受殘差。可稽核性由 §3(f) audit log 提供（runtime 可分辨哪些估價被上錨、幅度多少），range 已由 §2 step 4 重算以維持覆蓋率（硬驗收條件），故此殘差僅影響 rationale 用語、不影響數值正確性與可稽核性。
+- **rationale provenance（已處理，非殘差）**：floor 生效時在 `rationale` 尾端附加 provenance 註記（§2 step 6），使持久化的 Discord embed 自帶「此價被上錨、幅度、百分位」資訊，化解「rationale 落後於上錨後價格」。`confidence` 維持模型原值（僅用於選 range 帶，不誤導）；不重寫模型 prose，只附加 deterministic 一行。
 
 **eval 對齊（有效性關鍵）**：[eval_estimate.py](../../../scripts/analysis/eval_estimate.py) 的 `build_context` 比照 [experiment_anchor_floor.py](../../../scripts/analysis/experiment_anchor_floor.py) 多收集同類 ref 價格，並在 `run_once` 對每筆套用 `_anchor_floor`（用與 production 相同的 `config.estimator_anchor_floor`），否則 before/after 量到的不是上線行為。`experiment_anchor_floor.py` 改為：(1) 讀 config 的 `premium_tiers`/`min_refs`（取代寫死的 `PREMIUM_KW` 與單一百分位 sweep）；(2) **按同類 ref 數分桶回報**（如 `n=3–4 / 5–6 / 7+`），每桶輸出 §5 閘門所需欄位（bucket N、因 `min_refs` skip 數、floor 生效數、signed/MAPE、pass/fail），讓小樣本桶的過錨風險與**樣本是否足夠**可見、供 §5 fail-closed 閘門判定。作為校準台。
 
 ## §5 部署、回滾、校準、非目標
 
 - **部署/回滾**：改動為 config 段 + `estimator.py`/`config_schema.py` 程式。floor 由 `anchor_floor` config 段控制：刪掉該段 + 重啟 bot 即停用。**不動 retrieval / embedding / vector ID / SQLite schema → 切換前後 chroma/SQLite 完全相容，回滾不需 `rm -rf chroma/` 或 `--force-refetch`**（對照 CLAUDE.md「Re-index on indexing-model change」僅適用索引層改動）。
+- **shipped config 啟用、安全性靠守門而非預設停用**：實作**直接把 `anchor_floor` 段寫進 `stores_config.yaml`**（起始值啟用），程式保留「absent → disabled」供回滾。enabled-by-default 之所以仍保守，是因起始值本身受**三道機器守門**保護：`min_refs=3`（稀疏 no-op）、`full_percentile_min_refs=5`（小樣本夾 median，激進百分位拿不到）、`max_lift_ratio=1.6`（離群抬幅 no-op），且 quick verify 已顯示這組值在現有資料上 signed≈−3%～0、MAPE 在雜訊帶內。**校準/驗收仍為 merge 前必做**（用 `experiment_anchor_floor.py` 分桶 + `eval_estimate.py` before/after，數據記入 commit）——但定位是「確認/調優起始值」，非「閘住 config 是否能存在」。本 bot 單實例、operator 即 developer，不另建 CI/startup eval 閘（對無 SLA 個人專案不成比例）；config 結構由既有 `config.validate()` 把關。
 - **校準（上線前必做）**：`general=60 / premium=70 / min_refs=3 / full_percentile_min_refs=5` 為**待驗起始點**（後三者預設即 fail-closed 安全）。以對齊後的 `experiment_anchor_floor.py`（讀 config 分層 + 兩道守門 + **按同類 ref 數分桶回報**）確認：分層 signed err、各守門對命中率/穩定度的影響、以及**小樣本桶是否在放開 median 夾後過錨**。再以 `eval_estimate.py --runs ≥ 3` 取 before/after，數據記入 PR / commit。**before/after 必須是「停用 vs 啟用 anchor_floor」的對照**：baseline run 在 `anchor_floor` 停用下跑（config 省略該段，或 eval 以 `estimator_anchor_floor=None` 建 Estimator），candidate run 在啟用下跑，同 fixtures/同 `--runs`；切勿兩邊都啟用而誤拿 candidate 跟自己比。
 - **稀疏守門閘門（machine-enforced 預設 + 校準才放開）**：安全性由 **runtime 不變式**保證，不靠流程紀律——預設 `full_percentile_min_refs=5` 下，ref 數 `[min_refs, 5)` 的小樣本一律被夾到 median（§2 step 2.5），**根本無法套 p60/p70**。要把 p60/p70 放開到更小的樣本，**唯一途徑是調低 `full_percentile_min_refs`，而這必須有 powered 證據**：
   - **校準腳本每桶必出欄位**：bucket 範圍、bucket N、因 `min_refs` skip 數、floor 生效數、signed/MAPE、**該桶 pass/fail**。
@@ -215,7 +217,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
   - range 覆蓋率不變差（≥ baseline）；
   - no-estimate 集合為 baseline 之子集（floor 不產生新的 no-estimate——floor 只抬高正估價、對哨兵 no-op，理論上恆成立，仍須由 eval 確認）；
   - baseline 與 candidate 兩份 run 皆 VALID。
-- **非目標**：不動 prompt（floor 是把 prompt 失效的軟規則硬化，prompt 留著）；不動 retrieval / rerank / embedding；不做「floor 抬很多時自動降 confidence」（YAGNI，後續迭代再議）；不做 per-store override（單一全域 `anchor_floor`）；不追求消除上述結構性低估殘差。
+- **非目標**：不動 prompt（floor 是把 prompt 失效的軟規則硬化，prompt 留著）；不動 retrieval / rerank / embedding；不做「floor 抬很多時自動降 confidence」（YAGNI，後續迭代再議；floor 生效僅在 rationale 附加 provenance，不改 confidence）；不做 per-store override（單一全域 `anchor_floor`）；不為 `ProductEstimate` 加結構化 provenance 欄位（走既有 rationale 字串）；不建 CI/startup eval 閘（單實例無 SLA，安全性靠三道機器守門 + merge 前校準/驗收）；不追求消除上述結構性低估殘差。
 
 ## 文件同步（強制）
 
