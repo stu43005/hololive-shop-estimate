@@ -1319,19 +1319,11 @@ git commit -F /tmp/anchor_commit_msg.txt
 
 (Via git-master per repo convention; the `-F` form keeps it non-interactive and embeds the BASELINE/CANDIDATE/ACCEPTANCE evidence.)
 
-- [ ] **Step 5: Restart the bot** to load the enabled config (`SYSTEM_PROMPT`/config are read at process start). The bot runs `python -m estimator_king run` — stop the current process and start a fresh one with the env loaded:
-
-```bash
-# local (see docs/local-runbook.md): stop the running process (Ctrl-C / SIGTERM), then:
-set -a; source .env; set +a
-.venv/bin/python -m estimator_king run
-```
-
-In Kubernetes (see [docs/ops-runbook.md](../../../docs/ops-runbook.md)) restart the deployment instead (`kubectl rollout restart deployment/<name>`). Rollback at any time = remove the `anchor_floor` block from `stores_config.yaml` + restart the same way.
+The task ends at the committed config change. **Deploying/restarting the bot to load the new config is an operations action, out of scope for this plan** — config is read at process start, so the enabled floor takes effect on the next restart/rollout per [docs/ops-runbook.md](../../../docs/ops-runbook.md). Rollback is symmetric: remove the `anchor_floor` block from `stores_config.yaml` and commit; it reverts to disabled on the next restart.
 
 ---
 
 ## Done criteria
 
 - Tasks 1–8 merged: code present, floor **disabled** (no `anchor_floor` in `stores_config.yaml`), full suite green, type-check + lint clean, docs synced.
-- Task 9 (separate commit): experiment band diagnostics reviewed (any small-sample bands you chose to open by lowering `full_percentile_min_refs` read PASS; underpowered exact-`n` bands at the default do not block), `eval_estimate.py` exits 0 with `ACCEPTANCE: PASS`, the calibrated config block added with recorded before/after data, bot restarted.
+- Task 9 (separate commit): experiment band diagnostics reviewed (any small-sample bands you chose to open by lowering `full_percentile_min_refs` read PASS; underpowered exact-`n` bands at the default do not block), `eval_estimate.py` exits 0 with `ACCEPTANCE: PASS`, the calibrated config block committed with recorded before/after data. (Deploying/restarting the bot to apply it is an ops action, out of scope.)
