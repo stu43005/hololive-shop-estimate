@@ -135,15 +135,22 @@ _anchor_floor(query: str, est: ProductEstimate, same_type_prices: list[int],
 
 **(c) `estimate_products` 串接**（順序為正確性關鍵）
 
-`_reconcile` 逐 `product_names` 行輸出、回傳與 `product_names` **1:1 同序**對齊，故以 `zip` 取回原始 query，關鍵字比對與同類價查找皆以原始 query 為鍵（不用 `est.product_name`）：
+`_reconcile` 逐 `product_names` 行輸出（matched 或補哨兵）、回傳與 `product_names` **1:1 同序**對齊。對齊用 `zip(product_names, reconciled)` 取回原始 query（關鍵字比對與同類價查找皆以原始 query 為鍵，不用 `est.product_name`）。**但此 1:1 同序不變式必須機器斷言、fail-closed，不可只靠隱性契約**（對抗審查 finding）：
 ```
-reconciled = self._reconcile(product_names, all_estimates)              # 既有，與 product_names 同序
-reconciled = [_anchor_floor(line, e,
-                            prices_by_name.get(normalize_text(line), []),
-                            self._anchor_floor)
-              for line, e in zip(product_names, reconciled)]            # 新增：先上錨（以原始 query 為鍵）
+reconciled = self._reconcile(product_names, all_estimates)              # 既有，宣稱與 product_names 同序
+if self._anchor_floor is not None and len(reconciled) == len(product_names):
+    reconciled = [_anchor_floor(line, e,
+                                prices_by_name.get(normalize_text(line), []),
+                                self._anchor_floor)
+                  for line, e in zip(product_names, reconciled)]        # 新增：先上錨（以原始 query 為鍵）
+elif self._anchor_floor is not None:                                    # 長度不符 → 整批跳過 floor、fail-closed
+    logger.error("anchor_floor skipped: reconcile len %d != names %d",
+                 len(reconciled), len(product_names))
 reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有：再格點收尾
 ```
+- **fail-closed 對齊守門**：若 `len(reconciled) != len(product_names)`（未來 `_reconcile` 改動、重複輸入、模型漏回/多回導致對齊破裂）→ **整批跳過 anchor_floor**（回退到未上錨的模型估價）並 `logger.error`，**絕不**用可能錯位的 `zip` 把 p70/錯誤 ref 價套到錯的商品。`_snap_estimate` 仍照常套用。floor 停用（cfg None）時也跳過整段、零影響。
+- 之所以用「長度相等 → 同序對齊」而非 per-item ID：`_reconcile` 既有契約就是逐 `product_names` 順序輸出一筆（matched 或哨兵），長度相等即同序對齊；引入 stable request-item-ID 需改 `_reconcile`/`ProductEstimate` 契約，超出本輪範圍。長度斷言已把「靜默錯位」轉為「安全 no-op + error log」。
+
 `prices_by_name: dict[str, list[int]]` 由各 chunk 的 `_estimate_chunk` 第二回傳值累積合併，鍵為 `normalize_text(原始 query)`（`_estimate_chunk` 本就以 `product_names` 的原始 name 迭代，line 201），同名以先到為準，與 `_reconcile` 的 `setdefault` 去重語意一致。
 
 **(d) `Estimator.__init__` 收 config**：新增 keyword-only 參數 `anchor_floor: AnchorFloorConfig | None = None`，存為 `self._anchor_floor`。預設 None = 停用，**既有不傳此參數的呼叫端與測試一律維持 floor 關閉、零影響**。[runner.py](../../../estimator_king/bot/runner.py) 建 `Estimator` 時傳 `config.estimator_anchor_floor`。
@@ -171,7 +178,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
   - 只命中 general（無溢價）→ 用 general；
   - **溢價關鍵字以 `query` 參數判定、非 `est.product_name`**：給一筆 `query` 含溢價關鍵字、但 `est.product_name` 為不含關鍵字的改寫名，驗證仍套用 premium tier（防 finding 1 回歸）；
   - **floor 抬高時 range 重算**：`new_suggested > 原 suggested` 時，依 confidence 帶確保 `max ≥ round(new_suggested × (1+up))`（上方仍有 headroom、不貼上緣）、`min ≤ new_suggested`，且與原區間取較寬者（覆蓋不縮）；
-  - **稀疏守門**：同類 ref 數 `< min_refs`（含單一 ref、空清單）→ floor **no-op**（防 finding 回歸）；恰 `== min_refs` → 套用；
+  - **稀疏守門**：同類 ref 數 `< min_refs`（含單一 ref、空清單）→ floor **no-op**（防 finding 回歸）；恰 `== min_refs` → 進入 floor，但因 `min_refs < full_percentile_min_refs`，此時 `effective_pct` **仍受 median 夾**（不是完整 p60/p70；結構 advisory，避免誤讀）；
   - **`その他` no-op**：`classify_query` 回 `[]`（同類集合空）→ floor no-op，維持原估價（鎖死契約、防實作 drift）；
   - **小樣本安全夾**：ref 數在 `[min_refs, full_percentile_min_refs)` 時，即使命中 premium p70 或 general p60，`effective_pct` 仍被夾為 ≤ 50（用 median 算 floor）；ref 數 ≥ `full_percentile_min_refs` 才套完整 p60/p70（防 high finding 回歸，鎖死 runtime 不變式）；
   - **離群上限 no-op**：refs 含一個極端高價使 `floor_value > 原 suggested × max_lift_ratio` → floor **no-op**（suggested/range 不變）、發 skip audit log；floor_value 在倍率內 → 正常套用（鎖死 bounded-failure）；
@@ -181,6 +188,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
   - `cfg is None` → 不變；
   - 回傳為新物件、原物件未就地修改；
   - 與 `_snap_estimate` 串接後仍保 `min ≤ suggested ≤ max` 且落 ¥110 格點。
+- **`estimate_products` 對齊 fail-closed（整合測試）**：以 fake reconcile 使 `len(reconciled) != len(product_names)`（少回/多回），驗證**整批跳過 anchor_floor**（無任一估價被 floor 改動，等同停用結果）並發 `logger.error`；長度相等時正常逐筆套用。涵蓋 finding 提到的漏回/多回/重排場景。
 - config 解析/驗證：合法區塊解析為 `AnchorFloorConfig`（含 `min_refs`、`full_percentile_min_refs`、`max_lift_ratio`，缺省 3/5/1.6）；缺區塊 → `None`（停用）；`percentile` 越界（<0 或 >100）→ validate 報錯；`min_refs < 1` → validate 報錯；`full_percentile_min_refs < min_refs` → validate 報錯；`max_lift_ratio < 1.0` → validate 報錯；空 `keywords` → validate 報錯。
 - **既有測試維持綠燈**：不傳 `anchor_floor` 的 `Estimator` floor 停用；`_estimate_chunk` 回傳型別改為 tuple，需更新既有直接呼叫 `_estimate_chunk` 的測試解包（若有）——除解包外行為不變。
 
