@@ -198,7 +198,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 - query 落 `その他`（`classify_query == []`）→ 同類集合恆空 → floor **一律 no-op**，維持模型原估價（見 §2 step 1）。`その他` 不在 floor 範圍，亦不另立 OTHER 桶；屬明確契約而非殘差。
 - **結構性低估不在本輪解決範圍**：`ポーチ`/`ピンバッジ`/`SKNB` 等「排除本尊後真價高於所有保留同類 refs」的案例，任何 ref-based floor 都搆不到（floor 上限 = 同類 refs 的百分位，仍低於真價）。明確列為已知限制，不在本輪追求消除。
 - 關鍵字子字串可能誤命中（罕見）→ 由 config 清單控制，接受。
-- **rationale provenance（已處理，非殘差）**：floor 生效時在 `rationale` 尾端附加 provenance 註記（§2 step 6），使持久化的 Discord embed 自帶「此價被上錨、幅度、百分位」資訊，化解「rationale 落後於上錨後價格」。`confidence` 維持模型原值（僅用於選 range 帶，不誤導）；不重寫模型 prose，只附加 deterministic 一行。
+- **rationale provenance（已處理，非殘差）**：floor 生效時在 `rationale` **開頭前綴** provenance 註記（§2 step 6；刻意前綴以存活 [commands.py:62](../../../estimator_king/bot/commands.py) 的 300 字截斷），使持久化的 Discord embed 自帶「此價被上錨、幅度、百分位」資訊，化解「rationale 落後於上錨後價格」。`confidence` 維持模型原值（僅用於選 range 帶，不誤導）；不重寫模型 prose，只前綴 deterministic 一行。
 
 **eval 對齊（有效性關鍵）**：[eval_estimate.py](../../../scripts/analysis/eval_estimate.py) 的 `build_context` 比照 [experiment_anchor_floor.py](../../../scripts/analysis/experiment_anchor_floor.py) 多收集同類 ref 價格，並在 `run_once` 對每筆套用 `_anchor_floor`（用與 production 相同的 `config.estimator_anchor_floor`），否則 before/after 量到的不是上線行為。`experiment_anchor_floor.py` 改為：(1) 讀 config 的 `premium_tiers`/`min_refs`（取代寫死的 `PREMIUM_KW` 與單一百分位 sweep）；(2) **按同類 ref 數分桶回報**（如 `n=3–4 / 5–6 / 7+`），每桶輸出 §5 閘門所需欄位（bucket N、因 `min_refs` skip 數、floor 生效數、signed/MAPE、pass/fail），讓小樣本桶的過錨風險與**樣本是否足夠**可見、供 §5 fail-closed 閘門判定。作為校準台。
 
