@@ -87,7 +87,9 @@ estimator:
 對每筆估價（query 字串 + 它的同類 ref 價格清單）：
 
 1. **取數基準**：同類 refs = 送進模型的 **top_k context 中 `item_type ∈ classify_query(query)` 且 `price_jpy > 0`** 的 ref 價格清單。這些是模型實際被 grounding 的同類比價。
-1b. **稀疏守門（必要前置）**：若同類 ref 數 `< cfg.min_refs`（含空清單）→ floor **no-op**，直接信任模型估價。理由：樣本太少時百分位不可靠，單一貴 ref（first-run / 罕見 type / `その他` 噪音）會被當權威把 suggested 硬抬、再圍它撐寬 range，把 retrieval 噪音變成不可逆上錨。額外，floor 取的是**百分位（非 max）**：當樣本足夠（≥ min_refs）時，p60/p70 不會被單一極端 ref 主導（除非它佔該集相當比例），與 min_refs 共同構成離群守門。
+1b. **稀疏守門（必要前置）**：若同類 ref 數 `< cfg.min_refs`（含空清單）→ floor **no-op**，直接信任模型估價。理由：樣本太少時百分位不可靠，單一貴 ref（first-run / 罕見 type / `その他` 噪音）會被當權威把 suggested 硬抬、再圍它撐寬 range，把 retrieval 噪音變成不可逆上錨。
+   - **不宣稱百分位本身免疫離群**：須明確認知在**小樣本邊界**（例如 `n == 3`）下，p70 仍幾乎由最高那筆 ref 決定，`min_refs` + 百分位**並不**保證避免單 ref 過錨。因此 `min_refs` 的安全值（與各百分位在小樣本下是否安全）**由分層校準實證決定，不由本 spec 斷言**（見 §5：校準須按同類 ref 數分桶回報，floor 僅在小樣本桶不退步時才上線）。
+   - **小樣本收斂槓桿（若校準顯示小桶過錨，採任一）**：提高 `min_refs`；或對 `n` 低於某門檻的樣本把 `effective_pct` 夾為 ≤ 50（退回 median，少受最高 ref 主導）。門檻與是否啟用由校準決定，非預先寫死。
 2. **決定有效百分位**（同時 resolve「多組命中」）：
    ```
    effective_pct = max( general_percentile,
@@ -107,7 +109,7 @@ estimator:
 7. **哨兵保留**：`suggested_price_jpy == 0`（`_reconcile` 的 no-estimate 哨兵）→ floor **no-op**，不破壞哨兵語意。
 8. **cfg 為 None**（未設定 / 停用）→ floor **no-op**。
 
-關鍵字判定：對**原始 query 字串**做子字串包含（`keyword in query`），與 quick verify 一致；不做 normalize（保留全形/片假名原樣比對）。
+關鍵字判定：對 query 與設定關鍵字**兩側都先做 NFKC 正規化再 casefold**（`unicodedata.normalize("NFKC", s).casefold()`），再做子字串包含。理由：生字串 `keyword in query` 依賴輸入恰好用設定的全形/半形/拼寫形式，等效寬度（全形/半形）、大小寫、相容字元變體會靜默退回 general percentile——正是溢價層要修的失敗模式（對抗審查 finding）。NFKC 統一全/半形與相容字元、casefold 處理大小寫，使常見變體仍命中。此為**專供 tier 比對的輕量正規化**，與 `normalize_text`（服務商品名去重、行為不同）分開定義，避免互相牽動。空白/特殊拼寫差異仍可能漏判 → 由 config 關鍵字清單涵蓋（必要時加別名），並由 §4 變體測試把關。
 
 `_percentile(values, pct)`：純函式，線性內插（與 [experiment_anchor_floor.py](../../../scripts/analysis/experiment_anchor_floor.py) 的 `percentile` 同定義）。`pct` 為 0–100，內部轉 0–1。空清單回傳 `None`；單元素回傳該值。
 
@@ -160,6 +162,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
   - **溢價關鍵字以 `query` 參數判定、非 `est.product_name`**：給一筆 `query` 含溢價關鍵字、但 `est.product_name` 為不含關鍵字的改寫名，驗證仍套用 premium tier（防 finding 1 回歸）；
   - **floor 抬高時 range 重算**：`new_suggested > 原 suggested` 時，依 confidence 帶確保 `max ≥ round(new_suggested × (1+up))`（上方仍有 headroom、不貼上緣）、`min ≤ new_suggested`，且與原區間取較寬者（覆蓋不縮）；
   - **稀疏守門**：同類 ref 數 `< min_refs`（含單一 ref、空清單）→ floor **no-op**（防 finding 回歸）；恰 `== min_refs` → 套用；
+  - **關鍵字變體比對（NFKC + casefold）**：給溢價關鍵字的全形/半形變體（如半形 `ﾓｺﾓｺ` vs 全形 `もこもこ` 對應、含拉丁字大小寫 `Big`/`BIG`）的 query，驗證仍命中 premium tier；無關字串不誤命中（防 finding 2 回歸）；
   - **audit log**：floor 生效時發 `logger.info` 含 query / 原→floored / effective_pct / floor_value / ref 數（可用 caplog 斷言生效時有記、no-op 時無記）；
   - 哨兵 `suggested == 0` → 不變；
   - `cfg is None` → 不變；
@@ -174,12 +177,13 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 - 關鍵字子字串可能誤命中（罕見）→ 由 config 清單控制，接受。
 - **rationale 文字微幅落後**：floor 抬高 suggested 後，`confidence` 與 `rationale` 文字未隨之改寫（仍描述上錨前的估價）。`confidence` 只被用來選 range 上偏帶不致誤導；rationale 為模型 prose，deterministic 改寫成本高且非本輪目標——列為接受殘差。可稽核性由 §3(f) audit log 提供（runtime 可分辨哪些估價被上錨、幅度多少），range 已由 §2 step 4 重算以維持覆蓋率（硬驗收條件），故此殘差僅影響 rationale 用語、不影響數值正確性與可稽核性。
 
-**eval 對齊（有效性關鍵）**：[eval_estimate.py](../../../scripts/analysis/eval_estimate.py) 的 `build_context` 比照 [experiment_anchor_floor.py](../../../scripts/analysis/experiment_anchor_floor.py) 多收集同類 ref 價格，並在 `run_once` 對每筆套用 `_anchor_floor`（用與 production 相同的 `config.estimator_anchor_floor`），否則 before/after 量到的不是上線行為。`experiment_anchor_floor.py` 的分層邏輯亦改為讀 config 的 `premium_tiers`（取代寫死的 `PREMIUM_KW` 與單一百分位 sweep），作為校準台。
+**eval 對齊（有效性關鍵）**：[eval_estimate.py](../../../scripts/analysis/eval_estimate.py) 的 `build_context` 比照 [experiment_anchor_floor.py](../../../scripts/analysis/experiment_anchor_floor.py) 多收集同類 ref 價格，並在 `run_once` 對每筆套用 `_anchor_floor`（用與 production 相同的 `config.estimator_anchor_floor`），否則 before/after 量到的不是上線行為。`experiment_anchor_floor.py` 改為：(1) 讀 config 的 `premium_tiers`/`min_refs`（取代寫死的 `PREMIUM_KW` 與單一百分位 sweep）；(2) **按同類 ref 數分桶回報指標**（如 `n=3–4 / 5–6 / 7+`），讓小樣本桶的過錨風險可見、供 §5 閘門判定。作為校準台。
 
 ## §5 部署、回滾、校準、非目標
 
 - **部署/回滾**：改動為 config 段 + `estimator.py`/`config_schema.py` 程式。floor 由 `anchor_floor` config 段控制：刪掉該段 + 重啟 bot 即停用。**不動 retrieval / embedding / vector ID / SQLite schema → 切換前後 chroma/SQLite 完全相容，回滾不需 `rm -rf chroma/` 或 `--force-refetch`**（對照 CLAUDE.md「Re-index on indexing-model change」僅適用索引層改動）。
-- **校準（上線前必做）**：`general=60 / premium=70 / min_refs=3` 為起始點。以對齊後的 `experiment_anchor_floor.py`（讀 config 分層 + `min_refs` 守門）確認分層 signed err 與稀疏守門對命中率/穩定度的影響，再以 `eval_estimate.py --runs ≥ 3` 取 before/after，數據記入 PR / commit。`min_refs` 太高會讓 floor 鮮少生效（top_k=10 下許多 query 同類 ref 不多）、太低則放行噪音，需一併掃定。
+- **校準（上線前必做）**：`general=60 / premium=70 / min_refs=3` 為**待驗起始點、非已證安全值**。以對齊後的 `experiment_anchor_floor.py`（讀 config 分層 + `min_refs` 守門 + **按同類 ref 數分桶回報**）確認：分層 signed err、稀疏守門對命中率/穩定度的影響、以及**小樣本桶（n 接近 `min_refs`）是否出現過錨**。再以 `eval_estimate.py --runs ≥ 3` 取 before/after，數據記入 PR / commit。
+- **稀疏守門閘門（上線條件）**：floor 僅在**小樣本桶不退步**時上線。若分層校準顯示小桶過錨（signed 翻正/MAPE 升），採 §2 step 1b 的收斂槓桿（提高 `min_refs`，或對小樣本將 `effective_pct` 夾為 ≤ 50）後重校，直到小桶不退步。`min_refs` 太高會讓 floor 鮮少生效（top_k=10 下許多 query 同類 ref 不多）、太低則放行噪音，由分桶數據定值。
 - **相對驗收準則**（延續第二輪精神，25 筆手標樣本上設絕對門檻無意義）：candidate 相對 baseline 同時滿足——
   - **mean signed err 絕對值實質下降**（本輪首要目標；預期由 ≈ −10% 收斂到 |signed| ≤ 約 3%）；
   - **MAPE 不顯著變差**（允許 ≤ baseline + 2pp 的抽樣雜訊；超過則回頭調百分位）；
@@ -190,7 +194,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 
 ## 文件同步（強制）
 
-更新 [docs/data-pipeline.md](../../../docs/data-pipeline.md)：於 reconcile → snap 之間新增 `_anchor_floor` 階段，記錄其機制（以**原始 query** 為鍵、同類 top_k refs 取百分位、分層 effective_pct = max(general, 命中組)、只抬不壓、抬高時依 confidence 帶重算 range 以維持上偏與覆蓋率、哨兵/空集/cfg-None no-op）、控制設定 key（`estimator.anchor_floor`）、對應函式位置（`file:line`）、與設計理由（prompt 對 mini 失效 → deterministic 硬化；分層因一般/溢價兩組最佳百分位相差約 10pp）。
+更新 [docs/data-pipeline.md](../../../docs/data-pipeline.md)：於 reconcile → snap 之間新增 `_anchor_floor` 階段，記錄其機制（以**原始 query** 為鍵、關鍵字以 NFKC+casefold 正規化兩側比對、`min_refs` 稀疏守門、同類 top_k refs 取百分位、分層 effective_pct = max(general, 命中組)、只抬不壓、抬高時依 confidence 帶重算 range 以維持上偏與覆蓋率、floor 生效發 audit log、哨兵/空集/cfg-None no-op）、控制設定 key（`estimator.anchor_floor`）、對應函式位置（`file:line`）、與設計理由（prompt 對 mini 失效 → deterministic 硬化；分層因一般/溢價兩組最佳百分位相差約 10pp）。
 
 ## 驗證指令
 
