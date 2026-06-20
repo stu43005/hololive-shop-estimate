@@ -1023,7 +1023,7 @@ The experiment is a **calibration** tool. It must test **candidate** values whil
 
 - [ ] **Step 1: Replace the script body with the candidate-config + banded reporter**
 
-Replace everything after the file's docstring/header with this complete implementation (it deletes the old `PREMIUM_KW`, `percentile`, `floor_at`, `apply_floor`, `PCTS`, `subset_metrics`, `is_premium`, `label`, `build_context`, `run_once` machinery and reuses `eval_estimate`):
+Also update the module docstring at the top of the file (it currently describes the obsolete single-percentile P0/P1/P2/P3 sweep) to a one-line description of the candidate-config + ref-count-band calibration. Then replace everything after the docstring/header with this complete implementation (it deletes the old `PREMIUM_KW`, `percentile`, `floor_at`, `apply_floor`, `PCTS`, `subset_metrics`, `is_premium`, `label`, `build_context`, `run_once` machinery and reuses `eval_estimate`):
 
 ```python
 from __future__ import annotations
@@ -1114,7 +1114,7 @@ def main() -> None:
     # rows[query] = (n, base_signed_mean, base_abs_mean, cand_signed_mean,
     #                cand_abs_mean, applied_any, base_sugg, cand_sugg)
     rows: dict[str, tuple[Any, ...]] = {}
-    for query, official in FIXTURES:
+    for query, _ in FIXTURES:
         n = len(runs[0][query][1]) if query in runs[0] else 0
         b_signed, b_abs, c_signed, c_abs = [], [], [], []
         applied_any = False
@@ -1271,7 +1271,7 @@ YAML
 set -a; source .env; set +a
 PYTHONPATH=. .venv/bin/python scripts/analysis/experiment_anchor_floor.py --runs 3 --candidate-config /tmp/anchor_candidate.yaml
 ```
-Read the **BANDS by same-type ref count** table. The `region` column shows `clamp` (n in `[min_refs, full_percentile_min_refs)`, forced to median) vs `full` (n ≥ `full_percentile_min_refs`, gets the configured percentile). Every band you are **opening to the aggressive percentile** — i.e. every `full` band, plus any band you would move from `clamp` to `full` by lowering `--full-min-refs` — must read `verdict = PASS` (≥ `MIN_BUCKET_N` floor-applied AND `|signed|` not worse AND MAPE within +2pp). If a band reads `underpow` or `REGRESS`, do **not** open it: raise `--full-min-refs` (keep those n clamped to median) or `--min-refs` (no-op). Re-run until every opened band is PASS. Record the final values for Step 2.
+Read the **BANDS by same-type ref count** table. The `region` column shows `clamp` (n in `[min_refs, full_percentile_min_refs)`, forced to median) vs `full` (n ≥ `full_percentile_min_refs`, gets the configured percentile). Every band you are **opening to the aggressive percentile** — i.e. every `full` band, plus any band you would move from `clamp` to `full` by lowering `--full-min-refs` — must read `verdict = PASS` (≥ `MIN_BUCKET_N` floor-applied AND `|signed|` not worse AND MAPE within +2pp). If a band reads `underpow` or `REGRESS`, do **not** open it: **edit `/tmp/anchor_candidate.yaml`** to raise `full_percentile_min_refs` (keep those n clamped to median) or `min_refs` (no-op), then **rerun the same `--candidate-config /tmp/anchor_candidate.yaml` command** (the CLI `--general`/`--full-min-refs`/etc. flags are ignored while `--candidate-config` is set, so tuning must be done in the YAML). Repeat until every opened band is PASS. The final `/tmp/anchor_candidate.yaml` is exactly what you commit in Step 2.
 
 - [ ] **Step 2: Add the config block with the calibrated values**
 
