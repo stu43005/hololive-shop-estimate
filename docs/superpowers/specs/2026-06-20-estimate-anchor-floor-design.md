@@ -94,10 +94,15 @@ estimator:
    - 未命中任何溢價組 → `general_percentile`。
    - 命中一組或多組 → 取「general 與所有命中組」中**最高**的百分位。
    - 此規則順序無關、多重命中自動取最猛（符合「優先殺低估」），且保證命中溢價的品項 floor 永遠 ≥ 一般品 floor（即使某溢價組誤設低於 general 也不會反而更鬆）。
-3. **上錨**：`floor_value = _percentile(同類refs, effective_pct)`；`suggested = max(suggested, round(floor_value))`。**只會抬高、永不壓低。**
-4. **不就地修改**：以 `model_copy(update={...})` 產生新物件，僅更新 `suggested_price_jpy`。`price_range_jpy` 的格點與 `min ≤ suggested ≤ max` 由後續既有的 `_snap_estimate` 統一收尾（其 `max = max(snapped_max, snapped_suggested)` 會在 floor 抬高 suggested 時自動把區間上緣往上撐，符合「真價偏高」的上偏）。
-5. **哨兵保留**：`suggested_price_jpy == 0`（`_reconcile` 的 no-estimate 哨兵）→ floor **no-op**，不破壞哨兵語意。
-6. **cfg 為 None**（未設定 / 停用）→ floor **no-op**。
+3. **上錨 suggested**：`floor_value = _percentile(同類refs, effective_pct)`；`new_suggested = max(suggested, round(floor_value))`。**只會抬高、永不壓低。**
+4. **floor 抬高時一併重算 range（避免上緣無 headroom、覆蓋率退步）**：若 `new_suggested > 原 suggested`，依該筆 `confidence` 對應的上偏帶（high −20%/+30%、medium −25%/+45%、low −30%/+60%，與 prompt `<range_and_confidence>` 一致）圍繞 `new_suggested` 重建區間，且與原區間取較寬者以不縮減覆蓋：
+   - `new_min = min(原 min, round(new_suggested × (1 − down)))`
+   - `new_max = max(原 max, round(new_suggested × (1 + up)))`
+   floor 未生效（`new_suggested == 原 suggested`）→ range 不動。如此抬高後 suggested 不會貼在區間上緣，保留上方 headroom，覆蓋率不因上錨而退步。
+5. **不就地修改**：以 `model_copy(update={...})` 產生新物件（更新 `suggested_price_jpy`，floor 生效時一併更新 `price_range_jpy`）。最終既有的 `_snap_estimate` 仍負責格點正規化與 `min ≤ suggested ≤ max` 收尾。
+6. **confidence / rationale 不改寫**：floor 是 deterministic 上錨，`confidence` 僅用於選 range 上偏帶；rationale 文字維持模型原輸出（可能微幅落後於上錨後的 suggested）——屬接受的次要殘差（見 §4），不在本輪重寫。
+7. **哨兵保留**：`suggested_price_jpy == 0`（`_reconcile` 的 no-estimate 哨兵）→ floor **no-op**，不破壞哨兵語意。
+8. **cfg 為 None**（未設定 / 停用）→ floor **no-op**。
 
 關鍵字判定：對**原始 query 字串**做子字串包含（`keyword in query`），與 quick verify 一致；不做 normalize（保留全形/片假名原樣比對）。
 
@@ -110,19 +115,23 @@ estimator:
 
 **(b) 新增純函式 `_anchor_floor`**（模組層級，與 `snap_to_tax_grid` 同性質、可單測）
 ```
-_anchor_floor(est: ProductEstimate, same_type_prices: list[int],
+_anchor_floor(query: str, est: ProductEstimate, same_type_prices: list[int],
               cfg: AnchorFloorConfig | None) -> ProductEstimate
 ```
-行為即 §2。
+行為即 §2。**`query` 為使用者原始輸入行**（不是 `est.product_name`）——溢價關鍵字比對與同類價查找都必須以原始 query 為鍵，否則模型若改寫/縮寫回傳名稱，關鍵字會漏判、p70 靜默退回 general，正中本輪要修的溢價品（對抗審查 finding）。
 
 **(c) `estimate_products` 串接**（順序為正確性關鍵）
+
+`_reconcile` 逐 `product_names` 行輸出、回傳與 `product_names` **1:1 同序**對齊，故以 `zip` 取回原始 query，關鍵字比對與同類價查找皆以原始 query 為鍵（不用 `est.product_name`）：
 ```
-reconciled = self._reconcile(product_names, all_estimates)              # 既有
-reconciled = [_anchor_floor(e, prices_by_name.get(normalize_text(e.product_name), []),
-                            self._anchor_floor) for e in reconciled]    # 新增：先上錨
+reconciled = self._reconcile(product_names, all_estimates)              # 既有，與 product_names 同序
+reconciled = [_anchor_floor(line, e,
+                            prices_by_name.get(normalize_text(line), []),
+                            self._anchor_floor)
+              for line, e in zip(product_names, reconciled)]            # 新增：先上錨（以原始 query 為鍵）
 reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有：再格點收尾
 ```
-`prices_by_name: dict[str, list[int]]` 由各 chunk 的 `_estimate_chunk` 第二回傳值累積合併（同名以先到為準，與 `_reconcile` 的 `setdefault` 去重語意一致）。
+`prices_by_name: dict[str, list[int]]` 由各 chunk 的 `_estimate_chunk` 第二回傳值累積合併，鍵為 `normalize_text(原始 query)`（`_estimate_chunk` 本就以 `product_names` 的原始 name 迭代，line 201），同名以先到為準，與 `_reconcile` 的 `setdefault` 去重語意一致。
 
 **(d) `Estimator.__init__` 收 config**：新增 keyword-only 參數 `anchor_floor: AnchorFloorConfig | None = None`，存為 `self._anchor_floor`。預設 None = 停用，**既有不傳此參數的呼叫端與測試一律維持 floor 關閉、零影響**。[runner.py](../../../estimator_king/bot/runner.py) 建 `Estimator` 時傳 `config.estimator_anchor_floor`。
 
@@ -138,11 +147,13 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 - `_percentile`：已知序列線性內插（如 `[100,200,300,400]` 的 p75）、單元素、空清單回 `None`。
 - `_anchor_floor`：
   - 無同類價 → 不變；
-  - `floor < suggested` → 不變；
-  - `floor > suggested` → 抬到 floor；
+  - `floor < suggested` → 不變（含 range 不動）；
+  - `floor > suggested` → suggested 抬到 floor；
   - 命中溢價組 → 用較高 tier percentile；
   - 多組命中 → 取 max；
   - 只命中 general（無溢價）→ 用 general；
+  - **溢價關鍵字以 `query` 參數判定、非 `est.product_name`**：給一筆 `query` 含溢價關鍵字、但 `est.product_name` 為不含關鍵字的改寫名，驗證仍套用 premium tier（防 finding 1 回歸）；
+  - **floor 抬高時 range 重算**：`new_suggested > 原 suggested` 時，依 confidence 帶確保 `max ≥ round(new_suggested × (1+up))`（上方仍有 headroom、不貼上緣）、`min ≤ new_suggested`，且與原區間取較寬者（覆蓋不縮）；
   - 哨兵 `suggested == 0` → 不變；
   - `cfg is None` → 不變；
   - 回傳為新物件、原物件未就地修改；
@@ -154,6 +165,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 - query 落 `その他` 時，同類集合即 `その他` refs（噪音較大，floor 較不可靠）—— 接受，與 retrieval 既有行為一致。
 - **結構性低估不在本輪解決範圍**：`ポーチ`/`ピンバッジ`/`SKNB` 等「排除本尊後真價高於所有保留同類 refs」的案例，任何 ref-based floor 都搆不到（floor 上限 = 同類 refs 的百分位，仍低於真價）。明確列為已知限制，不在本輪追求消除。
 - 關鍵字子字串可能誤命中（罕見）→ 由 config 清單控制，接受。
+- **rationale 文字微幅落後**：floor 抬高 suggested 後，`confidence` 與 `rationale` 文字未隨之改寫（仍描述上錨前的估價）。`confidence` 只被用來選 range 上偏帶不致誤導；rationale 為模型 prose，deterministic 改寫成本高且非本輪目標——列為接受殘差。range 已由 §2 step 4 重算以維持覆蓋率（硬驗收條件），故此殘差僅影響 rationale 用語、不影響數值正確性。
 
 **eval 對齊（有效性關鍵）**：[eval_estimate.py](../../../scripts/analysis/eval_estimate.py) 的 `build_context` 比照 [experiment_anchor_floor.py](../../../scripts/analysis/experiment_anchor_floor.py) 多收集同類 ref 價格，並在 `run_once` 對每筆套用 `_anchor_floor`（用與 production 相同的 `config.estimator_anchor_floor`），否則 before/after 量到的不是上線行為。`experiment_anchor_floor.py` 的分層邏輯亦改為讀 config 的 `premium_tiers`（取代寫死的 `PREMIUM_KW` 與單一百分位 sweep），作為校準台。
 
@@ -171,7 +183,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 
 ## 文件同步（強制）
 
-更新 [docs/data-pipeline.md](../../../docs/data-pipeline.md)：於 reconcile → snap 之間新增 `_anchor_floor` 階段，記錄其機制（同類 top_k refs 取百分位、分層 effective_pct = max(general, 命中組)、只抬不壓、哨兵/空集 no-op）、控制設定 key（`estimator.anchor_floor`）、對應函式位置（`file:line`）、與設計理由（prompt 對 mini 失效 → deterministic 硬化；分層因一般/溢價兩組最佳百分位相差約 10pp）。
+更新 [docs/data-pipeline.md](../../../docs/data-pipeline.md)：於 reconcile → snap 之間新增 `_anchor_floor` 階段，記錄其機制（以**原始 query** 為鍵、同類 top_k refs 取百分位、分層 effective_pct = max(general, 命中組)、只抬不壓、抬高時依 confidence 帶重算 range 以維持上偏與覆蓋率、哨兵/空集/cfg-None no-op）、控制設定 key（`estimator.anchor_floor`）、對應函式位置（`file:line`）、與設計理由（prompt 對 mini 失效 → deterministic 硬化；分層因一般/溢價兩組最佳百分位相差約 10pp）。
 
 ## 驗證指令
 
