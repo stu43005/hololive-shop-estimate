@@ -87,6 +87,7 @@ estimator:
 對每筆估價（query 字串 + 它的同類 ref 價格清單）：
 
 1. **取數基準**：同類 refs = 送進模型的 **top_k context 中 `item_type ∈ classify_query(query)` 且 `price_jpy > 0`** 的 ref 價格清單。這些是模型實際被 grounding 的同類比價。
+   - **`その他` query 一律 no-op（明確契約）**：`classify_query` 對 `その他` 回傳 **`[]`**（[typing.py:94](../../../estimator_king/sync/typing.py)），故 `type_set` 為空 → 同類集合必為空 → 經 1b 直接 no-op。**`その他` 永不套 floor**，維持模型原估價（最保守，符合 `その他` 是噪音桶）。不為 `その他` 另立「OTHER 桶」或改 retrieval 契約去撈 `その他` refs（避免在最噪音的桶上加 guardrail）。
 1b. **稀疏守門（必要前置）**：若同類 ref 數 `< cfg.min_refs`（含空清單）→ floor **no-op**，直接信任模型估價。理由：樣本太少時百分位不可靠，單一貴 ref（first-run / 罕見 type / `その他` 噪音）會被當權威把 suggested 硬抬、再圍它撐寬 range，把 retrieval 噪音變成不可逆上錨。
    - **不宣稱百分位本身免疫離群**：須明確認知在**小樣本邊界**（例如 `n == 3`）下，p70 仍幾乎由最高那筆 ref 決定，`min_refs` + 百分位**並不**保證避免單 ref 過錨。因此 `min_refs` 的安全值（與各百分位在小樣本下是否安全）**由分層校準實證決定，不由本 spec 斷言**（見 §5：校準須按同類 ref 數分桶回報，floor 僅在小樣本桶不退步時才上線）。
    - **小樣本收斂槓桿**：(1) **預設、in-scope**：提高 `min_refs`（既有 config 欄位即可，使欠證據的小樣本直接 no-op）。(2) **可選、需新增 config key 故預設不實作（YAGNI，校準證明提高 min_refs 太鈍才做）**：對 `n` 低於某門檻的樣本把 `effective_pct` 夾為 ≤ 50（median）；此 lever 一旦採用需在 `AnchorFloorConfig` 增 `small_sample_median_below: int`，列為後續迭代而非本輪預設路徑。
@@ -162,6 +163,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
   - **溢價關鍵字以 `query` 參數判定、非 `est.product_name`**：給一筆 `query` 含溢價關鍵字、但 `est.product_name` 為不含關鍵字的改寫名，驗證仍套用 premium tier（防 finding 1 回歸）；
   - **floor 抬高時 range 重算**：`new_suggested > 原 suggested` 時，依 confidence 帶確保 `max ≥ round(new_suggested × (1+up))`（上方仍有 headroom、不貼上緣）、`min ≤ new_suggested`，且與原區間取較寬者（覆蓋不縮）；
   - **稀疏守門**：同類 ref 數 `< min_refs`（含單一 ref、空清單）→ floor **no-op**（防 finding 回歸）；恰 `== min_refs` → 套用；
+  - **`その他` no-op**：`classify_query` 回 `[]`（同類集合空）→ floor no-op，維持原估價（鎖死契約、防實作 drift）；
   - **關鍵字變體比對（NFKC + casefold）**：給溢價關鍵字的全形/半形變體（如半形 `ﾓｺﾓｺ` vs 全形 `もこもこ` 對應、含拉丁字大小寫 `Big`/`BIG`）的 query，驗證仍命中 premium tier；無關字串不誤命中（防 finding 2 回歸）；
   - **audit log**：floor 生效時發 `logger.info` 含 query / 原→floored / effective_pct / floor_value / ref 數（可用 caplog 斷言生效時有記、no-op 時無記）；
   - 哨兵 `suggested == 0` → 不變；
@@ -172,7 +174,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 - **既有測試維持綠燈**：不傳 `anchor_floor` 的 `Estimator` floor 停用；`_estimate_chunk` 回傳型別改為 tuple，需更新既有直接呼叫 `_estimate_chunk` 的測試解包（若有）——除解包外行為不變。
 
 **邊界 / 已知殘差**：
-- query 落 `その他` 時，同類集合即 `その他` refs（噪音較大）—— 由 `min_refs` 守門（樣本不足直接 no-op）+ 百分位（非 max）共同緩解；殘餘噪音接受，與 retrieval 既有行為一致。
+- query 落 `その他`（`classify_query == []`）→ 同類集合恆空 → floor **一律 no-op**，維持模型原估價（見 §2 step 1）。`その他` 不在 floor 範圍，亦不另立 OTHER 桶；屬明確契約而非殘差。
 - **結構性低估不在本輪解決範圍**：`ポーチ`/`ピンバッジ`/`SKNB` 等「排除本尊後真價高於所有保留同類 refs」的案例，任何 ref-based floor 都搆不到（floor 上限 = 同類 refs 的百分位，仍低於真價）。明確列為已知限制，不在本輪追求消除。
 - 關鍵字子字串可能誤命中（罕見）→ 由 config 清單控制，接受。
 - **rationale 文字微幅落後**：floor 抬高 suggested 後，`confidence` 與 `rationale` 文字未隨之改寫（仍描述上錨前的估價）。`confidence` 只被用來選 range 上偏帶不致誤導；rationale 為模型 prose，deterministic 改寫成本高且非本輪目標——列為接受殘差。可稽核性由 §3(f) audit log 提供（runtime 可分辨哪些估價被上錨、幅度多少），range 已由 §2 step 4 重算以維持覆蓋率（硬驗收條件），故此殘差僅影響 rationale 用語、不影響數值正確性與可稽核性。
