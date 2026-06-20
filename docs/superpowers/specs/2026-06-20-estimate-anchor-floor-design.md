@@ -70,6 +70,7 @@ estimator:
     general_percentile: 60          # 一般品旋鈕（0–100 整數）；整段省略 = 關閉 floor
     min_refs: 3                     # 同類 ref 數 < 此值 → 不上錨（稀疏/噪音守門）
     full_percentile_min_refs: 5     # 同類 ref 數 < 此值 → effective_pct 夾為 ≤ 50（小樣本安全預設）
+    max_lift_ratio: 1.6             # floor 欲抬高 > 模型估價 × 此倍率 → no-op（離群/壞 ref 守門）
     premium_tiers:                  # 清單：每組各自的旋鈕 + 關鍵字
       - percentile: 70
         keywords: ["温感", "もこもこ", "あったか", "なりきり"]
@@ -78,6 +79,7 @@ estimator:
 - **一般品旋鈕** = `general_percentile`（單一 0–100 整數）。
 - **稀疏守門** = `min_refs`（正整數，預設 3）：同類 ref 數**少於** `min_refs` → floor **no-op**（見 §2）。防止 first-run / 罕見 type / `その他` 噪音下，單一貴 ref 被當權威硬抬。
 - **小樣本安全夾（runtime 不變式）** = `full_percentile_min_refs`（正整數，預設 5，須 ≥ `min_refs`）：同類 ref 數 **`[min_refs, full_percentile_min_refs)`** 時，`effective_pct` 一律**夾為 ≤ 50（median）**；只有 ref 數 **≥ `full_percentile_min_refs`** 才套用 config 的 general/premium 百分位。理由：小樣本下 p70 幾乎由最高 ref 決定，median 是抗離群的中央統計。此為**程式強制的安全預設**——預設組態下根本無法在小樣本套激進百分位（machine-enforced fail-closed，非僅流程承諾）；校準若有 powered 證據證明小樣本可安全套高百分位，才把此值調低放開（見 §5）。
+- **離群/上限守門** = `max_lift_ratio`（float ≥ 1.0，預設 1.6）：即使樣本足夠，corrupted/誤分類/包款等不可比的高價 ref 仍可能主導 top_k≤10 的 p60/p70。若 `floor_value > round(原 suggested × max_lift_ratio)`（floor 想把價格抬高超過該倍率）→ floor **no-op + audit log**（視為模型與 refs 嚴重不一致、不可信，退回信任模型）。因 floor 只抬不壓，此倍率上限把**單一壞 ref 造成的 user-visible 過估**限縮為「至多不發生」，是有界失敗（bounded-failure）保證。倍率由校準定（太低會擋掉合法大幅修正、太高失去守門意義）。
 - **清單** = `premium_tiers`，每組 = `{percentile: int, keywords: list[str]}`，可任意多組、各設不同旋鈕與不同關鍵字。
 - 關鍵字清單**完全在 config**，程式不寫死。
 - 整段 `anchor_floor` 省略（或缺）→ floor **關閉**（向後相容；回滾 = 刪掉這段）。
@@ -103,7 +105,9 @@ estimator:
    - 命中一組或多組 → 取「general 與所有命中組」中**最高**的百分位。
    - 此規則順序無關、多重命中自動取最猛（符合「優先殺低估」），且保證命中溢價的品項 floor 永遠 ≥ 一般品 floor（即使某溢價組誤設低於 general 也不會反而更鬆）。
 2.5. **小樣本安全夾（machine-enforced）**：若同類 ref 數 `< cfg.full_percentile_min_refs`，令 `effective_pct = min(effective_pct, 50)`。即 ref 數在 `[min_refs, full_percentile_min_refs)` 的小樣本一律退回 median（抗離群）；≥ `full_percentile_min_refs` 才用 step 2 的完整百分位。此夾為 runtime 不變式，預設組態（5）下小樣本拿不到 p60/p70。
-3. **上錨 suggested**：`floor_value = _percentile(同類refs, effective_pct)`；`new_suggested = max(suggested, round(floor_value))`。**只會抬高、永不壓低。**
+3. **上錨 suggested（含上限守門）**：`floor_value = _percentile(同類refs, effective_pct)`。
+   - **離群上限**：若 `floor_value > round(原 suggested × cfg.max_lift_ratio)` → floor **no-op + audit log 記 skip**（floor 想抬太多 = 模型與 refs 嚴重不一致，多半是壞/不可比 ref，退回信任模型）。原 suggested == 0 哨兵不適用（已於 step 7 no-op）。
+   - 否則 `new_suggested = max(suggested, round(floor_value))`。**只會抬高、永不壓低**，且抬幅有界（≤ `max_lift_ratio`）。
 4. **floor 抬高時一併重算 range（避免上緣無 headroom、覆蓋率退步）**：若 `new_suggested > 原 suggested`，依該筆 `confidence` 對應的上偏帶（high −20%/+30%、medium −25%/+45%、low −30%/+60%，與 prompt `<range_and_confidence>` 一致）圍繞 `new_suggested` 重建區間，且與原區間取較寬者以不縮減覆蓋：
    - `new_min = min(原 min, round(new_suggested × (1 − down)))`
    - `new_max = max(原 max, round(new_suggested × (1 + up)))`
@@ -145,12 +149,14 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 **(d) `Estimator.__init__` 收 config**：新增 keyword-only 參數 `anchor_floor: AnchorFloorConfig | None = None`，存為 `self._anchor_floor`。預設 None = 停用，**既有不傳此參數的呼叫端與測試一律維持 floor 關閉、零影響**。[runner.py](../../../estimator_king/bot/runner.py) 建 `Estimator` 時傳 `config.estimator_anchor_floor`。
 
 **(e) [config_schema.py](../../../estimator_king/config_schema.py)**：
-- 新增 `@dataclass AnchorTier(percentile: int, keywords: list[str])`、`@dataclass AnchorFloorConfig(general_percentile: int, min_refs: int, full_percentile_min_refs: int, premium_tiers: list[AnchorTier])`。
+- 新增 `@dataclass AnchorTier(percentile: int, keywords: list[str])`、`@dataclass AnchorFloorConfig(general_percentile: int, min_refs: int, full_percentile_min_refs: int, max_lift_ratio: float, premium_tiers: list[AnchorTier])`。
 - `AppConfig` 新增欄位 `estimator_anchor_floor: AnchorFloorConfig | None`。
-- `from_yaml` 解析 `estimator.anchor_floor`：缺 → `None`；存在 → 建 `AnchorFloorConfig`（`min_refs` 缺省 3、`full_percentile_min_refs` 缺省 5、`premium_tiers` 缺省為空 list）。
-- `config.validate()`（結構驗證）：若 `estimator_anchor_floor` 非 None，檢查 `general_percentile` 與每個 tier 的 `percentile` 為 0–100 整數、`min_refs` 為 ≥ 1 的整數、**`full_percentile_min_refs` 為 ≥ `min_refs` 的整數**（強制小樣本安全夾的有效性）、每個 tier 的 `keywords` 為非空的非空字串清單；違反則拋與既有結構驗證一致的錯誤。
+- `from_yaml` 解析 `estimator.anchor_floor`：缺 → `None`；存在 → 建 `AnchorFloorConfig`（`min_refs` 缺省 3、`full_percentile_min_refs` 缺省 5、`max_lift_ratio` 缺省 1.6、`premium_tiers` 缺省為空 list）。
+- `config.validate()`（結構驗證）：若 `estimator_anchor_floor` 非 None，檢查 `general_percentile` 與每個 tier 的 `percentile` 為 0–100 整數、`min_refs` 為 ≥ 1 的整數、**`full_percentile_min_refs` 為 ≥ `min_refs` 的整數**（強制小樣本安全夾有效性）、**`max_lift_ratio` 為 ≥ 1.0 的數**、每個 tier 的 `keywords` 為非空的非空字串清單；違反則拋與既有結構驗證一致的錯誤。
 
-**(f) 可稽核性（audit log）**：floor 實際生效（`new_suggested > 原 suggested`）時，發一條 `logger.info` 記錄 `query`、原 suggested → floored suggested、`effective_pct`、`floor_value`、同類 ref 數，沿用本專案既有「以 log 做 runtime 歸因」的模式（對照 prompt_hash 日誌）。如此 runtime log 可分辨「模型估價」與「floor 調整過的估價」，下游/事後除錯可稽核哪些估價被後處理上錨、幅度多少。不改 `ProductEstimate` schema（避免動到 chat schema 與 bot 輸出），可稽核性由 log 提供。
+**(f) 可稽核性（audit log）**：floor 生效（`new_suggested > 原 suggested`）或被 `max_lift_ratio` skip 時，發一條 `logger.info` 記錄 `query`、原 suggested → floored suggested（skip 則記原值與被擋的 `floor_value`）、`effective_pct`、`floor_value`、同類 ref 數、是否 skip，沿用本專案既有「以 log 做 runtime 歸因」的模式（對照 prompt_hash 日誌）。runtime log 可分辨「模型估價」與「floor 調整過的估價」、以及哪些被上限擋下。
+
+**為何不持久化 provenance 到 `ProductEstimate`（scope 決定，非疏漏）**：本 bot 的估價結果**不被持久化**——`/estimate` 拿到 `EstimateBatch` 後直接格式化為 Discord embed 回覆（[commands.py:172](../../../estimator_king/bot/commands.py) → `_format` embeds），無任何 estimate 寫入 DB/repo。既無「持久化的歷史估價」可供事後 reprocess，audit **log 即是 durable record**（搭配既有 prompt_hash）；回滾 = 刪 config + 重啟，過往 Discord 訊息本就不會被重算。故在只序列化進 Discord 訊息的 `ProductEstimate` 上加 provenance 欄位屬 YAGNI、且會無謂牽動 chat schema 與 bot 輸出。若日後改為持久化估價，再評估把 provenance 入庫。
 
 ### §4 測試與邊界
 
@@ -168,13 +174,14 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
   - **稀疏守門**：同類 ref 數 `< min_refs`（含單一 ref、空清單）→ floor **no-op**（防 finding 回歸）；恰 `== min_refs` → 套用；
   - **`その他` no-op**：`classify_query` 回 `[]`（同類集合空）→ floor no-op，維持原估價（鎖死契約、防實作 drift）；
   - **小樣本安全夾**：ref 數在 `[min_refs, full_percentile_min_refs)` 時，即使命中 premium p70 或 general p60，`effective_pct` 仍被夾為 ≤ 50（用 median 算 floor）；ref 數 ≥ `full_percentile_min_refs` 才套完整 p60/p70（防 high finding 回歸，鎖死 runtime 不變式）；
+  - **離群上限 no-op**：refs 含一個極端高價使 `floor_value > 原 suggested × max_lift_ratio` → floor **no-op**（suggested/range 不變）、發 skip audit log；floor_value 在倍率內 → 正常套用（鎖死 bounded-failure）；
   - **關鍵字變體比對（NFKC + casefold）**：給溢價關鍵字的全形/半形變體（如半形 `ﾓｺﾓｺ` vs 全形 `もこもこ` 對應、含拉丁字大小寫 `Big`/`BIG`）的 query，驗證仍命中 premium tier；無關字串不誤命中（防 finding 2 回歸）；
   - **audit log**：floor 生效時發 `logger.info` 含 query / 原→floored / effective_pct / floor_value / ref 數（可用 caplog 斷言生效時有記、no-op 時無記）；
   - 哨兵 `suggested == 0` → 不變；
   - `cfg is None` → 不變；
   - 回傳為新物件、原物件未就地修改；
   - 與 `_snap_estimate` 串接後仍保 `min ≤ suggested ≤ max` 且落 ¥110 格點。
-- config 解析/驗證：合法區塊解析為 `AnchorFloorConfig`（含 `min_refs`、`full_percentile_min_refs`，缺省 3/5）；缺區塊 → `None`（停用）；`percentile` 越界（<0 或 >100）→ validate 報錯；`min_refs < 1` → validate 報錯；`full_percentile_min_refs < min_refs` → validate 報錯；空 `keywords` → validate 報錯。
+- config 解析/驗證：合法區塊解析為 `AnchorFloorConfig`（含 `min_refs`、`full_percentile_min_refs`、`max_lift_ratio`，缺省 3/5/1.6）；缺區塊 → `None`（停用）；`percentile` 越界（<0 或 >100）→ validate 報錯；`min_refs < 1` → validate 報錯；`full_percentile_min_refs < min_refs` → validate 報錯；`max_lift_ratio < 1.0` → validate 報錯；空 `keywords` → validate 報錯。
 - **既有測試維持綠燈**：不傳 `anchor_floor` 的 `Estimator` floor 停用；`_estimate_chunk` 回傳型別改為 tuple，需更新既有直接呼叫 `_estimate_chunk` 的測試解包（若有）——除解包外行為不變。
 
 **邊界 / 已知殘差**：
@@ -188,7 +195,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 ## §5 部署、回滾、校準、非目標
 
 - **部署/回滾**：改動為 config 段 + `estimator.py`/`config_schema.py` 程式。floor 由 `anchor_floor` config 段控制：刪掉該段 + 重啟 bot 即停用。**不動 retrieval / embedding / vector ID / SQLite schema → 切換前後 chroma/SQLite 完全相容，回滾不需 `rm -rf chroma/` 或 `--force-refetch`**（對照 CLAUDE.md「Re-index on indexing-model change」僅適用索引層改動）。
-- **校準（上線前必做）**：`general=60 / premium=70 / min_refs=3 / full_percentile_min_refs=5` 為**待驗起始點**（後三者預設即 fail-closed 安全）。以對齊後的 `experiment_anchor_floor.py`（讀 config 分層 + 兩道守門 + **按同類 ref 數分桶回報**）確認：分層 signed err、各守門對命中率/穩定度的影響、以及**小樣本桶是否在放開 median 夾後過錨**。再以 `eval_estimate.py --runs ≥ 3` 取 before/after，數據記入 PR / commit。
+- **校準（上線前必做）**：`general=60 / premium=70 / min_refs=3 / full_percentile_min_refs=5` 為**待驗起始點**（後三者預設即 fail-closed 安全）。以對齊後的 `experiment_anchor_floor.py`（讀 config 分層 + 兩道守門 + **按同類 ref 數分桶回報**）確認：分層 signed err、各守門對命中率/穩定度的影響、以及**小樣本桶是否在放開 median 夾後過錨**。再以 `eval_estimate.py --runs ≥ 3` 取 before/after，數據記入 PR / commit。**before/after 必須是「停用 vs 啟用 anchor_floor」的對照**：baseline run 在 `anchor_floor` 停用下跑（config 省略該段，或 eval 以 `estimator_anchor_floor=None` 建 Estimator），candidate run 在啟用下跑，同 fixtures/同 `--runs`；切勿兩邊都啟用而誤拿 candidate 跟自己比。
 - **稀疏守門閘門（machine-enforced 預設 + 校準才放開）**：安全性由 **runtime 不變式**保證，不靠流程紀律——預設 `full_percentile_min_refs=5` 下，ref 數 `[min_refs, 5)` 的小樣本一律被夾到 median（§2 step 2.5），**根本無法套 p60/p70**。要把 p60/p70 放開到更小的樣本，**唯一途徑是調低 `full_percentile_min_refs`，而這必須有 powered 證據**：
   - **校準腳本每桶必出欄位**：bucket 範圍、bucket N、因 `min_refs` skip 數、floor 生效數、signed/MAPE、**該桶 pass/fail**。
   - **powered 桶定義**：該桶 **floor 生效數 ≥ `MIN_BUCKET_N`（取 5）** 才算有證據。
@@ -204,7 +211,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 
 ## 文件同步（強制）
 
-更新 [docs/data-pipeline.md](../../../docs/data-pipeline.md)：於 reconcile → snap 之間新增 `_anchor_floor` 階段，記錄其機制（以**原始 query** 為鍵、關鍵字以 NFKC+casefold 正規化兩側比對、`min_refs` 稀疏守門、同類 top_k refs 取百分位、分層 effective_pct = max(general, 命中組)、只抬不壓、抬高時依 confidence 帶重算 range 以維持上偏與覆蓋率、floor 生效發 audit log、哨兵/空集/cfg-None no-op）、控制設定 key（`estimator.anchor_floor`）、對應函式位置（`file:line`）、與設計理由（prompt 對 mini 失效 → deterministic 硬化；分層因一般/溢價兩組最佳百分位相差約 10pp）。
+更新 [docs/data-pipeline.md](../../../docs/data-pipeline.md)：於 reconcile → snap 之間新增 `_anchor_floor` 階段，記錄其機制（以**原始 query** 為鍵、關鍵字以 NFKC+casefold 正規化兩側比對、`min_refs` 稀疏守門、`full_percentile_min_refs` 小樣本 median 夾、同類 top_k refs 取百分位、分層 effective_pct = max(general, 命中組)、`max_lift_ratio` 離群上限 no-op、只抬不壓且抬幅有界、抬高時依 confidence 帶重算 range 以維持上偏與覆蓋率、floor 生效/skip 發 audit log、哨兵/空集/`その他`/cfg-None no-op）、控制設定 key（`estimator.anchor_floor`）、對應函式位置（`file:line`）、與設計理由（prompt 對 mini 失效 → deterministic 硬化；分層因一般/溢價兩組最佳百分位相差約 10pp）。
 
 ## 驗證指令
 
@@ -221,4 +228,5 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 | 溢價 tier `percentile` | 70 | sweep：溢價品 signed +0.1%（最接近 0；p75 過矯到 +1.9%） |
 | `min_refs` | 3 | 稀疏守門下限起點；< 此 → no-op |
 | `full_percentile_min_refs` | 5 | 小樣本安全夾預設；`[3,5)` 退 median，machine-enforced fail-closed |
+| `max_lift_ratio` | 1.6 | 離群上限；floor 抬幅 > ×1.6 → no-op（bounded failure） |
 | 溢價 `keywords` | `温感, もこもこ, あったか, なりきり` | quick verify 的溢價品定義；對應 prompt `<anchoring>` 溢價關鍵字 |
