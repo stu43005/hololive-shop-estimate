@@ -113,7 +113,7 @@ estimator:
    - `new_max = max(原 max, round(new_suggested × (1 + up)))`
    floor 未生效（`new_suggested == 原 suggested`）→ range 不動。如此抬高後 suggested 不會貼在區間上緣，保留上方 headroom，覆蓋率不因上錨而退步。
 5. **不就地修改**：以 `model_copy(update={...})` 產生新物件（更新 `suggested_price_jpy`，floor 生效時一併更新 `price_range_jpy` 與 `rationale`）。最終既有的 `_snap_estimate` 仍負責格點正規化與 `min ≤ suggested ≤ max` 收尾。
-6. **rationale 附加 provenance（持久化稽核）**：floor 生效時，在 `rationale` **尾端附加**一行 deterministic 註記（如 `[anchor floor: ¥2750→¥3410 @p60, n=6]`，記原→floored、effective_pct、同類 ref 數）。因估價唯一持久化的成品是 Discord embed，把 provenance 寫進 rationale 使**該成品自帶稽核資訊**（不依賴 log 留存），同時化解「rationale 用語落後於上錨後價格」的殘差。`confidence` 不改（僅用於選 range 上偏帶）；未生效/skip 不附加。此為文字附加、非重寫模型 prose。
+6. **rationale 前綴 provenance（持久化稽核、抗截斷）**：floor 生效時，把一段 deterministic 註記**前綴（prepend）**到 `rationale` 最前（如 `[anchor floor: ¥2750→¥3410 @p60, n=6] <模型原 rationale>`，記原→floored、effective_pct、同類 ref 數）。**必須前綴、不可附在尾端**：Discord formatter 將 rationale 截到 300 字（[commands.py:62](../../../estimator_king/bot/commands.py) `rationale[:297]+"..."`），尾端附加會在長 rationale 被截掉，丟失唯一持久化成品（embed）裡的稽核資訊（對抗審查 finding）；前綴則永遠在截斷視窗內。因估價唯一持久化成品是 Discord embed，把 provenance 寫進 rationale 使**該成品自帶稽核資訊**（不依賴 log 留存），同時化解「rationale 用語落後於上錨後價格」。`confidence` 不改；未生效/skip 不前綴。此為文字前綴、非重寫模型 prose。formatter 維持現行截斷邏輯不需改（前綴已在 297 字視窗內）。
 7. **哨兵保留**：`suggested_price_jpy == 0`（`_reconcile` 的 no-estimate 哨兵）→ floor **no-op**，不破壞哨兵語意。
 8. **cfg 為 None**（未設定 / 停用）→ floor **no-op**。
 
@@ -161,7 +161,7 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 - `config.validate()`（結構驗證）：若 `estimator_anchor_floor` 非 None，檢查 `general_percentile` 與每個 tier 的 `percentile` 為 0–100 整數、`min_refs` 為 ≥ 1 的整數、**`full_percentile_min_refs` 為 ≥ `min_refs` 的整數**（強制小樣本安全夾有效性）、**`max_lift_ratio` 為 ≥ 1.0 的數**、每個 tier 的 `keywords` 為非空的非空字串清單；違反則拋與既有結構驗證一致的錯誤。
 
 **(f) 可稽核性（雙軌：持久化 rationale + runtime log）**：
-- **持久化（user-facing）**：floor 生效時把 provenance 附加進 `rationale`（§2 step 6），隨 Discord embed 一起成為**唯一持久化成品的一部分**——使用者日後質疑某筆估價時，embed 本身即顯示它是模型原生還是被 floor 上修、幅度與百分位，不依賴 log 留存假設。
+- **持久化（user-facing）**：floor 生效時把 provenance **前綴**進 `rationale`（§2 step 6，刻意前綴以存活 formatter 的 300 字截斷），隨 Discord embed 一起成為**唯一持久化成品的一部分**——使用者日後質疑某筆估價時，embed 本身即顯示它是模型原生還是被 floor 上修、幅度與百分位，不依賴 log 留存假設。
 - **runtime log**：floor 生效或被 `max_lift_ratio` skip 時，另發一條 `logger.info` 記 `query`、原→floored（skip 記原值與被擋的 `floor_value`）、`effective_pct`、`floor_value`、同類 ref 數、是否 skip，沿用既有 prompt_hash 歸因模式，供營運/除錯。
 - **不加 `ProductEstimate` 新欄位**：provenance 走既有 `rationale` 字串欄位即足夠（embed 已顯示 rationale），毋須改 chat schema／bot 輸出；估價本就不寫入 DB（[commands.py:172](../../../estimator_king/bot/commands.py) 直接轉 embed），無持久化估價需 reprocess。若日後改為入庫估價，再評估結構化 provenance 欄位。
 
@@ -184,7 +184,8 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
   - **離群上限 no-op**：refs 含一個極端高價使 `floor_value > 原 suggested × max_lift_ratio` → floor **no-op**（suggested/range 不變）、發 skip audit log；floor_value 在倍率內 → 正常套用（鎖死 bounded-failure）；
   - **關鍵字變體比對（NFKC + casefold）**：給溢價關鍵字的全形/半形變體（如半形 `ﾓｺﾓｺ` vs 全形 `もこもこ` 對應、含拉丁字大小寫 `Big`/`BIG`）的 query，驗證仍命中 premium tier；無關字串不誤命中（防 finding 2 回歸）；
   - **audit log**：floor 生效時發 `logger.info` 含 query / 原→floored / effective_pct / floor_value / ref 數（可用 caplog 斷言生效時有記、no-op 時無記）；
-  - **rationale provenance 附加**：floor 生效 → `rationale` 尾端含 provenance 註記（原→floored、effective_pct、ref 數）；floor no-op/skip → rationale 不變（防回歸）；
+  - **rationale provenance 前綴**：floor 生效 → `rationale` **開頭**含 provenance 註記（原→floored、effective_pct、ref 數）；floor no-op/skip → rationale 不變（防回歸）；
+  - **provenance 抗截斷（formatter 測試）**：對一筆 rationale 長度 > 300 字、且已被 floor 前綴 provenance 的估價跑 `commands.py` 的格式化（300 字截斷），斷言 provenance 註記仍出現在輸出（前綴在 297 字視窗內、不被截掉；防 finding 回歸）；
   - 哨兵 `suggested == 0` → 不變；
   - `cfg is None` → 不變；
   - 回傳為新物件、原物件未就地修改；
@@ -204,7 +205,9 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 ## §5 部署、回滾、校準、非目標
 
 - **部署/回滾**：改動為 config 段 + `estimator.py`/`config_schema.py` 程式。floor 由 `anchor_floor` config 段控制：刪掉該段 + 重啟 bot 即停用。**不動 retrieval / embedding / vector ID / SQLite schema → 切換前後 chroma/SQLite 完全相容，回滾不需 `rm -rf chroma/` 或 `--force-refetch`**（對照 CLAUDE.md「Re-index on indexing-model change」僅適用索引層改動）。
-- **shipped config 啟用、安全性靠守門而非預設停用**：實作**直接把 `anchor_floor` 段寫進 `stores_config.yaml`**（起始值啟用），程式保留「absent → disabled」供回滾。enabled-by-default 之所以仍保守，是因起始值本身受**三道機器守門**保護：`min_refs=3`（稀疏 no-op）、`full_percentile_min_refs=5`（小樣本夾 median，激進百分位拿不到）、`max_lift_ratio=1.6`（離群抬幅 no-op），且 quick verify 已顯示這組值在現有資料上 signed≈−3%～0、MAPE 在雜訊帶內。**校準/驗收仍為 merge 前必做**（用 `experiment_anchor_floor.py` 分桶 + `eval_estimate.py` before/after，數據記入 commit）——但定位是「確認/調優起始值」，非「閘住 config 是否能存在」。本 bot 單實例、operator 即 developer，不另建 CI/startup eval 閘（對無 SLA 個人專案不成比例）；config 結構由既有 `config.validate()` 把關。
+- **shipped config 啟用（使用者決定）、安全性靠守門 + fail-closed 驗收指令**：實作**直接把 `anchor_floor` 段寫進 `stores_config.yaml`**（起始值啟用），程式保留「absent → disabled」供回滾。enabled-by-default 之所以仍保守，是因起始值本身受**三道機器守門**保護：`min_refs=3`（稀疏 no-op）、`full_percentile_min_refs=5`（小樣本夾 median，激進百分位拿不到）、`max_lift_ratio=1.6`（離群抬幅 no-op），且 quick verify 已顯示這組值在現有資料上 signed≈−3%～0、MAPE 在雜訊帶內。
+  - **merge 前驗收（fail-closed 指令）**：`eval_estimate.py` 擴充為**驗收閘指令**——除既有 INVALID 非零退出外，再於「signed err 未實質改善 / MAPE 超 baseline+2pp / 覆蓋率降 / no-estimate 非子集」任一不滿足時**以非零退出**並印未過項。merge 前必跑 disabled-vs-enabled before/after，**通過（exit 0）才 merge，數據記入 commit**。如此「驗收」是可執行、會 fail-closed 的指令，不只是文件承諾。
+  - **接受的殘餘風險（依使用者決定）**：此驗收為 operator 手動執行，非 CI/startup 強制；理論上可被略過。鑑於本 bot 單實例、無 SLA、operator 即 developer、且三道守門已 bound 下行風險，**使用者明確選擇 ship enabled 並接受此殘餘**（對抗審查 finding 提議 CI/startup 閘，經評估對此專案不成比例而不採）。config 結構由既有 `config.validate()` 把關。
 - **校準（上線前必做）**：`general=60 / premium=70 / min_refs=3 / full_percentile_min_refs=5` 為**待驗起始點**（後三者預設即 fail-closed 安全）。以對齊後的 `experiment_anchor_floor.py`（讀 config 分層 + 兩道守門 + **按同類 ref 數分桶回報**）確認：分層 signed err、各守門對命中率/穩定度的影響、以及**小樣本桶是否在放開 median 夾後過錨**。再以 `eval_estimate.py --runs ≥ 3` 取 before/after，數據記入 PR / commit。**before/after 必須是「停用 vs 啟用 anchor_floor」的對照**：baseline run 在 `anchor_floor` 停用下跑（config 省略該段，或 eval 以 `estimator_anchor_floor=None` 建 Estimator），candidate run 在啟用下跑，同 fixtures/同 `--runs`；切勿兩邊都啟用而誤拿 candidate 跟自己比。
 - **稀疏守門閘門（machine-enforced 預設 + 校準才放開）**：安全性由 **runtime 不變式**保證，不靠流程紀律——預設 `full_percentile_min_refs=5` 下，ref 數 `[min_refs, 5)` 的小樣本一律被夾到 median（§2 step 2.5），**根本無法套 p60/p70**。要把 p60/p70 放開到更小的樣本，**唯一途徑是調低 `full_percentile_min_refs`，而這必須有 powered 證據**：
   - **校準腳本每桶必出欄位**：bucket 範圍、bucket N、因 `min_refs` skip 數、floor 生效數、signed/MAPE、**該桶 pass/fail**。
