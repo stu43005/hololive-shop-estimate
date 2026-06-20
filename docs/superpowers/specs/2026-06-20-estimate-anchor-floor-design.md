@@ -69,6 +69,7 @@ estimator:
   anchor_floor:
     general_percentile: 60          # 一般品旋鈕（0–100 整數）；整段省略 = 關閉 floor
     min_refs: 3                     # 同類 ref 數 < 此值 → 不上錨（稀疏/噪音守門）
+    full_percentile_min_refs: 5     # 同類 ref 數 < 此值 → effective_pct 夾為 ≤ 50（小樣本安全預設）
     premium_tiers:                  # 清單：每組各自的旋鈕 + 關鍵字
       - percentile: 70
         keywords: ["温感", "もこもこ", "あったか", "なりきり"]
@@ -76,6 +77,7 @@ estimator:
 
 - **一般品旋鈕** = `general_percentile`（單一 0–100 整數）。
 - **稀疏守門** = `min_refs`（正整數，預設 3）：同類 ref 數**少於** `min_refs` → floor **no-op**（見 §2）。防止 first-run / 罕見 type / `その他` 噪音下，單一貴 ref 被當權威硬抬。
+- **小樣本安全夾（runtime 不變式）** = `full_percentile_min_refs`（正整數，預設 5，須 ≥ `min_refs`）：同類 ref 數 **`[min_refs, full_percentile_min_refs)`** 時，`effective_pct` 一律**夾為 ≤ 50（median）**；只有 ref 數 **≥ `full_percentile_min_refs`** 才套用 config 的 general/premium 百分位。理由：小樣本下 p70 幾乎由最高 ref 決定，median 是抗離群的中央統計。此為**程式強制的安全預設**——預設組態下根本無法在小樣本套激進百分位（machine-enforced fail-closed，非僅流程承諾）；校準若有 powered 證據證明小樣本可安全套高百分位，才把此值調低放開（見 §5）。
 - **清單** = `premium_tiers`，每組 = `{percentile: int, keywords: list[str]}`，可任意多組、各設不同旋鈕與不同關鍵字。
 - 關鍵字清單**完全在 config**，程式不寫死。
 - 整段 `anchor_floor` 省略（或缺）→ floor **關閉**（向後相容；回滾 = 刪掉這段）。
@@ -90,7 +92,7 @@ estimator:
    - **`その他` query 一律 no-op（明確契約）**：`classify_query` 對 `その他` 回傳 **`[]`**（[typing.py:94](../../../estimator_king/sync/typing.py)），故 `type_set` 為空 → 同類集合必為空 → 經 1b 直接 no-op。**`その他` 永不套 floor**，維持模型原估價（最保守，符合 `その他` 是噪音桶）。不為 `その他` 另立「OTHER 桶」或改 retrieval 契約去撈 `その他` refs（避免在最噪音的桶上加 guardrail）。
 1b. **稀疏守門（必要前置）**：若同類 ref 數 `< cfg.min_refs`（含空清單）→ floor **no-op**，直接信任模型估價。理由：樣本太少時百分位不可靠，單一貴 ref（first-run / 罕見 type / `その他` 噪音）會被當權威把 suggested 硬抬、再圍它撐寬 range，把 retrieval 噪音變成不可逆上錨。
    - **不宣稱百分位本身免疫離群**：須明確認知在**小樣本邊界**（例如 `n == 3`）下，p70 仍幾乎由最高那筆 ref 決定，`min_refs` + 百分位**並不**保證避免單 ref 過錨。因此 `min_refs` 的安全值（與各百分位在小樣本下是否安全）**由分層校準實證決定，不由本 spec 斷言**（見 §5：校準須按同類 ref 數分桶回報，floor 僅在小樣本桶不退步時才上線）。
-   - **小樣本收斂槓桿**：(1) **預設、in-scope**：提高 `min_refs`（既有 config 欄位即可，使欠證據的小樣本直接 no-op）。(2) **可選、需新增 config key 故預設不實作（YAGNI，校準證明提高 min_refs 太鈍才做）**：對 `n` 低於某門檻的樣本把 `effective_pct` 夾為 ≤ 50（median）；此 lever 一旦採用需在 `AnchorFloorConfig` 增 `small_sample_median_below: int`，列為後續迭代而非本輪預設路徑。
+   - **小樣本安全夾（machine-enforced、預設開）**：見步驟 2.5——同類 ref 數 `< full_percentile_min_refs` 時 `effective_pct` 自動夾為 ≤ 50（median）。這是**runtime 不變式**，不靠流程紀律：預設組態下小樣本永遠拿不到 p70。校準有 powered 證據才把 `full_percentile_min_refs` 調低放開（§5）。
 2. **決定有效百分位**（同時 resolve「多組命中」）：
    ```
    effective_pct = max( general_percentile,
@@ -100,6 +102,7 @@ estimator:
    - 未命中任何溢價組 → `general_percentile`。
    - 命中一組或多組 → 取「general 與所有命中組」中**最高**的百分位。
    - 此規則順序無關、多重命中自動取最猛（符合「優先殺低估」），且保證命中溢價的品項 floor 永遠 ≥ 一般品 floor（即使某溢價組誤設低於 general 也不會反而更鬆）。
+2.5. **小樣本安全夾（machine-enforced）**：若同類 ref 數 `< cfg.full_percentile_min_refs`，令 `effective_pct = min(effective_pct, 50)`。即 ref 數在 `[min_refs, full_percentile_min_refs)` 的小樣本一律退回 median（抗離群）；≥ `full_percentile_min_refs` 才用 step 2 的完整百分位。此夾為 runtime 不變式，預設組態（5）下小樣本拿不到 p60/p70。
 3. **上錨 suggested**：`floor_value = _percentile(同類refs, effective_pct)`；`new_suggested = max(suggested, round(floor_value))`。**只會抬高、永不壓低。**
 4. **floor 抬高時一併重算 range（避免上緣無 headroom、覆蓋率退步）**：若 `new_suggested > 原 suggested`，依該筆 `confidence` 對應的上偏帶（high −20%/+30%、medium −25%/+45%、low −30%/+60%，與 prompt `<range_and_confidence>` 一致）圍繞 `new_suggested` 重建區間，且與原區間取較寬者以不縮減覆蓋：
    - `new_min = min(原 min, round(new_suggested × (1 − down)))`
@@ -142,10 +145,10 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 **(d) `Estimator.__init__` 收 config**：新增 keyword-only 參數 `anchor_floor: AnchorFloorConfig | None = None`，存為 `self._anchor_floor`。預設 None = 停用，**既有不傳此參數的呼叫端與測試一律維持 floor 關閉、零影響**。[runner.py](../../../estimator_king/bot/runner.py) 建 `Estimator` 時傳 `config.estimator_anchor_floor`。
 
 **(e) [config_schema.py](../../../estimator_king/config_schema.py)**：
-- 新增 `@dataclass AnchorTier(percentile: int, keywords: list[str])`、`@dataclass AnchorFloorConfig(general_percentile: int, min_refs: int, premium_tiers: list[AnchorTier])`。
+- 新增 `@dataclass AnchorTier(percentile: int, keywords: list[str])`、`@dataclass AnchorFloorConfig(general_percentile: int, min_refs: int, full_percentile_min_refs: int, premium_tiers: list[AnchorTier])`。
 - `AppConfig` 新增欄位 `estimator_anchor_floor: AnchorFloorConfig | None`。
-- `from_yaml` 解析 `estimator.anchor_floor`：缺 → `None`；存在 → 建 `AnchorFloorConfig`（`min_refs` 缺省 3、`premium_tiers` 缺省為空 list）。
-- `config.validate()`（結構驗證）：若 `estimator_anchor_floor` 非 None，檢查 `general_percentile` 與每個 tier 的 `percentile` 為 0–100 整數、`min_refs` 為 ≥ 1 的整數、每個 tier 的 `keywords` 為非空的非空字串清單；違反則拋與既有結構驗證一致的錯誤。
+- `from_yaml` 解析 `estimator.anchor_floor`：缺 → `None`；存在 → 建 `AnchorFloorConfig`（`min_refs` 缺省 3、`full_percentile_min_refs` 缺省 5、`premium_tiers` 缺省為空 list）。
+- `config.validate()`（結構驗證）：若 `estimator_anchor_floor` 非 None，檢查 `general_percentile` 與每個 tier 的 `percentile` 為 0–100 整數、`min_refs` 為 ≥ 1 的整數、**`full_percentile_min_refs` 為 ≥ `min_refs` 的整數**（強制小樣本安全夾的有效性）、每個 tier 的 `keywords` 為非空的非空字串清單；違反則拋與既有結構驗證一致的錯誤。
 
 **(f) 可稽核性（audit log）**：floor 實際生效（`new_suggested > 原 suggested`）時，發一條 `logger.info` 記錄 `query`、原 suggested → floored suggested、`effective_pct`、`floor_value`、同類 ref 數，沿用本專案既有「以 log 做 runtime 歸因」的模式（對照 prompt_hash 日誌）。如此 runtime log 可分辨「模型估價」與「floor 調整過的估價」，下游/事後除錯可稽核哪些估價被後處理上錨、幅度多少。不改 `ProductEstimate` schema（避免動到 chat schema 與 bot 輸出），可稽核性由 log 提供。
 
@@ -164,13 +167,14 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
   - **floor 抬高時 range 重算**：`new_suggested > 原 suggested` 時，依 confidence 帶確保 `max ≥ round(new_suggested × (1+up))`（上方仍有 headroom、不貼上緣）、`min ≤ new_suggested`，且與原區間取較寬者（覆蓋不縮）；
   - **稀疏守門**：同類 ref 數 `< min_refs`（含單一 ref、空清單）→ floor **no-op**（防 finding 回歸）；恰 `== min_refs` → 套用；
   - **`その他` no-op**：`classify_query` 回 `[]`（同類集合空）→ floor no-op，維持原估價（鎖死契約、防實作 drift）；
+  - **小樣本安全夾**：ref 數在 `[min_refs, full_percentile_min_refs)` 時，即使命中 premium p70 或 general p60，`effective_pct` 仍被夾為 ≤ 50（用 median 算 floor）；ref 數 ≥ `full_percentile_min_refs` 才套完整 p60/p70（防 high finding 回歸，鎖死 runtime 不變式）；
   - **關鍵字變體比對（NFKC + casefold）**：給溢價關鍵字的全形/半形變體（如半形 `ﾓｺﾓｺ` vs 全形 `もこもこ` 對應、含拉丁字大小寫 `Big`/`BIG`）的 query，驗證仍命中 premium tier；無關字串不誤命中（防 finding 2 回歸）；
   - **audit log**：floor 生效時發 `logger.info` 含 query / 原→floored / effective_pct / floor_value / ref 數（可用 caplog 斷言生效時有記、no-op 時無記）；
   - 哨兵 `suggested == 0` → 不變；
   - `cfg is None` → 不變；
   - 回傳為新物件、原物件未就地修改；
   - 與 `_snap_estimate` 串接後仍保 `min ≤ suggested ≤ max` 且落 ¥110 格點。
-- config 解析/驗證：合法區塊解析為 `AnchorFloorConfig`（含 `min_refs`）；缺區塊 → `None`（停用）；`percentile` 越界（<0 或 >100）→ validate 報錯；`min_refs < 1` → validate 報錯；空 `keywords` → validate 報錯。
+- config 解析/驗證：合法區塊解析為 `AnchorFloorConfig`（含 `min_refs`、`full_percentile_min_refs`，缺省 3/5）；缺區塊 → `None`（停用）；`percentile` 越界（<0 或 >100）→ validate 報錯；`min_refs < 1` → validate 報錯；`full_percentile_min_refs < min_refs` → validate 報錯；空 `keywords` → validate 報錯。
 - **既有測試維持綠燈**：不傳 `anchor_floor` 的 `Estimator` floor 停用；`_estimate_chunk` 回傳型別改為 tuple，需更新既有直接呼叫 `_estimate_chunk` 的測試解包（若有）——除解包外行為不變。
 
 **邊界 / 已知殘差**：
@@ -184,13 +188,12 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 ## §5 部署、回滾、校準、非目標
 
 - **部署/回滾**：改動為 config 段 + `estimator.py`/`config_schema.py` 程式。floor 由 `anchor_floor` config 段控制：刪掉該段 + 重啟 bot 即停用。**不動 retrieval / embedding / vector ID / SQLite schema → 切換前後 chroma/SQLite 完全相容，回滾不需 `rm -rf chroma/` 或 `--force-refetch`**（對照 CLAUDE.md「Re-index on indexing-model change」僅適用索引層改動）。
-- **校準（上線前必做）**：`general=60 / premium=70 / min_refs=3` 為**待驗起始點、非已證安全值**。以對齊後的 `experiment_anchor_floor.py`（讀 config 分層 + `min_refs` 守門 + **按同類 ref 數分桶回報**）確認：分層 signed err、稀疏守門對命中率/穩定度的影響、以及**小樣本桶（n 接近 `min_refs`）是否出現過錨**。再以 `eval_estimate.py --runs ≥ 3` 取 before/after，數據記入 PR / commit。
-- **稀疏守門閘門（fail-closed，上線條件）**：「小桶不退步」必須以足夠樣本判定，否則空桶/欠樣會假性通過、放行它要防的風險。具體規則：
-  - **校準腳本每桶必出欄位**：bucket 範圍、bucket N（落入該桶的 fixture 數）、因 `min_refs` 被 skip 的數、floor 實際生效數、signed/MAPE、**該桶 pass/fail 判定**。
-  - **powered 桶定義**：該桶 **floor 生效數 ≥ `MIN_BUCKET_N`（取 5）** 才算「有證據」。
-  - **fail-closed**：任一**小樣本桶**（`n` 在 `[min_refs, min_refs+1]`）為**空或欠樣**（floor 生效數 `< MIN_BUCKET_N`）→ **視為未通過**，不得在該 ref-count 範圍套用激進百分位。此時採 §2 step 1b 的保守槓桿：**預設（in-scope）提高 `min_refs`** 使欠證據的小樣本變 no-op；median-clamp 為需新 config key 的 deferred 選項。即「無證據 → 退保守」，永不「無證據 → 套 p70」。
-  - 僅 **powered 且不退步** 的 ref-count 範圍才啟用 p60/p70；欠樣範圍維持保守，直到日後擴充 fixtures 取得證據再放開。
-  - `min_refs` 太高會讓 floor 鮮少生效（top_k=10 下許多 query 同類 ref 不多）、太低則放行噪音，最終值由上述分桶證據定。
+- **校準（上線前必做）**：`general=60 / premium=70 / min_refs=3 / full_percentile_min_refs=5` 為**待驗起始點**（後三者預設即 fail-closed 安全）。以對齊後的 `experiment_anchor_floor.py`（讀 config 分層 + 兩道守門 + **按同類 ref 數分桶回報**）確認：分層 signed err、各守門對命中率/穩定度的影響、以及**小樣本桶是否在放開 median 夾後過錨**。再以 `eval_estimate.py --runs ≥ 3` 取 before/after，數據記入 PR / commit。
+- **稀疏守門閘門（machine-enforced 預設 + 校準才放開）**：安全性由 **runtime 不變式**保證，不靠流程紀律——預設 `full_percentile_min_refs=5` 下，ref 數 `[min_refs, 5)` 的小樣本一律被夾到 median（§2 step 2.5），**根本無法套 p60/p70**。要把 p60/p70 放開到更小的樣本，**唯一途徑是調低 `full_percentile_min_refs`，而這必須有 powered 證據**：
+  - **校準腳本每桶必出欄位**：bucket 範圍、bucket N、因 `min_refs` skip 數、floor 生效數、signed/MAPE、**該桶 pass/fail**。
+  - **powered 桶定義**：該桶 **floor 生效數 ≥ `MIN_BUCKET_N`（取 5）** 才算有證據。
+  - **放開規則**：`full_percentile_min_refs` 只能調低到「該值以上的每個小樣本桶都 powered 且不退步」為止；任一欲放開的桶空/欠樣 → 不得調低（維持安全夾）。即「無證據 → 維持 median 夾」，**預設組態天生 fail-closed，無需人為記得**。
+  - `min_refs` 太高會讓 floor 鮮少生效（top_k=10 下許多 query 同類 ref 不多）、太低則放行噪音；`full_percentile_min_refs` 控制「多大樣本才信任高百分位」。兩者最終值由分桶證據定。
 - **相對驗收準則**（延續第二輪精神，25 筆手標樣本上設絕對門檻無意義）：candidate 相對 baseline 同時滿足——
   - **mean signed err 絕對值實質下降**（本輪首要目標；預期由 ≈ −10% 收斂到 |signed| ≤ 約 3%）；
   - **MAPE 不顯著變差**（允許 ≤ baseline + 2pp 的抽樣雜訊；超過則回頭調百分位）；
@@ -216,4 +219,6 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 | --- | --- | --- |
 | `general_percentile` | 60 | sweep：一般品 signed −0.5%（最接近 0） |
 | 溢價 tier `percentile` | 70 | sweep：溢價品 signed +0.1%（最接近 0；p75 過矯到 +1.9%） |
+| `min_refs` | 3 | 稀疏守門下限起點；< 此 → no-op |
+| `full_percentile_min_refs` | 5 | 小樣本安全夾預設；`[3,5)` 退 median，machine-enforced fail-closed |
 | 溢價 `keywords` | `温感, もこもこ, あったか, なりきり` | quick verify 的溢價品定義；對應 prompt `<anchoring>` 溢價關鍵字 |
