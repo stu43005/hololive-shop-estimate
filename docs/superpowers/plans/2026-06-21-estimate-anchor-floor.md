@@ -170,7 +170,7 @@ def test_anchor_floor_defaults(tmp_path, monkeypatch):
 """)
     af = cfg.estimator_anchor_floor
     assert af.min_refs == 3 and af.full_percentile_min_refs == 5
-    assert af.max_lift_ratio == 1.6 and af.premium_tiers == ()
+    assert af.max_lift_ratio == 1.6 and af.premium_tiers == []
 
 
 @pytest.mark.parametrize("block", [
@@ -290,8 +290,10 @@ def parse_anchor_floor(est: dict) -> "AnchorFloorConfig | None":
         raise ValueError("anchor_floor must be a mapping")
     if "general_percentile" not in af:
         raise ValueError("anchor_floor requires general_percentile")
-    raw_tiers = af.get("premium_tiers", []) or []
-    if not isinstance(raw_tiers, list):
+    raw_tiers = af.get("premium_tiers", [])
+    if raw_tiers is None:  # explicit `premium_tiers:` (null) means "no tiers"
+        raw_tiers = []
+    if not isinstance(raw_tiers, list):  # rejects scalar / false / 0, not silently empty
         raise ValueError("anchor_floor.premium_tiers must be a list")
     tiers: list[AnchorTier] = []
     for t in raw_tiers:
@@ -476,6 +478,14 @@ def test_anchor_floor_does_not_mutate_original():
     e = _est_full("ポーチ", 2200, 1800, 2900)
     _anchor_floor("ポーチ", e, _REFS5, _CFG)
     assert e.suggested_price_jpy == 2200 and e.rationale == "r"
+
+
+def test_anchor_floor_then_snap_invariants():
+    e = _est_full("ポーチ", 2200, 1800, 2900, conf="medium")
+    out = _snap_estimate(_anchor_floor("ポーチ", e, _REFS5, _CFG))
+    assert out.price_range_jpy.min <= out.suggested_price_jpy <= out.price_range_jpy.max
+    for v in (out.suggested_price_jpy, out.price_range_jpy.min, out.price_range_jpy.max):
+        assert v % 110 == 0
 
 
 def test_anchor_floor_logs_apply_and_skip(caplog):
@@ -706,12 +716,14 @@ Replace the whole `_estimate_chunk` (line 199-226) with:
                     if prev is None or hit.distance < prev.distance:
                         merged[hit.id] = hit
             ranked = self._rerank(list(merged.values()))[: self._top_k]
-            prices_by_name[normalize_text(name)] = [
-                int(h.metadata.get("price_jpy", 0) or 0)
-                for h in ranked
-                if str(h.metadata.get("item_type", "") or "") in type_set
-                and int(h.metadata.get("price_jpy", 0) or 0) > 0
-            ]
+            key = normalize_text(name)
+            if key not in prices_by_name:  # first occurrence wins (matches _reconcile)
+                prices_by_name[key] = [
+                    int(h.metadata.get("price_jpy", 0) or 0)
+                    for h in ranked
+                    if str(h.metadata.get("item_type", "") or "") in type_set
+                    and int(h.metadata.get("price_jpy", 0) or 0) > 0
+                ]
             refs = "\n".join(self._format_reference(h) for h in ranked)
             context_blocks.append(f"### Query: {name}\n{refs or '(no matches)'}")
         user_prompt = (
@@ -1154,7 +1166,7 @@ def main() -> None:
 
     print(f"\n========== BANDS by same-type ref count (MIN_BUCKET_N={MIN_BUCKET_N}) ==========")
     print(f"  skipped by min_refs (n<{cfg.min_refs}): {skipped_min_refs} fixtures")
-    print(f"  {'n':>3} {'N':>3} {'applied':>7} {'baseSgn':>8} {'candSgn':>8} "
+    print(f"  {'n':>3} {'N':>3} {'mrSkip':>6} {'applied':>7} {'baseSgn':>8} {'candSgn':>8} "
           f"{'baseMAPE':>8} {'candMAPE':>8} {'region':>7} {'verdict':>9}")
     for n in sorted(bands):
         rs = bands[n]
@@ -1165,14 +1177,14 @@ def main() -> None:
         b_mape = statistics.mean(r[1] for r in rs)
         c_mape = statistics.mean(r[3] for r in rs)
         if n < cfg.min_refs:
-            region, verdict = "skip", "n/a"
+            region, verdict, mr_skip = "skip", "n/a", N
         else:
-            region = "clamp" if n < cfg.full_percentile_min_refs else "full"
+            region, mr_skip = ("clamp" if n < cfg.full_percentile_min_refs else "full"), 0
             powered = applied_n >= MIN_BUCKET_N
-            not_regressing = abs(c_sgn) <= abs(b_sgn) + 1.0 and c_mape <= b_mape + 2.0
+            not_regressing = abs(c_sgn) <= abs(b_sgn) and c_mape <= b_mape + 2.0
             verdict = "PASS" if (powered and not_regressing) else (
                 "underpow" if not powered else "REGRESS")
-        print(f"  {n:>3} {N:>3} {applied_n:>7} {b_sgn:>+7.1f}% {c_sgn:>+7.1f}% "
+        print(f"  {n:>3} {N:>3} {mr_skip:>6} {applied_n:>7} {b_sgn:>+7.1f}% {c_sgn:>+7.1f}% "
               f"{b_mape:>7.1f}% {c_mape:>7.1f}% {region:>7} {verdict:>9}")
 
     print("\nREAD: only open the aggressive percentile to a ref-count band whose verdict is")
@@ -1242,13 +1254,28 @@ git commit -m "docs(data-pipeline): document anchor-floor post-processing stage"
 
 - [ ] **Step 1: Calibrate candidate values (config still disabled)**
 
-The experiment takes candidate values from CLI (single tier) or `--candidate-config <yaml>` (arbitrary multi-tier), so it works while `stores_config.yaml` has no `anchor_floor`:
-Run: `set -a; source .env; set +a; PYTHONPATH=. .venv/bin/python scripts/analysis/experiment_anchor_floor.py --runs 3 --general 60 --premium 70 --min-refs 3 --full-min-refs 5 --max-lift 1.6`
+Write the **exact** candidate `anchor_floor` block you intend to enable to a temp YAML, and calibrate against it with `--candidate-config` (so calibration tests precisely what Step 2 will commit, including multiple tiers). This works while `stores_config.yaml` has no `anchor_floor`:
+
+```bash
+cat > /tmp/anchor_candidate.yaml <<'YAML'
+estimator:
+  anchor_floor:
+    general_percentile: 60
+    min_refs: 3
+    full_percentile_min_refs: 5
+    max_lift_ratio: 1.6
+    premium_tiers:
+      - percentile: 70
+        keywords: ["温感", "もこもこ", "あったか", "なりきり"]
+YAML
+set -a; source .env; set +a
+PYTHONPATH=. .venv/bin/python scripts/analysis/experiment_anchor_floor.py --runs 3 --candidate-config /tmp/anchor_candidate.yaml
+```
 Read the **BANDS by same-type ref count** table. The `region` column shows `clamp` (n in `[min_refs, full_percentile_min_refs)`, forced to median) vs `full` (n ≥ `full_percentile_min_refs`, gets the configured percentile). Every band you are **opening to the aggressive percentile** — i.e. every `full` band, plus any band you would move from `clamp` to `full` by lowering `--full-min-refs` — must read `verdict = PASS` (≥ `MIN_BUCKET_N` floor-applied AND `|signed|` not worse AND MAPE within +2pp). If a band reads `underpow` or `REGRESS`, do **not** open it: raise `--full-min-refs` (keep those n clamped to median) or `--min-refs` (no-op). Re-run until every opened band is PASS. Record the final values for Step 2.
 
 - [ ] **Step 2: Add the config block with the calibrated values**
 
-Add to `stores_config.yaml` under `estimator:` (use the values confirmed in Step 1; example shows the spec starting values):
+Add to `stores_config.yaml` under `estimator:` **the same `anchor_floor` block you calibrated in Step 1** (`/tmp/anchor_candidate.yaml`, adjusted if Step 1's band verdicts forced a higher `full_percentile_min_refs`/`min_refs`):
 
 ```yaml
   anchor_floor:
@@ -1276,12 +1303,21 @@ Expected: prints BASELINE and CANDIDATE blocks and ends `ACCEPTANCE: PASS` with 
 
 - [ ] **Step 4: Commit the enablement with evidence (via git-master)**
 
+Build a non-interactive commit whose body carries the recorded acceptance evidence (do **not** run a bare `git commit`, which opens an editor):
+
 ```bash
 git add stores_config.yaml
-git commit  # body: paste the BASELINE vs CANDIDATE block from /tmp/eval_anchor.txt (signed/MAPE/coverage/no-estimate) + ACCEPTANCE: PASS
+{
+  echo "feat(config): enable anchor_floor"
+  echo
+  echo "Eval acceptance gate (disabled vs enabled, runs=3):"
+  grep -A1 -E "BASELINE|CANDIDATE" /tmp/eval_anchor.txt
+  grep -E "ACCEPTANCE" /tmp/eval_anchor.txt
+} > /tmp/anchor_commit_msg.txt
+git commit -F /tmp/anchor_commit_msg.txt
 ```
 
-Message: `feat(config): enable anchor_floor` + the recorded before/after acceptance data.
+(Via git-master per repo convention; the `-F` form keeps it non-interactive and embeds the BASELINE/CANDIDATE/ACCEPTANCE evidence.)
 
 - [ ] **Step 5: Restart the bot** to load the enabled config. Rollback at any time = remove the `anchor_floor` block + restart.
 
