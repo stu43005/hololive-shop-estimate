@@ -47,7 +47,7 @@
 
 改動範圍：
 
-1. [stores_config.yaml](../../../stores_config.yaml)：新增 `estimator.anchor_floor`（一般品旋鈕 + 溢價分層清單，含關鍵字）。
+1. [stores_config.yaml](../../../stores_config.yaml)：新增 `estimator.anchor_floor`（一般品旋鈕 + 溢價分層清單，含關鍵字）——**於獨立的啟用 commit、eval 通過後才加入**（兩段式上線，見 §5）；實作 PR 本身不含此段。
 2. [config_schema.py](../../../estimator_king/config_schema.py)：新增 `AnchorTier` / `AnchorFloorConfig` dataclass + 解析 + 驗證。
 3. [estimator.py](../../../estimator_king/bot/estimator.py)：`_estimate_chunk` 多回傳同類 ref 價格；新增純函式 `_percentile` 與 `_anchor_floor`；`estimate_products` 串接；`Estimator.__init__` 收 config。
 4. [runner.py](../../../estimator_king/bot/runner.py)：建 `Estimator` 時傳入 `config.estimator_anchor_floor`。
@@ -82,7 +82,7 @@ estimator:
 - **離群/上限守門** = `max_lift_ratio`（float ≥ 1.0，預設 1.6）：即使樣本足夠，corrupted/誤分類/包款等不可比的高價 ref 仍可能主導 top_k≤10 的 p60/p70。若 `floor_value > round(原 suggested × max_lift_ratio)`（floor 想把價格抬高超過該倍率）→ floor **no-op + audit log**（視為模型與 refs 嚴重不一致、不可信，退回信任模型）。因 floor 只抬不壓，此倍率上限把**單一壞 ref 造成的 user-visible 過估**限縮為「至多不發生」，是有界失敗（bounded-failure）保證。倍率由校準定（太低會擋掉合法大幅修正、太高失去守門意義）。
 - **清單** = `premium_tiers`，每組 = `{percentile: int, keywords: list[str]}`，可任意多組、各設不同旋鈕與不同關鍵字。
 - 關鍵字清單**完全在 config**，程式不寫死。
-- **實作時直接把上方整段 `anchor_floor` 加入 [stores_config.yaml](../../../stores_config.yaml)**（用起始值啟用 floor）。程式端**維持「省略此段 → floor 關閉」規則**（向後相容；回滾 = 刪掉這段 + 重啟）。即：shipped config 啟用、但「absent → disabled」契約不變，停用/回滾只需移除該段。
+- **兩段式上線**（見 §5）：**實作 PR 不在 [stores_config.yaml](../../../stores_config.yaml) 放 `anchor_floor`**（程式 ship 時 floor 停用、零行為改變）；跑完 eval 驗收後，以**獨立 config-only commit** 把上方整段 `anchor_floor`（起始值）加入 `stores_config.yaml` 啟用。程式端**維持「省略此段 → floor 關閉」規則**（向後相容；回滾 = 刪掉這段 + 重啟）。即上方 yaml 是**啟用 commit 的內容**，非實作 PR 預設值。
 - 百分位採 0–100 整數（`p60` 寫 `60`），與「百分位」語意一致；不與 `recency_weight`（0–1 weight）強求格式一致，因兩者語意不同。
 - 起始值 `general=60 / premium=70 / min_refs=3` 取自 sweep 與稀疏守門考量，上線前再校準（見 §5）。
 
@@ -205,9 +205,12 @@ reconciled = [_snap_estimate(e) for e in reconciled]                    # 既有
 ## §5 部署、回滾、校準、非目標
 
 - **部署/回滾**：改動為 config 段 + `estimator.py`/`config_schema.py` 程式。floor 由 `anchor_floor` config 段控制：刪掉該段 + 重啟 bot 即停用。**不動 retrieval / embedding / vector ID / SQLite schema → 切換前後 chroma/SQLite 完全相容，回滾不需 `rm -rf chroma/` 或 `--force-refetch`**（對照 CLAUDE.md「Re-index on indexing-model change」僅適用索引層改動）。
-- **shipped config 啟用（使用者決定）、安全性靠守門 + fail-closed 驗收指令**：實作**直接把 `anchor_floor` 段寫進 `stores_config.yaml`**（起始值啟用），程式保留「absent → disabled」供回滾。enabled-by-default 之所以仍保守，是因起始值本身受**三道機器守門**保護：`min_refs=3`（稀疏 no-op）、`full_percentile_min_refs=5`（小樣本夾 median，激進百分位拿不到）、`max_lift_ratio=1.6`（離群抬幅 no-op），且 quick verify 已顯示這組值在現有資料上 signed≈−3%～0、MAPE 在雜訊帶內。
-  - **merge 前驗收（fail-closed 指令）**：`eval_estimate.py` 擴充為**驗收閘指令**——除既有 INVALID 非零退出外，再於「signed err 未實質改善 / MAPE 超 baseline+2pp / 覆蓋率降 / no-estimate 非子集」任一不滿足時**以非零退出**並印未過項。merge 前必跑 disabled-vs-enabled before/after，**通過（exit 0）才 merge，數據記入 commit**。如此「驗收」是可執行、會 fail-closed 的指令，不只是文件承諾。
-  - **接受的殘餘風險（依使用者決定）**：此驗收為 operator 手動執行，非 CI/startup 強制；理論上可被略過。鑑於本 bot 單實例、無 SLA、operator 即 developer、且三道守門已 bound 下行風險，**使用者明確選擇 ship enabled 並接受此殘餘**（對抗審查 finding 提議 CI/startup 閘，經評估對此專案不成比例而不採）。config 結構由既有 `config.validate()` 把關。
+- **兩段式上線（程式先停用、eval 過再以 config 啟用）**：把「驗收先於啟用」排進流程順序，使「未驗收的啟用」無法存在於同一步：
+  1. **實作 PR（程式碼）**：ship `estimator.py`/`config_schema.py`/eval/experiment/tests，但**`stores_config.yaml` 不含 `anchor_floor`** → 程式預設 `estimator_anchor_floor=None`、floor 停用、零行為改變。此 PR 不改變任何使用者可見估價。
+  2. **驗收（fail-closed 指令）**：`eval_estimate.py` 擴充為驗收閘——除既有 INVALID 非零退出外，再於「signed err 未實質改善 / MAPE 超 baseline+2pp / 覆蓋率降 / no-estimate 非子集」任一不滿足時**非零退出**並印未過項。跑 disabled-vs-enabled before/after（candidate 用待啟用的 `anchor_floor` 值），**通過（exit 0）才進下一步**。
+  3. **啟用（獨立 config-only commit）**：eval 通過後，才用一個**只動 `stores_config.yaml`**、加入 `anchor_floor`（起始值）的 commit 啟用 floor，**commit 訊息附上該次 eval 的 before/after 數據與通過判定**。
+  - 此順序即評審要求的「程式先 disabled，啟用須在 recorded eval 之後」——啟用 commit 與其驗收證據綁在一起、可稽核、可單獨 `git revert` 回到停用。
+  - 啟用後安全性仍由**三道機器守門**續保（`min_refs=3` 稀疏 no-op、`full_percentile_min_refs=5` 小樣本夾 median、`max_lift_ratio=1.6` 離群 no-op）；config 結構由既有 `config.validate()` 把關。本 bot 單實例、無 CI 部署管線，不另建 CI/startup artifact 閘（對無 SLA 個人專案不成比例）；以「程式停用 + 啟用 commit 綁驗收數據」作為相稱 gate。
 - **校準（上線前必做）**：`general=60 / premium=70 / min_refs=3 / full_percentile_min_refs=5` 為**待驗起始點**（後三者預設即 fail-closed 安全）。以對齊後的 `experiment_anchor_floor.py`（讀 config 分層 + 兩道守門 + **按同類 ref 數分桶回報**）確認：分層 signed err、各守門對命中率/穩定度的影響、以及**小樣本桶是否在放開 median 夾後過錨**。再以 `eval_estimate.py --runs ≥ 3` 取 before/after，數據記入 PR / commit。**before/after 必須是「停用 vs 啟用 anchor_floor」的對照**：baseline run 在 `anchor_floor` 停用下跑（config 省略該段，或 eval 以 `estimator_anchor_floor=None` 建 Estimator），candidate run 在啟用下跑，同 fixtures/同 `--runs`；切勿兩邊都啟用而誤拿 candidate 跟自己比。
 - **稀疏守門閘門（machine-enforced 預設 + 校準才放開）**：安全性由 **runtime 不變式**保證，不靠流程紀律——預設 `full_percentile_min_refs=5` 下，ref 數 `[min_refs, 5)` 的小樣本一律被夾到 median（§2 step 2.5），**根本無法套 p60/p70**。要把 p60/p70 放開到更小的樣本，**唯一途徑是調低 `full_percentile_min_refs`，而這必須有 powered 證據**：
   - **校準腳本每桶必出欄位**：bucket 範圍、bucket N、因 `min_refs` skip 數、floor 生效數、signed/MAPE、**該桶 pass/fail**。
