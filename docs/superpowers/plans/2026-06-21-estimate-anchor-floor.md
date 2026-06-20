@@ -1334,4 +1334,4 @@ In Kubernetes (see [docs/ops-runbook.md](../../../docs/ops-runbook.md)) restart 
 ## Done criteria
 
 - Tasks 1–8 merged: code present, floor **disabled** (no `anchor_floor` in `stores_config.yaml`), full suite green, type-check + lint clean, docs synced.
-- Task 9 (separate commit): experiment buckets PASS, `eval_estimate.py` exits 0 with `ACCEPTANCE: PASS`, config block added with recorded before/after data, bot restarted.
+- Task 9 (separate commit): experiment band diagnostics reviewed (any small-sample bands you chose to open by lowering `full_percentile_min_refs` read PASS; underpowered exact-`n` bands at the default do not block), `eval_estimate.py` exits 0 with `ACCEPTANCE: PASS`, the calibrated config block added with recorded before/after data, bot restarted.
