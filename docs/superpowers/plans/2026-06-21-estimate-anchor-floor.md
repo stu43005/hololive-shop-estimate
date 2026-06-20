@@ -115,11 +115,11 @@ git commit -m "feat(estimator): add _percentile helper for anchor floor"
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/test_config_schema.py` (reuse the file's `_write_yaml` helper and `load_config`):
+Add to `tests/test_config_schema.py` (reuse the file's existing `_write_yaml` helper and its top-level `from estimator_king.config_schema import load_config`). Add `import pytest` if the file does not already import it, and add **only the new names** (do not re-import `load_config`):
 
 ```python
-import pytest
-from estimator_king.config_schema import AnchorFloorConfig, AnchorTier, load_config
+import pytest  # only if not already imported at the top of the file
+from estimator_king.config_schema import AnchorFloorConfig, AnchorTier
 
 _STORE = """
         stores:
@@ -159,7 +159,7 @@ def test_anchor_floor_parsed(tmp_path, monkeypatch):
     assert af.max_lift_ratio == 1.6
     assert isinstance(af.premium_tiers[0], AnchorTier)
     assert af.premium_tiers[0].percentile == 70
-    assert af.premium_tiers[0].keywords == ("温感", "もこもこ")
+    assert af.premium_tiers[0].keywords == ["温感", "もこもこ"]
 
 
 def test_anchor_floor_defaults(tmp_path, monkeypatch):
@@ -175,6 +175,9 @@ def test_anchor_floor_defaults(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("block", [
     "anchor_floor: {}",  # present but missing required general_percentile
+    "anchor_floor: 123",  # not a mapping
+    "anchor_floor:\n            general_percentile: 60\n            premium_tiers: 温感",  # not a list
+    "anchor_floor:\n            general_percentile: 60\n            premium_tiers:\n              - keywords: [\"温感\"]",  # tier missing percentile
     "anchor_floor:\n            general_percentile: 120",
     "anchor_floor:\n            general_percentile: 60.5",  # non-integer rejected, not truncated
     "anchor_floor:\n            general_percentile: 60\n            min_refs: 0",
@@ -210,11 +213,11 @@ def _req_num(name: str, value: object) -> float:
     return float(value)
 
 
-def _req_str_list(name: str, value: object) -> tuple[str, ...]:
+def _req_str_list(name: str, value: object) -> list[str]:
     if (not isinstance(value, list) or not value
             or any(not isinstance(k, str) or not k for k in value)):
         raise ValueError(f"anchor_floor.{name} must be a non-empty list of non-empty strings")
-    return tuple(value)
+    return list(value)
 
 
 @dataclass(frozen=True)
@@ -222,7 +225,7 @@ class AnchorTier:
     """One premium anchor-floor tier: a percentile + the keywords that select it."""
 
     percentile: int
-    keywords: tuple[str, ...]
+    keywords: list[str]
 
     def validate(self):
         if isinstance(self.percentile, bool) or not isinstance(self.percentile, int):
@@ -243,7 +246,7 @@ class AnchorFloorConfig:
     min_refs: int = 3
     full_percentile_min_refs: int = 5
     max_lift_ratio: float = 1.6
-    premium_tiers: tuple[AnchorTier, ...] = ()
+    premium_tiers: list[AnchorTier] = field(default_factory=list)
 
     def validate(self):
         for name in ("general_percentile", "min_refs", "full_percentile_min_refs"):
@@ -272,30 +275,45 @@ In the `AppConfig` dataclass, after line 143 (`estimator_fetch_multiplier: int =
     estimator_anchor_floor: "AnchorFloorConfig | None" = None
 ```
 
-- [ ] **Step 5: Parse in `load_config`**
+- [ ] **Step 5: Add `parse_anchor_floor` and call it in `load_config`**
 
-In `load_config`, after `est = yaml_data.get("estimator", {}) or {}` (line 290), add (note `if af is not None:` so a present-but-empty `anchor_floor: {}` is parsed and fails on the missing required key, instead of being silently disabled):
+Add a module-level parser (after the dataclasses) so both `load_config` and the calibration experiment (Task 7) can reuse it. It validates the YAML shape (mapping / list) so malformed config raises a clear `ValueError` instead of `TypeError`/`KeyError`, and a present-but-empty `anchor_floor: {}` fails on the missing required key (not silently disabled):
 
 ```python
+def parse_anchor_floor(est: dict) -> "AnchorFloorConfig | None":
+    """Build AnchorFloorConfig from an `estimator` mapping's `anchor_floor` block,
+    or None if absent. Raises ValueError on malformed shape."""
     af = est.get("anchor_floor")
-    anchor_floor = None
-    if af is not None:
-        if "general_percentile" not in af:
-            raise ValueError("anchor_floor requires general_percentile")
-        anchor_floor = AnchorFloorConfig(
-            general_percentile=_req_int("general_percentile", af["general_percentile"]),
-            min_refs=_req_int("min_refs", af.get("min_refs", 3)),
-            full_percentile_min_refs=_req_int(
-                "full_percentile_min_refs", af.get("full_percentile_min_refs", 5)),
-            max_lift_ratio=_req_num("max_lift_ratio", af.get("max_lift_ratio", 1.6)),
-            premium_tiers=tuple(
-                AnchorTier(
-                    percentile=_req_int("tier.percentile", t["percentile"]),
-                    keywords=_req_str_list("tier.keywords", t.get("keywords", [])),
-                )
-                for t in (af.get("premium_tiers", []) or [])
-            ),
-        )
+    if af is None:
+        return None
+    if not isinstance(af, dict):
+        raise ValueError("anchor_floor must be a mapping")
+    if "general_percentile" not in af:
+        raise ValueError("anchor_floor requires general_percentile")
+    raw_tiers = af.get("premium_tiers", []) or []
+    if not isinstance(raw_tiers, list):
+        raise ValueError("anchor_floor.premium_tiers must be a list")
+    tiers: list[AnchorTier] = []
+    for t in raw_tiers:
+        if not isinstance(t, dict) or "percentile" not in t:
+            raise ValueError("each premium_tiers entry must be a mapping with a percentile")
+        tiers.append(AnchorTier(
+            percentile=_req_int("tier.percentile", t["percentile"]),
+            keywords=_req_str_list("tier.keywords", t.get("keywords", [])),
+        ))
+    return AnchorFloorConfig(
+        general_percentile=_req_int("general_percentile", af["general_percentile"]),
+        min_refs=_req_int("min_refs", af.get("min_refs", 3)),
+        full_percentile_min_refs=_req_int("full_percentile_min_refs", af.get("full_percentile_min_refs", 5)),
+        max_lift_ratio=_req_num("max_lift_ratio", af.get("max_lift_ratio", 1.6)),
+        premium_tiers=tiers,
+    )
+```
+
+In `load_config`, after `est = yaml_data.get("estimator", {}) or {}` (line 290), add:
+
+```python
+    anchor_floor = parse_anchor_floor(est)
 ```
 
 Add to the `AppConfig(...)` constructor call (after `estimator_fetch_multiplier=...`, line 318):
@@ -361,7 +379,7 @@ def _est_full(name, suggested, lo, hi, conf="medium", rationale="r"):
 
 _CFG = AnchorFloorConfig(
     general_percentile=60, min_refs=3, full_percentile_min_refs=5, max_lift_ratio=1.6,
-    premium_tiers=(AnchorTier(percentile=70, keywords=("温感", "もこもこ")),),
+    premium_tiers=[AnchorTier(percentile=70, keywords=["温感", "もこもこ"])],
 )
 _REFS5 = [2000, 2500, 3000, 3500, 4000]  # linear: p50=3000, p60=3200, p70=3400
 
@@ -413,21 +431,26 @@ def test_anchor_floor_premium_keyed_on_query_not_product_name():
 def test_anchor_floor_multi_tier_takes_max():
     cfg = AnchorFloorConfig(
         general_percentile=60, min_refs=3, full_percentile_min_refs=5, max_lift_ratio=1.6,
-        premium_tiers=(AnchorTier(percentile=65, keywords=("温感",)),
-                       AnchorTier(percentile=70, keywords=("もこもこ",))))
+        premium_tiers=[AnchorTier(percentile=65, keywords=["温感"]),
+                       AnchorTier(percentile=70, keywords=["もこもこ"])])
     e = _est_full("温感もこもこ", 2200, 1800, 2900)
     out = _anchor_floor("温感もこもこ", e, _REFS5, cfg)
     assert out.suggested_price_jpy == 3400  # max(65,70)=70 -> p70
 
 
-def test_anchor_floor_keyword_nfkc_fullwidth_latin():
-    # NFKC+casefold: full-width latin ＢＩＧ -> big matches keyword "big"
+def test_anchor_floor_keyword_nfkc_variants():
+    # NFKC unifies half-width katakana ﾓｺﾓｺ -> モコモコ (matches katakana keyword),
+    # and full-width latin ＢＩＧ -> big (with casefold). It does NOT convert
+    # katakana to hiragana, so the keyword list must hold the katakana spelling.
     cfg = AnchorFloorConfig(
         general_percentile=60, min_refs=3, full_percentile_min_refs=5, max_lift_ratio=1.6,
-        premium_tiers=(AnchorTier(percentile=70, keywords=("big",)),))
-    e = _est_full("ＢＩＧぬいぐるみ", 2200, 1800, 2900)
-    out = _anchor_floor("ＢＩＧぬいぐるみ", e, _REFS5, cfg)
-    assert out.suggested_price_jpy == 3400
+        premium_tiers=[AnchorTier(percentile=70, keywords=["モコモコ", "big"])])
+    e1 = _est_full("ﾓｺﾓｺぬいぐるみ", 2200, 1800, 2900)
+    assert _anchor_floor("ﾓｺﾓｺぬいぐるみ", e1, _REFS5, cfg).suggested_price_jpy == 3400
+    e2 = _est_full("ＢＩＧぬいぐるみ", 2200, 1800, 2900)
+    assert _anchor_floor("ＢＩＧぬいぐるみ", e2, _REFS5, cfg).suggested_price_jpy == 3400
+    e3 = _est_full("ふつうのぬいぐるみ", 2200, 1800, 2900)  # no keyword -> general p60
+    assert _anchor_floor("ふつうのぬいぐるみ", e3, _REFS5, cfg).suggested_price_jpy == 3200
 
 
 def test_anchor_floor_small_sample_clamped_to_median():
@@ -944,7 +967,7 @@ Then **replace the entire body of `main` after the `Estimator(...)` is construct
 
     if candidate is not None:
         fails = []
-        # spec: |signed| must substantially decrease (handles over-correction either sign).
+        # Require directional bias toward 0 by >= 1pp (also fails over-correction).
         if abs(candidate["signed"]) > abs(baseline["signed"]) - 1.0:
             fails.append(f"|signed| not improved ({baseline['signed']:+.1f} -> {candidate['signed']:+.1f})")
         if candidate["mape"] > baseline["mape"] + 2.0:
@@ -998,9 +1021,11 @@ import statistics
 import sys
 from typing import Any
 
+import yaml
+
 from estimator_king.bot.estimator import _anchor_floor, _snap_estimate
 from estimator_king.config_schema import (
-    AnchorFloorConfig, AnchorTier, load_config,
+    AnchorFloorConfig, AnchorTier, load_config, parse_anchor_floor,
 )
 from estimator_king.runtime import build_providers
 from scripts.analysis.eval_estimate import FIXTURES, InvalidRun, run_once
@@ -1010,16 +1035,21 @@ MIN_BUCKET_N = 5
 
 def _candidate_from_cli(args: argparse.Namespace) -> AnchorFloorConfig:
     if args.candidate_config:
-        cfg = load_config(args.candidate_config).estimator_anchor_floor
+        # Parse the anchor_floor block directly (no store / full app config needed).
+        with open(args.candidate_config, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        est = data.get("estimator", data)  # accept a full config or a bare estimator block
+        cfg = parse_anchor_floor(est)
         if cfg is None:
             raise SystemExit(f"{args.candidate_config} has no estimator.anchor_floor block")
+        cfg.validate()
         return cfg
     cfg = AnchorFloorConfig(
         general_percentile=args.general, min_refs=args.min_refs,
         full_percentile_min_refs=args.full_min_refs, max_lift_ratio=args.max_lift,
-        premium_tiers=(AnchorTier(
+        premium_tiers=[AnchorTier(
             percentile=args.premium,
-            keywords=tuple(k for k in args.premium_keywords.split(",") if k)),),
+            keywords=[k for k in args.premium_keywords.split(",") if k])],
     )
     cfg.validate()
     return cfg
@@ -1098,7 +1128,7 @@ def main() -> None:
                        applied_any, last_base, last_cand)
 
     # Per-fixture table.
-    print(f"\n========== PER-FIXTURE (candidate vs baseline) ==========")
+    print("\n========== PER-FIXTURE (candidate vs baseline) ==========")
     print(f"  {'query':<34} {'n':>2} {'base':>6} {'cand':>6} marker")
     skipped_min_refs = 0
     for query, _ in FIXTURES:
@@ -1106,7 +1136,8 @@ def main() -> None:
         if _bs is None:
             marker = "sentinel"
         elif n < cfg.min_refs:
-            marker = "skip:min_refs"; skipped_min_refs += 1
+            marker = "skip:min_refs"
+            skipped_min_refs += 1
         elif applied:
             marker = "clamped" if n < cfg.full_percentile_min_refs else "lifted"
         else:
@@ -1232,8 +1263,15 @@ Add to `stores_config.yaml` under `estimator:` (use the values confirmed in Step
 
 - [ ] **Step 3: Run the eval acceptance gate (does baseline-vs-candidate internally)**
 
-Run: `set -a; source .env; set +a; PYTHONPATH=. set -o pipefail; .venv/bin/python scripts/analysis/eval_estimate.py --runs 3 2>&1 | tee /tmp/eval_anchor.txt; echo "exit=${PIPESTATUS[0]}"`
-(`${PIPESTATUS[0]}` reports the eval process status, not `tee`'s — `| tee` would otherwise always report 0.)
+Run (bash — `set -o pipefail` makes `$?` reflect the eval process, not `tee`):
+
+```bash
+set -a; source .env; set +a
+set -o pipefail
+PYTHONPATH=. .venv/bin/python scripts/analysis/eval_estimate.py --runs 3 2>&1 | tee /tmp/eval_anchor.txt
+echo "exit=$?"
+```
+
 Expected: prints BASELINE and CANDIDATE blocks and ends `ACCEPTANCE: PASS` with `exit=0`. The gate already enforces |signed|/MAPE/coverage/no-estimate fail-closed (Task 6), so a regressed candidate exits non-zero — **if `exit` is not 0, revert the Step 2 edit, adjust values, and repeat; do not commit.**
 
 - [ ] **Step 4: Commit the enablement with evidence (via git-master)**
