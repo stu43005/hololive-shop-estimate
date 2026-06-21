@@ -459,4 +459,73 @@ def test_anchor_floor_logs_apply_and_skip(caplog):
     with caplog.at_level(logging.INFO):
         _anchor_floor("x", _est_full("x", 2200, 1800, 2900),
                       [8000, 8500, 9000, 9500, 10000], _CFG)
+
+
+def _estimator_af(vs, chat, anchor_floor, typing=None, item_type="ぬいぐるみ"):
+    return Estimator(FakeEmbedder(), chat, vs,
+                     typing_provider=(typing or FakeTypingProvider(item_type)),
+                     item_types=[item_type], item_types_version=1,
+                     top_k=10, recency_weight=0.05, diversity_weight=0.0, fetch_multiplier=1,
+                     anchor_floor=anchor_floor)
+
+
+def _nui_hits():
+    return [_hit(f"r{i}", "ぬいぐるみ", p, 0, 0.1)
+            for i, p in enumerate([2000, 2500, 3000, 3500, 4000])]
+
+
+def test_pipeline_floor_raises_low_estimate():
+    vs = RecordingVectorStore(_nui_hits())
+    chat = FakeChat([_est_full("ぬいぐるみ", 2200, 1800, 2900)])
+    est = _estimator_af(vs, chat, _CFG, typing=FakeTypingProvider("ぬいぐるみ"))
+    out = est.estimate_products(["ぬいぐるみ"], "u").estimates[0]
+    assert out.suggested_price_jpy == 3190  # 3200 floor snapped to ¥110 grid
+    assert "anchor floor" in out.rationale
+
+
+def test_pipeline_floor_disabled_when_no_config():
+    vs = RecordingVectorStore(_nui_hits())
+    chat = FakeChat([_est_full("ぬいぐるみ", 2200, 1800, 2900)])
+    est = _estimator_af(vs, chat, None, typing=FakeTypingProvider("ぬいぐるみ"))
+    out = est.estimate_products(["ぬいぐるみ"], "u").estimates[0]
+    assert out.suggested_price_jpy == 2200  # snapped only
+    assert "anchor floor" not in out.rationale
+
+
+def test_pipeline_floor_noop_for_sonota_query():
+    # classify_query returns [] for その他 -> empty same-type set -> no floor
+    hits = [_hit(f"r{i}", "その他", p, 0, 0.2) for i, p in enumerate([2000, 2500, 3000, 3500, 4000])]
+    vs = RecordingVectorStore(hits)
+    chat = FakeChat([_est_full("謎の物体", 2200, 1800, 2900)])
+    est = _estimator_af(vs, chat, _CFG, typing=FakeTypingProvider("その他"))
+    out = est.estimate_products(["謎の物体"], "u").estimates[0]
+    assert out.suggested_price_jpy == 2200
+    assert "anchor floor" not in out.rationale
+
+
+def test_pipeline_floor_skipped_on_length_mismatch_short(caplog):
+    import logging
+    vs = RecordingVectorStore(_nui_hits())
+    chat = FakeChat([_est_full("ぬいぐるみ", 2200, 1800, 2900)])
+    est = _estimator_af(vs, chat, _CFG, typing=FakeTypingProvider("ぬいぐるみ"))
+    est._reconcile = lambda names, ests: []  # type: ignore[method-assign]
+    with caplog.at_level(logging.ERROR):
+        batch = est.estimate_products(["ぬいぐるみ"], "u")
+    assert any("anchor_floor skipped" in r.message for r in caplog.records)
+    assert batch.estimates == []
+
+
+def test_pipeline_floor_skipped_on_length_mismatch_long(caplog):
+    import logging
+    vs = RecordingVectorStore(_nui_hits())
+    chat = FakeChat([_est_full("ぬいぐるみ", 2200, 1800, 2900)])
+    est = _estimator_af(vs, chat, _CFG, typing=FakeTypingProvider("ぬいぐるみ"))
+    # reconcile returns TWO rows for ONE input line -> length mismatch (too many)
+    est._reconcile = lambda names, ests: [_est_full("ぬいぐるみ", 2200, 1800, 2900),
+                                          _est_full("extra", 2200, 1800, 2900)]  # type: ignore[method-assign]
+    with caplog.at_level(logging.ERROR):
+        batch = est.estimate_products(["ぬいぐるみ"], "u")
+    assert any("anchor_floor skipped" in r.message for r in caplog.records)
+    # no estimate was floored (both stay at their snapped model value)
+    assert all("anchor floor" not in e.rationale for e in batch.estimates)
     assert any("anchor_floor skip" in r.message for r in caplog.records)

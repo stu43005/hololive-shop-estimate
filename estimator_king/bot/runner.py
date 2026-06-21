@@ -52,6 +52,7 @@ def build_bot(
         recency_weight=config.estimator_recency_weight,
         diversity_weight=config.estimator_diversity_weight,
         fetch_multiplier=config.estimator_fetch_multiplier,
+        anchor_floor=config.estimator_anchor_floor,
     )
     bot = create_bot()
     tree = setup_commands(bot, config, estimator)

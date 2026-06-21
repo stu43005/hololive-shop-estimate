@@ -234,7 +234,8 @@ class Estimator:
                  item_types_version: int, top_k: int = 10,
                  recency_weight: float = 0.05,
                  diversity_weight: float = 0.05,
-                 fetch_multiplier: int = 2) -> None:
+                 fetch_multiplier: int = 2,
+                 anchor_floor: "AnchorFloorConfig | None" = None) -> None:
         self._embedder = embedder
         self._chat = chat
         self._vector_store = vector_store
@@ -245,6 +246,7 @@ class Estimator:
         self._recency_weight = recency_weight
         self._diversity_weight = diversity_weight
         self._fetch_multiplier = fetch_multiplier
+        self._anchor_floor = anchor_floor
         self._prompt_hash = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:8]
 
     def estimate_products(self, product_names: list[str], user_id: str) -> EstimateBatch:
@@ -255,20 +257,34 @@ class Estimator:
         start = time.monotonic()
         total_chunks = (len(product_names) + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE
         all_estimates: list[ProductEstimate] = []
+        prices_by_name: dict[str, list[int]] = {}
         for start_idx in range(0, len(product_names), self.CHUNK_SIZE):
             chunk = product_names[start_idx:start_idx + self.CHUNK_SIZE]
             logger.debug("chunk %d/%d: %d products",
                          start_idx // self.CHUNK_SIZE + 1, total_chunks, len(chunk))
-            batch = self._estimate_chunk(chunk)
+            batch, chunk_prices = self._estimate_chunk(chunk)
             all_estimates.extend(batch.estimates)
+            for k, v in chunk_prices.items():
+                prices_by_name.setdefault(k, v)
         reconciled = self._reconcile(product_names, all_estimates)
+        if self._anchor_floor is not None and len(reconciled) == len(product_names):
+            reconciled = [
+                _anchor_floor(line, e,
+                              prices_by_name.get(normalize_text(line), []),
+                              self._anchor_floor)
+                for line, e in zip(product_names, reconciled)
+            ]
+        elif self._anchor_floor is not None:
+            logger.error("anchor_floor skipped: reconcile len %d != names %d",
+                         len(reconciled), len(product_names))
         reconciled = [_snap_estimate(est) for est in reconciled]
         logger.info("estimate done for %s: %d estimates in %.1fs prompt=%s",
                     user_id, len(reconciled), time.monotonic() - start, self._prompt_hash)
         return EstimateBatch(estimates=reconciled)
 
-    def _estimate_chunk(self, chunk: list[str]) -> EstimateBatch:
+    def _estimate_chunk(self, chunk: list[str]) -> tuple[EstimateBatch, dict[str, list[int]]]:
         context_blocks: list[str] = []
+        prices_by_name: dict[str, list[int]] = {}
         for name in chunk:
             embedding = self._embedder.embed_query(name)
             types = classify_query(
@@ -276,6 +292,7 @@ class Estimator:
                 item_types_version=self._item_types_version,
                 typing_provider=self._typing_provider, repository=None,
             )
+            type_set = set(types)
             merged: dict[str, _Hit] = {}
             queries: list[dict[str, Any] | None] = [{"item_type": t} for t in types]
             queries.append(None)  # always one plain query
@@ -286,6 +303,14 @@ class Estimator:
                     if prev is None or hit.distance < prev.distance:
                         merged[hit.id] = hit
             ranked = self._rerank(list(merged.values()))[: self._top_k]
+            key = normalize_text(name)
+            if key not in prices_by_name:  # first occurrence wins (matches _reconcile)
+                prices_by_name[key] = [
+                    int(h.metadata.get("price_jpy", 0) or 0)
+                    for h in ranked
+                    if str(h.metadata.get("item_type", "") or "") in type_set
+                    and int(h.metadata.get("price_jpy", 0) or 0) > 0
+                ]
             refs = "\n".join(self._format_reference(h) for h in ranked)
             context_blocks.append(f"### Query: {name}\n{refs or '(no matches)'}")
         user_prompt = (
@@ -294,7 +319,7 @@ class Estimator:
             + "\n\nReference context:\n"
             + "\n\n".join(context_blocks)
         )
-        return self._chat.estimate(SYSTEM_PROMPT, user_prompt)
+        return self._chat.estimate(SYSTEM_PROMPT, user_prompt), prices_by_name
 
     def _rerank(self, hits: list[_Hit]) -> list[_Hit]:
         pubs = [int(h.metadata.get("published_at", 0) or 0) for h in hits]
