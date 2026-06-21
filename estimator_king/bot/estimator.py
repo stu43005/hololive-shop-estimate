@@ -4,9 +4,13 @@ chat model for structured estimates, reconciled back to the input lines."""
 import hashlib
 import logging
 import time
+import unicodedata
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from estimator_king.config_schema import AnchorFloorConfig
 
 from estimator_king.crawler.snapshot import normalize_text
 from estimator_king.llm.chat import EstimateBatch, PriceRange, ProductEstimate
@@ -132,6 +136,58 @@ def _percentile(values: list[int], pct: float) -> float | None:
     if lo + 1 < len(s):
         return s[lo] + (s[lo + 1] - s[lo]) * frac
     return float(s[lo])
+
+
+_SKEW = {"high": (0.20, 0.30), "medium": (0.25, 0.45), "low": (0.30, 0.60)}
+
+
+def _norm_kw(s: str) -> str:
+    """NFKC + casefold, for width/case-insensitive premium-keyword matching."""
+    return unicodedata.normalize("NFKC", s).casefold()
+
+
+def _anchor_floor(query: str, est: ProductEstimate, same_type_prices: list[int],
+                  cfg: "AnchorFloorConfig | None") -> ProductEstimate:
+    """Raise est.suggested toward a percentile of same-type refs, keyed by the
+    original `query`. Returns est unchanged when disabled (cfg None), on the
+    no-estimate sentinel, on sparse refs (< min_refs), when the lift exceeds
+    max_lift_ratio, or when the floor is below suggested. On a real lift it
+    recomputes the range with upward skew and prepends a provenance note to
+    rationale. Logs apply/skip for audit."""
+    if cfg is None or est.suggested_price_jpy == 0 or not same_type_prices:
+        return est
+    n = len(same_type_prices)
+    if n < cfg.min_refs:
+        return est
+    nq = _norm_kw(query)
+    effective = cfg.general_percentile
+    for tier in cfg.premium_tiers:
+        if any(_norm_kw(kw) in nq for kw in tier.keywords):
+            effective = max(effective, tier.percentile)
+    if n < cfg.full_percentile_min_refs:
+        effective = min(effective, 50)
+    floor_value = _percentile(same_type_prices, effective)
+    if floor_value is None:
+        return est
+    floor_int = round(floor_value)
+    suggested = est.suggested_price_jpy
+    if floor_int <= suggested:
+        return est
+    if floor_value > round(suggested * cfg.max_lift_ratio):
+        logger.info("anchor_floor skip lift>%.2f: %r %d->%d @p%d n=%d",
+                    cfg.max_lift_ratio, query, suggested, floor_int, effective, n)
+        return est
+    down, up = _SKEW.get(est.confidence, _SKEW["medium"])
+    new_min = min(est.price_range_jpy.min, round(floor_int * (1 - down)))
+    new_max = max(est.price_range_jpy.max, round(floor_int * (1 + up)))
+    note = f"[anchor floor: ¥{suggested}->¥{floor_int} @p{effective}, n={n}] "
+    logger.info("anchor_floor applied: %r %d->%d @p%d n=%d",
+                query, suggested, floor_int, effective, n)
+    return est.model_copy(update={
+        "suggested_price_jpy": floor_int,
+        "price_range_jpy": PriceRange(min=new_min, max=new_max),
+        "rationale": note + est.rationale,
+    })
 
 
 def _snap_estimate(est: ProductEstimate) -> ProductEstimate:

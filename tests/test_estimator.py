@@ -1,4 +1,5 @@
-from estimator_king.bot.estimator import Estimator, snap_to_tax_grid, _snap_estimate, _percentile
+from estimator_king.bot.estimator import Estimator, snap_to_tax_grid, _snap_estimate, _percentile, _anchor_floor
+from estimator_king.config_schema import AnchorFloorConfig, AnchorTier
 from estimator_king.llm.chat import EstimateBatch, ProductEstimate, PriceRange
 from estimator_king.vectorstore.store import QueryHit
 
@@ -331,3 +332,131 @@ def test_percentile_linear_interpolation():
 def test_percentile_single_and_empty():
     assert _percentile([500], 70) == 500.0
     assert _percentile([], 50) is None
+
+
+def _est_full(name, suggested, lo, hi, conf="medium", rationale="r"):
+    return ProductEstimate(
+        product_name=name, suggested_price_jpy=suggested,
+        price_range_jpy=PriceRange(min=lo, max=hi), confidence=conf,
+        rationale=rationale, reference_products=[])
+
+
+_CFG = AnchorFloorConfig(
+    general_percentile=60, min_refs=3, full_percentile_min_refs=5, max_lift_ratio=1.6,
+    premium_tiers=[AnchorTier(percentile=70, keywords=["温感", "もこもこ"])],
+)
+_REFS5 = [2000, 2500, 3000, 3500, 4000]  # linear: p50=3000, p60=3200, p70=3400
+
+
+def test_anchor_floor_no_op_when_cfg_none():
+    e = _est_full("x", 1000, 800, 1300)
+    assert _anchor_floor("x", e, _REFS5, None) is e
+
+
+def test_anchor_floor_no_op_sentinel():
+    e = _est_full("x", 0, 0, 0, conf="low")
+    assert _anchor_floor("x", e, _REFS5, _CFG) is e
+
+
+def test_anchor_floor_no_op_sparse():
+    e = _est_full("x", 1000, 800, 1300)
+    assert _anchor_floor("x", e, [3000, 4000], _CFG) is e  # 2 refs < min_refs
+
+
+def test_anchor_floor_no_op_empty_refs():
+    e = _est_full("x", 1000, 800, 1300)
+    assert _anchor_floor("x", e, [], _CFG) is e
+
+
+def test_anchor_floor_raises_to_general_percentile():
+    e = _est_full("ポーチ", 2200, 1800, 2900)
+    out = _anchor_floor("ポーチ", e, _REFS5, _CFG)
+    assert out.suggested_price_jpy == 3200
+    assert out.rationale.startswith("[anchor floor:")
+
+
+def test_anchor_floor_never_lowers():
+    e = _est_full("x", 5000, 4000, 6000)
+    assert _anchor_floor("x", e, _REFS5, _CFG) is e  # floor 3200 < suggested
+
+
+def test_anchor_floor_premium_uses_higher_tier():
+    e = _est_full("温感マグカップ", 2200, 1800, 2900)
+    out = _anchor_floor("温感マグカップ", e, _REFS5, _CFG)
+    assert out.suggested_price_jpy == 3400  # p70
+
+
+def test_anchor_floor_premium_keyed_on_query_not_product_name():
+    e = _est_full("rewritten name", 2200, 1800, 2900)
+    out = _anchor_floor("温感マグカップ", e, _REFS5, _CFG)
+    assert out.suggested_price_jpy == 3400
+
+
+def test_anchor_floor_multi_tier_takes_max():
+    cfg = AnchorFloorConfig(
+        general_percentile=60, min_refs=3, full_percentile_min_refs=5, max_lift_ratio=1.6,
+        premium_tiers=[AnchorTier(percentile=65, keywords=["温感"]),
+                       AnchorTier(percentile=70, keywords=["もこもこ"])])
+    e = _est_full("温感もこもこ", 2200, 1800, 2900)
+    out = _anchor_floor("温感もこもこ", e, _REFS5, cfg)
+    assert out.suggested_price_jpy == 3400  # max(65,70)=70 -> p70
+
+
+def test_anchor_floor_keyword_nfkc_variants():
+    # NFKC unifies half-width katakana ﾓｺﾓｺ -> モコモコ (matches katakana keyword),
+    # and full-width latin ＢＩＧ -> big (with casefold). It does NOT convert
+    # katakana to hiragana, so the keyword list must hold the katakana spelling.
+    cfg = AnchorFloorConfig(
+        general_percentile=60, min_refs=3, full_percentile_min_refs=5, max_lift_ratio=1.6,
+        premium_tiers=[AnchorTier(percentile=70, keywords=["モコモコ", "big"])])
+    e1 = _est_full("ﾓｺﾓｺぬいぐるみ", 2200, 1800, 2900)
+    assert _anchor_floor("ﾓｺﾓｺぬいぐるみ", e1, _REFS5, cfg).suggested_price_jpy == 3400
+    e2 = _est_full("ＢＩＧぬいぐるみ", 2200, 1800, 2900)
+    assert _anchor_floor("ＢＩＧぬいぐるみ", e2, _REFS5, cfg).suggested_price_jpy == 3400
+    e3 = _est_full("ふつうのぬいぐるみ", 2200, 1800, 2900)  # no keyword -> general p60
+    assert _anchor_floor("ふつうのぬいぐるみ", e3, _REFS5, cfg).suggested_price_jpy == 3200
+
+
+def test_anchor_floor_small_sample_clamped_to_median():
+    # n=3 in [min_refs,5): even premium 温感 clamps to p50; median([2000,3000,5000])=3000
+    e = _est_full("温感マグカップ", 2200, 1800, 2900)
+    out = _anchor_floor("温感マグカップ", e, [2000, 3000, 5000], _CFG)
+    assert out.suggested_price_jpy == 3000
+
+
+def test_anchor_floor_max_lift_ratio_no_op():
+    e = _est_full("x", 2200, 1800, 2900)  # 2200*1.6=3520 < floor 9000 -> skip
+    assert _anchor_floor("x", e, [8000, 8500, 9000, 9500, 10000], _CFG) is e
+
+
+def test_anchor_floor_recomputes_range_with_upward_skew():
+    e = _est_full("ポーチ", 2200, 1800, 2900, conf="medium")
+    out = _anchor_floor("ポーチ", e, _REFS5, _CFG)  # floor 3200, medium +45%
+    assert out.price_range_jpy.max >= round(3200 * 1.45)
+    assert out.price_range_jpy.min <= out.suggested_price_jpy
+
+
+def test_anchor_floor_does_not_mutate_original():
+    e = _est_full("ポーチ", 2200, 1800, 2900)
+    _anchor_floor("ポーチ", e, _REFS5, _CFG)
+    assert e.suggested_price_jpy == 2200 and e.rationale == "r"
+
+
+def test_anchor_floor_then_snap_invariants():
+    e = _est_full("ポーチ", 2200, 1800, 2900, conf="medium")
+    out = _snap_estimate(_anchor_floor("ポーチ", e, _REFS5, _CFG))
+    assert out.price_range_jpy.min <= out.suggested_price_jpy <= out.price_range_jpy.max
+    for v in (out.suggested_price_jpy, out.price_range_jpy.min, out.price_range_jpy.max):
+        assert v % 110 == 0
+
+
+def test_anchor_floor_logs_apply_and_skip(caplog):
+    import logging
+    with caplog.at_level(logging.INFO):
+        _anchor_floor("ポーチ", _est_full("ポーチ", 2200, 1800, 2900), _REFS5, _CFG)
+    assert any("anchor_floor applied" in r.message for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        _anchor_floor("x", _est_full("x", 2200, 1800, 2900),
+                      [8000, 8500, 9000, 9500, 10000], _CFG)
+    assert any("anchor_floor skip" in r.message for r in caplog.records)
