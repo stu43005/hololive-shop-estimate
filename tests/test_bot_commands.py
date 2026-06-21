@@ -68,3 +68,18 @@ def test_trailing_dash_in_rationale_not_stripped():
     batch = EstimateBatch(estimates=[_est("solo", rationale="ends with dash -")])
     embeds = format_estimates(batch, max_length=2000)
     assert "ends with dash -" in embeds[0].description
+
+
+def test_floor_provenance_survives_rationale_truncation():
+    long_tail = "あ" * 400  # model rationale far over the 297-char cap
+    est = ProductEstimate(
+        product_name="ポーチ",
+        suggested_price_jpy=3190,
+        price_range_jpy=PriceRange(min=2420, max=4620),
+        confidence="medium",
+        rationale="[anchor floor: ¥2200->¥3190 @p60, n=6] " + long_tail,
+        reference_products=[],
+    )
+    embeds = format_estimates(EstimateBatch(estimates=[est]))
+    rendered = " ".join(e.description or "" for e in embeds)
+    assert "anchor floor" in rendered
