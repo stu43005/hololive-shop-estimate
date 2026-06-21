@@ -74,6 +74,10 @@ Discord modal 輸入(≤10 行) → parse_product_lines
 │  _reconcile(以 normalize_text 對齊回每一輸入行,缺漏補 low/¥0)       │
 └─────────────────────────────────────────────────────────────────────┘
         ▼
+   _anchor_floor(依 estimator.anchor_floor 設定,按 query NFKC+casefold
+        對齊 tier;將 suggested 拉至同類型參考價格的 effective_pct 百分位;
+        disabled when cfg=None;max_lift_ratio 超限則 no-op)
+        ▼
    snap_to_tax_grid(每筆價格 round 到最近 ¥110 倍數)
         ▼
    format_estimates → Discord embeds(超長自動分頁)
@@ -828,8 +832,10 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
 
 **對應 function**:`_estimate_chunk()` 末段 + `ChatProvider.estimate()`
 ([chat.py:58](../estimator_king/llm/chat.py#L58))+ `_reconcile()`
-([estimator.py:252](../estimator_king/bot/estimator.py#L252))+ `_snap_estimate()`
-([estimator.py:94](../estimator_king/bot/estimator.py#L94))+ `format_estimates()`
+([estimator.py:252](../estimator_king/bot/estimator.py#L252))+ `_anchor_floor()`
+([estimator.py:149](../estimator_king/bot/estimator.py#L149),由
+[estimator.py:270](../estimator_king/bot/estimator.py#L270) 呼叫)+ `_snap_estimate()`
+([estimator.py:193](../estimator_king/bot/estimator.py#L193))+ `format_estimates()`
 ([commands.py:36](../estimator_king/bot/commands.py#L36))。
 
 1. **組 prompt**([estimator.py:171-189](../estimator_king/bot/estimator.py#L171)):每行
@@ -857,11 +863,57 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
    以 `normalize_text` 正規化後當鍵,把每筆估價對回原輸入行並保持原順序;**缺漏的行**補上
    `confidence="low"`、`¥0` 的佔位估價(確保輸出行數 == 輸入行數);LLM 多回的重複估價以
    `setdefault` 保留首筆、其餘丟棄並 log warning。
-4. **含稅格點正規化(snap)**([estimator.py:94](../estimator_king/bot/estimator.py#L94)):
-   `_reconcile` 之後,對每筆估價的 `suggested_price_jpy` 與 `price_range_jpy{min,max}`
+4. **錨定下限(anchor floor)** `_anchor_floor()`
+   ([estimator.py:149](../estimator_king/bot/estimator.py#L149),由
+   [estimator.py:270](../estimator_king/bot/estimator.py#L270) 在 `_reconcile` 後立即呼叫):
+   `stores_config.yaml` 的 `estimator.anchor_floor` 區塊缺席時整步 no-op(兩階段上線 —— 功能
+   先合入、評測通過後才用獨立 config commit 啟用)。啟用後,**以原始 query 行為鍵**,
+   對照同批次 `prices_by_name`(same-type top_k 參考價格,`item_type ∈ classify_query(query)`
+   且 `price_jpy > 0`)計算 `effective_pct` 百分位作為下限值(`floor_value`),若
+   `suggested_price_jpy < floor_value` 則抬升之(raise-only)。
+
+   **四道保護(任一觸發 → no-op)**:
+
+   - `cfg is None` / 估價哨兵 `suggested == 0` / `same_type_prices` 為空 → 直接返回。
+   - **`min_refs`**:同類參考數 `n < min_refs` → sparse no-op。
+   - **`max_lift_ratio`**:`floor_value > suggested × max_lift_ratio` → 離群 no-op
+     (log `anchor_floor skip lift>...`)。
+   - `floor_value ≤ suggested` → 已高於下限,no-op。
+
+   **Tier 計算**:keyword 比對以 NFKC+casefold 正規化(`_norm_kw`)兩側,掃
+   `premium_tiers`(每個 tier 含 `keywords` + `percentile`),命中任一 tier 即
+   `effective = max(effective, tier.percentile)`;未命中則用 `general_percentile`。
+   **稀疏收斂**:`n < full_percentile_min_refs` 時將 `effective` 收斂至 ≤ 50(中位數)。
+
+   **抬升後重算 range 與 rationale**:依 `confidence` 取 `_SKEW`(high/medium/low)
+   的上下偏移率重算 `price_range_jpy.{min, max}`,以 upward skew 偏上;
+   provenance note `[anchor floor: ¥{old}->¥{new} @p{pct}, n={n}]`
+   **prepend** 到 `rationale` 最前(在 Discord embed 截斷 ≈ 297 字前確保可見)。
+
+   **Audit log**:`logger.info` 分兩種訊號 —— 成功抬升:`anchor_floor applied: {query}
+   {old}->{new} @p{pct} n={n}`;離群跳過:`anchor_floor skip lift>{ratio}: ...`。
+   **Batch 對齊守衛**:若 `len(reconciled) != len(product_names)` →
+   `logger.error("anchor_floor skipped: reconcile len ... != names ...")`
+   並跳過整批 floor(fail-close)。
+
+   **「その他」no-op**:`classify_query(query) == []` 時同類型集合為空 → same_type_prices
+   為空 → 第一道保護觸發,整步跳過。
+
+   | Config(`estimator.anchor_floor`) | 預設 | 作用 |
+   | --- | --- | --- |
+   | `anchor_floor`(整個區塊) | 缺席 = disabled | 缺席時整步 no-op |
+   | `general_percentile` | — | 一般商品的基礎百分位(校準最優 ≈ 60) |
+   | `min_refs` | — | 同類參考數低於此值 → sparse no-op |
+   | `full_percentile_min_refs` | — | 低於此值時 effective_pct 收至 ≤50(median clamp) |
+   | `max_lift_ratio` | — | floor/suggested 超過此倍率 → 離群 no-op |
+   | `premium_tiers[].keywords` | — | tier 觸發關鍵字(NFKC+casefold 比對) |
+   | `premium_tiers[].percentile` | — | tier 命中時的百分位(校準最優 ≈ 70) |
+
+5. **含稅格點正規化(snap)**([estimator.py:193](../estimator_king/bot/estimator.py#L193)):
+   anchor floor 之後,對每筆估價的 `suggested_price_jpy` 與 `price_range_jpy{min,max}`
    各自 round 到最近的 **¥110** 倍數(`snap_to_tax_grid` / `_snap_estimate`);
    平手(餘 55)往上;非正數的「無估價」哨兵維持 `0`;snap 後強制 `min ≤ suggested ≤ max`。
-5. **輸出 Discord** `format_estimates()`:每筆組成價格 / 區間 / 信心 / rationale(截斷 300 字)/
+6. **輸出 Discord** `format_estimates()`:每筆組成價格 / 區間 / 信心 / rationale(截斷 300 字)/
    參考清單;依 `max_length = 2000` 自動分頁成多個 embed(標題標 `page i/total`)。
 
 > **設計理由**
@@ -878,6 +930,16 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
 >   第二輪起 prompt 再以 `<anchoring>`(中位至上端、修正系統性低估)、
 >   `<set_and_count>`(計數非價格乘數)、信心分級 range 與收緊的 `high` 判準補強估價推理;
 >   net 效果以 `scripts/analysis/eval_estimate.py`(本尊排除的 25 筆 fixture)量測。
+> - **為何需要 anchor floor(prompt 錨定為何不夠)**:第一輪 prompt `<anchoring>` 要求「中位至上端」,
+>   第二輪加強後 signed error 在 gpt-5.4-mini 上兩輪累計仍約 −10%(系統性低估)。
+>   prompt-level 只能引導模型推理,無法強制數值下限;因此改由 deterministic post-processing
+>   在 `_reconcile` 之後、`_snap_estimate` 之前硬性抬升,不繞過模型推理只補齊其邊界。
+> - **為何 floor 用 tiered percentile 而非單一值**:校準實驗顯示普通商品最佳下限約在 p60、
+>   溢價商品(温感、もこもこ、なりきり 等)約在 p70,相差約 10pp。單一值無法同時校準兩個族群;
+>   tier 機制允許對溢價關鍵字獨立指定更高百分位,`effective = max(general, matched_tiers)`
+>   取最大值,確保多重命中不相衝突。
+> - **為何 floor 的 same-type 集合取自 top_k refs 而非全量**:top_k refs 正是當次 LLM 看到的
+>   定價依據,floor 對齊同一批數字可確保「不會把 LLM 當時看不到的高價品硬壓進去」,語義一致。
 > - **為何 snap 到 ¥110 格點**:日本零售價皆為含稅價＝稅前(¥100 整數倍)×1.1,必為 ¥110 整數倍。觀測 12 筆實際定價 12/12 落在此格點、模型自然只 5/12;deterministic 後處理保證輸出落點正確,與 prompt `<price_format>` 形成雙保險。
 
 ---
@@ -906,6 +968,12 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
 | `estimator.fetch_multiplier` | 2 | 12 over-fetch |
 | `estimator.recency_weight` | 0.05 | 13 rerank |
 | `estimator.diversity_weight` | 0.05 | 13 rerank |
+| `estimator.anchor_floor`(整個區塊) | 缺席 = disabled | 14 anchor floor |
+| `estimator.anchor_floor.general_percentile` | — | 14 anchor floor |
+| `estimator.anchor_floor.min_refs` | — | 14 anchor floor |
+| `estimator.anchor_floor.full_percentile_min_refs` | — | 14 anchor floor |
+| `estimator.anchor_floor.max_lift_ratio` | — | 14 anchor floor |
+| `estimator.anchor_floor.premium_tiers` | — | 14 anchor floor |
 | `CHAT_*`(環境變數) | 見階段 14 | 14 估價 |
 
 ---
