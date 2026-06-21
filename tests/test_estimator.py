@@ -462,6 +462,15 @@ def test_anchor_floor_logs_apply_and_skip(caplog):
     assert any("anchor_floor skip" in r.message for r in caplog.records)
 
 
+def test_anchor_floor_logs_noop_reason_at_debug(caplog):
+    import logging
+    e = _est_full("x", 1000, 800, 1300)
+    with caplog.at_level(logging.DEBUG):
+        out = _anchor_floor("x", e, [3000, 4000], _CFG)  # 2 refs < min_refs -> sparse no-op
+    assert out is e
+    assert any("anchor_floor noop sparse" in r.message for r in caplog.records)
+
+
 def _estimator_af(vs, chat, anchor_floor, typing=None, item_type="ぬいぐるみ"):
     return Estimator(FakeEmbedder(), chat, vs,
                      typing_provider=(typing or FakeTypingProvider(item_type)),

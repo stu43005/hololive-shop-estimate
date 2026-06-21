@@ -153,11 +153,18 @@ def _anchor_floor(query: str, est: ProductEstimate, same_type_prices: list[int],
     no-estimate sentinel, on sparse refs (< min_refs), when the lift exceeds
     max_lift_ratio, or when the floor is below suggested. On a real lift it
     recomputes the range with upward skew and prepends a provenance note to
-    rationale. Logs apply/skip for audit."""
-    if cfg is None or est.suggested_price_jpy == 0 or not same_type_prices:
+    rationale. Logs apply/outlier-skip at INFO and each no-op reason at DEBUG for audit."""
+    if cfg is None:
+        return est  # globally disabled: no per-call log (state is visible in config/provenance)
+    if est.suggested_price_jpy == 0:
+        logger.debug("anchor_floor noop sentinel: %r", query)
+        return est
+    if not same_type_prices:
+        logger.debug("anchor_floor noop empty_same_type: %r", query)
         return est
     n = len(same_type_prices)
     if n < cfg.min_refs:
+        logger.debug("anchor_floor noop sparse: %r n=%d<min_refs=%d", query, n, cfg.min_refs)
         return est
     nq = _norm_kw(query)
     effective = cfg.general_percentile
@@ -168,10 +175,13 @@ def _anchor_floor(query: str, est: ProductEstimate, same_type_prices: list[int],
         effective = min(effective, 50)
     floor_value = _percentile(same_type_prices, effective)
     if floor_value is None:
+        logger.debug("anchor_floor noop no_percentile: %r n=%d", query, n)
         return est
     floor_int = round(floor_value)
     suggested = est.suggested_price_jpy
     if floor_int <= suggested:
+        logger.debug("anchor_floor noop floor<=suggested: %r %d<=%d @p%d n=%d",
+                     query, floor_int, suggested, effective, n)
         return est
     if floor_value > round(suggested * cfg.max_lift_ratio):
         logger.info("anchor_floor skip lift>%.2f: %r %d->%d @p%d n=%d",
