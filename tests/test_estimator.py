@@ -459,6 +459,7 @@ def test_anchor_floor_logs_apply_and_skip(caplog):
     with caplog.at_level(logging.INFO):
         _anchor_floor("x", _est_full("x", 2200, 1800, 2900),
                       [8000, 8500, 9000, 9500, 10000], _CFG)
+    assert any("anchor_floor skip" in r.message for r in caplog.records)
 
 
 def _estimator_af(vs, chat, anchor_floor, typing=None, item_type="ぬいぐるみ"):
@@ -528,4 +529,3 @@ def test_pipeline_floor_skipped_on_length_mismatch_long(caplog):
     assert any("anchor_floor skipped" in r.message for r in caplog.records)
     # no estimate was floored (both stay at their snapped model value)
     assert all("anchor floor" not in e.rationale for e in batch.estimates)
-    assert any("anchor_floor skip" in r.message for r in caplog.records)
