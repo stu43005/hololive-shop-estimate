@@ -890,8 +890,9 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
    provenance note `[anchor floor: ¥{old}->¥{new} @p{pct}, n={n}]`
    **prepend** 到 `rationale` 最前(在 Discord embed 截斷 ≈ 297 字前確保可見)。
 
-   **Audit log**:`logger.info` 分兩種訊號 —— 成功抬升:`anchor_floor applied: {query}
-   {old}->{new} @p{pct} n={n}`;離群跳過:`anchor_floor skip lift>{ratio}: ...`。
+   **Audit log**:`logger.info` 分兩種訊號,兩者都帶 query、original→floored、effective pct、ref count:
+   成功抬升:`anchor_floor applied: {query} {old}->{new} @p{pct} n={n}`;
+   離群跳過:`anchor_floor skip lift>{ratio}: {query} {old}->{floor} @p{pct} n={n}`。
    **Batch 對齊守衛**:若 `len(reconciled) != len(product_names)` →
    `logger.error("anchor_floor skipped: reconcile len ... != names ...")`
    並跳過整批 floor(fail-close)。
