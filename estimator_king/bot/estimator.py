@@ -119,6 +119,21 @@ def snap_to_tax_grid(price: int) -> int:
     return quotient * _TAX_GRID_JPY
 
 
+def _percentile(values: list[int], pct: float) -> float | None:
+    """Linear-interpolated percentile of `values` (pct in 0-100). None if empty."""
+    s = sorted(values)
+    if not s:
+        return None
+    if len(s) == 1:
+        return float(s[0])
+    pos = (pct / 100.0) * (len(s) - 1)
+    lo = int(pos)
+    frac = pos - lo
+    if lo + 1 < len(s):
+        return s[lo] + (s[lo + 1] - s[lo]) * frac
+    return float(s[lo])
+
+
 def _snap_estimate(est: ProductEstimate) -> ProductEstimate:
     """Snap an estimate's prices onto the ¥110 grid, keeping min <= suggested <= max."""
     suggested = snap_to_tax_grid(est.suggested_price_jpy)

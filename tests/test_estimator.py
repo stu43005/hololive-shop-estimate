@@ -1,4 +1,4 @@
-from estimator_king.bot.estimator import Estimator, snap_to_tax_grid, _snap_estimate
+from estimator_king.bot.estimator import Estimator, snap_to_tax_grid, _snap_estimate, _percentile
 from estimator_king.llm.chat import EstimateBatch, ProductEstimate, PriceRange
 from estimator_king.vectorstore.store import QueryHit
 
@@ -319,3 +319,15 @@ def test_estimate_products_snaps_output_to_grid():
     assert out.suggested_price_jpy % 110 == 0
     assert out.price_range_jpy.min % 110 == 0
     assert out.price_range_jpy.max % 110 == 0
+
+
+def test_percentile_linear_interpolation():
+    assert _percentile([100, 200, 300, 400], 75) == 325.0
+    assert _percentile([100, 200, 300, 400], 50) == 250.0
+    assert _percentile([100, 200, 300, 400], 0) == 100.0
+    assert _percentile([100, 200, 300, 400], 100) == 400.0
+
+
+def test_percentile_single_and_empty():
+    assert _percentile([500], 70) == 500.0
+    assert _percentile([], 50) is None
