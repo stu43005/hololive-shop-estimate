@@ -27,7 +27,12 @@ import subprocess
 import sys
 from typing import Any
 
-from estimator_king.bot.estimator import SYSTEM_PROMPT, Estimator, _snap_estimate
+from estimator_king.bot.estimator import (
+    SYSTEM_PROMPT,
+    Estimator,
+    _anchor_floor,
+    _snap_estimate,
+)
 from estimator_king.config_schema import load_config
 from estimator_king.crawler.snapshot import normalize_text
 from estimator_king.runtime import build_providers
@@ -80,7 +85,7 @@ def _git(args: list[str]) -> str:
         return "unknown"
 
 
-def build_context(est: Estimator, query: str, official: int) -> tuple[str, list[str]]:
+def build_context(est: Estimator, query: str, official: int) -> tuple[str, list[str], list[int]]:
     """Reproduce _estimate_chunk retrieval for one query with the query's own
     product absent from the index. Production fetches the closest fetch_n hits
     per where-query; to faithfully simulate the self item not being indexed we
@@ -136,29 +141,30 @@ def build_context(est: Estimator, query: str, official: int) -> tuple[str, list[
             f"multiple distinct products excluded as self for {query!r}: "
             f"{list(selves.values())} -- identity is ambiguous")
     ranked = est._rerank(list(merged.values()))[: est._top_k]
+    type_set = set(types)
+    same_type_prices = [
+        int(h.metadata.get("price_jpy", 0) or 0)
+        for h in ranked
+        if str(h.metadata.get("item_type", "") or "") in type_set
+        and int(h.metadata.get("price_jpy", 0) or 0) > 0
+    ]
     refs = "\n".join(est._format_reference(h) for h in ranked)
-    return f"### Query: {query}\n{refs or '(no matches)'}", list(selves.values())
+    return f"### Query: {query}\n{refs or '(no matches)'}", list(selves.values()), same_type_prices
 
 
-def run_once(est: Estimator) -> dict[str, tuple[int, bool, str, bool]]:
-    """One full pass over FIXTURES. Returns {query: (snapped_jpy, in_range,
-    confidence, no_estimate)}; no_estimate is the model's RAW suggested == 0
-    checked BEFORE snapping, so a malformed ¥1-¥54 counts as a large error, not
-    a hidden no-estimate.
-
-    Raises InvalidRun on any embedding, vector-retrieval, or chat failure, on a
-    dropped line, or when the aligned result count does not equal the fixture
-    count (fail-closed). classify_query never raises -- it degrades to the
-    'その他' bucket exactly as production does -- so a classification API hiccup
-    does not invalidate a run."""
-    out: dict[str, tuple[int, bool, str, bool]] = {}
+def run_once(est: Estimator) -> dict[str, tuple[Any, list[int], int]]:
+    """One chat pass. Returns {query: (raw_estimate, same_type_prices, official)}.
+    Floor and snap are applied later per policy so baseline/candidate are paired."""
+    out: dict[str, tuple[Any, list[int], int]] = {}
     try:
         for start in range(0, len(FIXTURES), est.CHUNK_SIZE):
             chunk = FIXTURES[start:start + est.CHUNK_SIZE]
             blocks: list[str] = []
+            stp: dict[str, list[int]] = {}
             for query, official in chunk:
-                block, selves = build_context(est, query, official)
+                block, selves, prices = build_context(est, query, official)
                 blocks.append(block)
+                stp[query] = prices
                 tag = ", ".join(selves) if selves else "(none found)"
                 print(f"  self-excluded [{query}]: {tag}")
             user_prompt = (
@@ -175,19 +181,45 @@ def run_once(est: Estimator) -> dict[str, tuple[int, bool, str, bool]]:
                 est_obj = by_name.get(normalize_text(query))
                 if est_obj is None:
                     raise InvalidRun(f"chat returned no estimate for {query!r}")
-                no_est = est_obj.suggested_price_jpy == 0
-                snapped = _snap_estimate(est_obj)
-                in_range = (snapped.price_range_jpy.min <= official
-                            <= snapped.price_range_jpy.max)
-                out[query] = (snapped.suggested_price_jpy, in_range,
-                              est_obj.confidence, no_est)
+                out[query] = (est_obj, stp[query], official)
         if len(out) != len(FIXTURES):
             raise InvalidRun(f"aligned {len(out)} of {len(FIXTURES)} fixtures")
     except InvalidRun:
         raise
-    except Exception as exc:  # fail-closed: embedding/vector/chat failure
+    except Exception as exc:
         raise InvalidRun(f"run failed: {exc}") from exc
     return out
+
+
+def _metrics(runs: list[dict[str, tuple[Any, list[int], int]]], cfg: Any) -> dict[str, Any]:
+    """Apply (or skip) the floor per policy on the SAME chat outputs, then snap;
+    return aggregate metrics + the no-estimate set (raw suggested==0 in any run)."""
+    per_abs: dict[str, list[float]] = {q: [] for q, _ in FIXTURES}
+    per_signed: dict[str, list[float]] = {q: [] for q, _ in FIXTURES}
+    covered: dict[str, int] = {q: 0 for q, _ in FIXTURES}
+    no_estimate: set[str] = set()
+    for run in runs:
+        for query, (est_obj, prices, official) in run.items():
+            if est_obj.suggested_price_jpy == 0:
+                no_estimate.add(query)
+            floored = _anchor_floor(query, est_obj, prices, cfg) if cfg else est_obj
+            snapped = _snap_estimate(floored)
+            p = snapped.suggested_price_jpy
+            per_abs[query].append(abs(p - official) / official * 100.0)
+            per_signed[query].append((p - official) / official * 100.0)
+            if snapped.price_range_jpy.min <= official <= snapped.price_range_jpy.max:
+                covered[query] += 1
+    majority = len(runs) // 2 + 1
+    est_qs = [q for q, _ in FIXTURES if q not in no_estimate]
+    abs_means = [statistics.mean(per_abs[q]) for q in est_qs]
+    signed_means = [statistics.mean(per_signed[q]) for q in est_qs]
+    return {
+        "mape": statistics.mean(abs_means) if abs_means else 0.0,
+        "signed": statistics.mean(signed_means) if signed_means else 0.0,
+        "coverage": sum(1 for q in est_qs if covered[q] >= majority),
+        "n_est": len(est_qs),
+        "no_estimate": no_estimate,
+    }
 
 
 def main() -> None:
@@ -212,78 +244,55 @@ def main() -> None:
         fetch_multiplier=config.estimator_fetch_multiplier,
     )
 
-    per_fixture: dict[str, list[tuple[int, bool, str, bool]]] = {q: [] for q, _ in FIXTURES}
+    runs: list[dict[str, tuple[Any, list[int], int]]] = []
     try:
         for r in range(args.runs):
             print(f"\n===== run {r + 1}/{args.runs} =====")
-            result = run_once(est)
-            for q, _ in FIXTURES:
-                per_fixture[q].append(result[q])
+            runs.append(run_once(est))
     except InvalidRun as exc:
-        print(f"\nINVALID run: {exc}; not reporting summary.", file=sys.stderr)
+        print(f"\nINVALID run: {exc}; not reporting.", file=sys.stderr)
         sys.exit(2)
 
-    # no-estimate set: a fixture whose RAW suggested was ¥0 in ANY run (conservative).
-    no_estimate = {q for q, vals in per_fixture.items() if any(v[3] for v in vals)}
-    majority = args.runs // 2 + 1
+    baseline = _metrics(runs, None)
+    cfg = config.estimator_anchor_floor
+    candidate = _metrics(runs, cfg) if cfg is not None else None
 
-    per_fixture_err: dict[str, float] = {}
-    per_fixture_signed: dict[str, float] = {}
-    covered_fixtures = 0
-    rows: list[tuple[str, int, int, float | None, str, str]] = []
-    for q, official in FIXTURES:
-        vals = per_fixture[q]
-        conf = statistics.mode([v[2] for v in vals])
-        in_range_str = f"{sum(1 for v in vals if v[1])}/{len(vals)}"
-        if q in no_estimate:
-            rows.append((q, 0, official, None, in_range_str, conf))
-            continue
-        prices = [v[0] for v in vals]
-        abs_errs = [abs(p - official) / official * 100.0 for p in prices]
-        signed = [(p - official) / official * 100.0 for p in prices]
-        per_fixture_err[q] = statistics.mean(abs_errs)
-        per_fixture_signed[q] = statistics.mean(signed)
-        if sum(1 for v in vals if v[1]) >= majority:
-            covered_fixtures += 1
-        rows.append((q, round(statistics.mean(prices)), official,
-                     per_fixture_err[q], in_range_str, conf))
+    def _show(label: str, m: dict[str, Any]) -> None:
+        print(f"\n========== {label} ==========")
+        print(f"  MAPE {m['mape']:.1f}%  signed {m['signed']:+.1f}%  "
+              f"coverage {m['coverage']}/{m['n_est']}  "
+              f"no-estimate {sorted(m['no_estimate'])}")
 
-    print("\n\n========== PER-FIXTURE (mean over runs) ==========")
-    print(f"  {'query':<46} {'est':>7} {'official':>8} {'err%':>7} "
-          f"{'in-rng':>7} {'conf':>6}")
-    for q, est_price, official, mean_abs, in_range_str, conf in rows:
-        err = "n/a" if mean_abs is None else f"{mean_abs:.1f}"
-        marker = "  NO-EST" if q in no_estimate else ""
-        print(f"  {q[:46]:<46} {est_price:>7} {official:>8} {err:>7} "
-              f"{in_range_str:>7} {conf:>6}{marker}")
-
-    errs = list(per_fixture_err.values())
-    signed_vals = list(per_fixture_signed.values())
-    hits = sum(1 for e in errs if e < EXACT_HIT_PCT)
-    print("\n========== SUMMARY ==========")
-    print(f"  fixtures: {len(FIXTURES)}   estimated: {len(errs)}   "
-          f"no-estimate: {len(no_estimate)} "
-          f"({len(no_estimate) / len(FIXTURES) * 100:.0f}%)")
-    if errs:
-        print(f"  MAPE: {statistics.mean(errs):.1f}%   "
-              f"median abs err: {statistics.median(errs):.1f}%   "
-              f"mean signed err: {statistics.mean(signed_vals):+.1f}%")
-        print(f"  exact-hit (<{EXACT_HIT_PCT:.0f}%): {hits}/{len(errs)} "
-              f"({hits / len(errs) * 100:.0f}%)")
-        print(f"  range coverage (per-fixture majority): "
-              f"{covered_fixtures}/{len(errs)} "
-              f"({covered_fixtures / len(errs) * 100:.0f}%)")
-    # Always print the no-estimate set (even empty) for baseline/candidate subset diff.
-    print(f"  no-estimate fixtures: {sorted(no_estimate)}")
+    _show("BASELINE (floor disabled)", baseline)
+    if candidate is not None:
+        _show("CANDIDATE (floor enabled)", candidate)
 
     prompt_hash = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:8]
     print("\n========== PROVENANCE ==========")
     print(f"  prompt_hash: {prompt_hash}")
     print(f"  git_commit: {_git(['rev-parse', '--short', 'HEAD'])}   "
           f"dirty: {bool(_git(['status', '--porcelain']))}")
-    print(f"  embedding_model: {config.embedding_model}   "
-          f"chat_model: {config.chat_model}")
-    print(f"  fixtures: {len(FIXTURES)}   runs: {args.runs}")
+    print(f"  embedding_model: {config.embedding_model}   chat_model: {config.chat_model}")
+    print(f"  fixtures: {len(FIXTURES)}   runs: {args.runs}   "
+          f"anchor_floor: {'on' if cfg is not None else 'off'}")
+
+    if candidate is not None:
+        fails: list[str] = []
+        # Require directional bias toward 0 by >= 1pp (also fails over-correction).
+        if abs(candidate["signed"]) > abs(baseline["signed"]) - 1.0:
+            fails.append(f"|signed| not improved ({baseline['signed']:+.1f} -> {candidate['signed']:+.1f})")
+        if candidate["mape"] > baseline["mape"] + 2.0:
+            fails.append(f"MAPE worse ({baseline['mape']:.1f} -> {candidate['mape']:.1f}, > +2pp)")
+        if candidate["coverage"] < baseline["coverage"]:
+            fails.append(f"coverage dropped ({baseline['coverage']} -> {candidate['coverage']})")
+        if not candidate["no_estimate"].issubset(baseline["no_estimate"]):
+            fails.append("no-estimate set grew beyond baseline")
+        if fails:
+            print("\n========== ACCEPTANCE: FAIL ==========", file=sys.stderr)
+            for f in fails:
+                print(f"  - {f}", file=sys.stderr)
+            sys.exit(3)
+        print("\n========== ACCEPTANCE: PASS ==========")
 
 
 if __name__ == "__main__":
