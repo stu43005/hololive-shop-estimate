@@ -903,12 +903,13 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
    | Config(`estimator.anchor_floor`) | 預設 | 作用 |
    | --- | --- | --- |
    | `anchor_floor`(整個區塊) | 缺席 = disabled | 缺席時整步 no-op |
-   | `general_percentile` | — | 一般商品的基礎百分位(校準最優 ≈ 60) |
-   | `min_refs` | — | 同類參考數低於此值 → sparse no-op |
-   | `full_percentile_min_refs` | — | 低於此值時 effective_pct 收至 ≤50(median clamp) |
-   | `max_lift_ratio` | — | floor/suggested 超過此倍率 → 離群 no-op |
-   | `premium_tiers[].keywords` | — | tier 觸發關鍵字(NFKC+casefold 比對) |
-   | `premium_tiers[].percentile` | — | tier 命中時的百分位(校準最優 ≈ 70) |
+   | `general_percentile` | 必填 | 一般商品的基礎百分位(校準最優 ≈ 60) |
+   | `min_refs` | 3 | 同類參考數低於此值 → sparse no-op |
+   | `full_percentile_min_refs` | 5 | 低於此值時 effective_pct 收至 ≤50(median clamp) |
+   | `max_lift_ratio` | 1.6 | floor/suggested 超過此倍率 → 離群 no-op |
+   | `premium_tiers` | 空清單 `[]` | 溢價分層(省略 = 無分層,只用 general_percentile) |
+   | `premium_tiers[].keywords` | tier 必填 | tier 觸發關鍵字(NFKC+casefold 比對) |
+   | `premium_tiers[].percentile` | tier 必填 | tier 命中時的百分位(校準最優 ≈ 70) |
 
 5. **含稅格點正規化(snap)**([estimator.py:193](../estimator_king/bot/estimator.py#L193)):
    anchor floor 之後,對每筆估價的 `suggested_price_jpy` 與 `price_range_jpy{min,max}`
@@ -970,11 +971,11 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
 | `estimator.recency_weight` | 0.05 | 13 rerank |
 | `estimator.diversity_weight` | 0.05 | 13 rerank |
 | `estimator.anchor_floor`(整個區塊) | 缺席 = disabled | 14 anchor floor |
-| `estimator.anchor_floor.general_percentile` | — | 14 anchor floor |
-| `estimator.anchor_floor.min_refs` | — | 14 anchor floor |
-| `estimator.anchor_floor.full_percentile_min_refs` | — | 14 anchor floor |
-| `estimator.anchor_floor.max_lift_ratio` | — | 14 anchor floor |
-| `estimator.anchor_floor.premium_tiers` | — | 14 anchor floor |
+| `estimator.anchor_floor.general_percentile` | 必填 | 14 anchor floor |
+| `estimator.anchor_floor.min_refs` | 3 | 14 anchor floor |
+| `estimator.anchor_floor.full_percentile_min_refs` | 5 | 14 anchor floor |
+| `estimator.anchor_floor.max_lift_ratio` | 1.6 | 14 anchor floor |
+| `estimator.anchor_floor.premium_tiers` | 空清單 `[]` | 14 anchor floor |
 | `CHAT_*`(環境變數) | 見階段 14 | 14 估價 |
 
 ---
