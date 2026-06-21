@@ -94,11 +94,13 @@ def main() -> None:
         b_signed, b_abs, c_signed, c_abs = [], [], [], []
         applied_any = False
         last_base = last_cand = 0
+        no_estimate = False
         for run in runs:
             est_obj, prices, off = run[query]
             n = len(prices)
-            if est_obj.suggested_price_jpy == 0:
-                continue
+            if est_obj.suggested_price_jpy == 0:  # no-estimate in ANY run -> drop the whole fixture
+                no_estimate = True
+                break
             bs, _ = _suggested(query, est_obj, prices, None)
             cs, applied = _suggested(query, est_obj, prices, cfg)
             applied_any = applied_any or applied
@@ -107,7 +109,7 @@ def main() -> None:
             b_abs.append(abs(bs - off) / off * 100.0)
             c_signed.append((cs - off) / off * 100.0)
             c_abs.append(abs(cs - off) / off * 100.0)
-        if not b_signed:  # sentinel / no-estimate in every run
+        if no_estimate or not b_signed:  # sentinel in any run, or no usable estimate
             rows[query] = (n, None, None, None, None, False, 0, 0)
             continue
         rows[query] = (n, statistics.mean(b_signed), statistics.mean(b_abs),
