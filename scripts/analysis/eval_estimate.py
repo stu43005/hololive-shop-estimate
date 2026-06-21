@@ -221,6 +221,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate /estimate accuracy.")
     parser.add_argument("--runs", type=int, default=3,
                         help="runs per fixture (>=3 for ship decisions)")
+    parser.add_argument("--baseline-only", action="store_true",
+                        help="record disabled baseline numbers without running the acceptance "
+                             "gate (use only when no anchor_floor candidate is configured)")
     args = parser.parse_args()
     if args.runs < 1:
         parser.error("--runs must be >= 1")
@@ -288,6 +291,15 @@ def main() -> None:
                 print(f"  - {f}", file=sys.stderr)
             sys.exit(3)
         print("\n========== ACCEPTANCE: PASS ==========")
+    elif args.baseline_only:
+        print("\n========== BASELINE-ONLY (no candidate floor; gate not run) ==========")
+    else:
+        print("\n========== ACCEPTANCE: NO CANDIDATE ==========", file=sys.stderr)
+        print("  estimator.anchor_floor is not configured; the acceptance gate cannot run.",
+              file=sys.stderr)
+        print("  Add the anchor_floor block to stores_config.yaml, or pass --baseline-only to "
+              "record disabled baseline numbers without gating.", file=sys.stderr)
+        sys.exit(4)
 
 
 if __name__ == "__main__":

@@ -998,7 +998,7 @@ Then **replace the entire body of `main` after the `Estimator(...)` is construct
 
 (Keep the module's existing helpers `_git`, `InvalidRun`, `build_context`, and the imports of `hashlib`/`statistics`/`sys`. The PER-FIXTURE per-query table is dropped in favor of the BASELINE/CANDIDATE summary; that is intentional.)
 
-> The gate is **abs-based**: `|signed|` must drop by at least 1pp (so over-correcting to a large positive bias also fails), MAPE must not worsen beyond +2pp, coverage must not drop, and the no-estimate set must stay a subset. Both runs are VALID by construction (`InvalidRun` → exit 2 earlier). When `anchor_floor` is absent, only BASELINE prints and no gate runs (used to record disabled baseline numbers).
+> The gate is **abs-based**: `|signed|` must drop by at least 1pp (so over-correcting to a large positive bias also fails), MAPE must not worsen beyond +2pp, coverage must not drop, and the no-estimate set must stay a subset. Both runs are VALID by construction (`InvalidRun` → exit 2 earlier). When `anchor_floor` is absent, the gate now **fails closed** (exit 4) unless `--baseline-only` is passed; recording disabled baseline numbers requires running with `--baseline-only`.
 
 - [ ] **Step 4: Type-check + lint**
 
