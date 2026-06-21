@@ -399,3 +399,11 @@ estimator:
   recency_weight: 0.05
   diversity_weight: 0.05
   fetch_multiplier: 2
+  anchor_floor:
+    general_percentile: 60
+    min_refs: 3
+    full_percentile_min_refs: 5
+    max_lift_ratio: 1.6
+    premium_tiers:
+      - percentile: 70
+        keywords: ["温感", "もこもこ", "あったか", "なりきり"]
