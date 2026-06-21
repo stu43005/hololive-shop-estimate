@@ -190,6 +190,24 @@ def _anchor_floor(query: str, est: ProductEstimate, same_type_prices: list[int],
     })
 
 
+def _same_type_prices(ranked: "list[_Hit]", types: list[str]) -> list[int]:
+    """Anchor-floor evidence = prices of refs whose item_type is the query's
+    PRIMARY (most-specific) classification only. classify_query returns all
+    controlled-vocab substring matches longest-first, so types[0] is the most
+    specific; pooling broader overlapping types (e.g. キーホルダー alongside
+    アクリルキーホルダー) would let a specific item be lifted by adjacent-category
+    prices. Returns [] when there is no classification (e.g. その他)."""
+    if not types:
+        return []
+    primary = types[0]
+    return [
+        int(h.metadata.get("price_jpy", 0) or 0)
+        for h in ranked
+        if str(h.metadata.get("item_type", "") or "") == primary
+        and int(h.metadata.get("price_jpy", 0) or 0) > 0
+    ]
+
+
 def _snap_estimate(est: ProductEstimate) -> ProductEstimate:
     """Snap an estimate's prices onto the ¥110 grid, keeping min <= suggested <= max."""
     suggested = snap_to_tax_grid(est.suggested_price_jpy)
@@ -292,7 +310,6 @@ class Estimator:
                 item_types_version=self._item_types_version,
                 typing_provider=self._typing_provider, repository=None,
             )
-            type_set = set(types)
             merged: dict[str, _Hit] = {}
             queries: list[dict[str, Any] | None] = [{"item_type": t} for t in types]
             queries.append(None)  # always one plain query
@@ -305,12 +322,7 @@ class Estimator:
             ranked = self._rerank(list(merged.values()))[: self._top_k]
             key = normalize_text(name)
             if key not in prices_by_name:  # first occurrence wins (matches _reconcile)
-                prices_by_name[key] = [
-                    int(h.metadata.get("price_jpy", 0) or 0)
-                    for h in ranked
-                    if str(h.metadata.get("item_type", "") or "") in type_set
-                    and int(h.metadata.get("price_jpy", 0) or 0) > 0
-                ]
+                prices_by_name[key] = _same_type_prices(ranked, types)
             refs = "\n".join(self._format_reference(h) for h in ranked)
             context_blocks.append(f"### Query: {name}\n{refs or '(no matches)'}")
         user_prompt = (

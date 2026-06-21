@@ -31,6 +31,7 @@ from estimator_king.bot.estimator import (
     SYSTEM_PROMPT,
     Estimator,
     _anchor_floor,
+    _same_type_prices,
     _snap_estimate,
 )
 from estimator_king.config_schema import load_config
@@ -141,13 +142,7 @@ def build_context(est: Estimator, query: str, official: int) -> tuple[str, list[
             f"multiple distinct products excluded as self for {query!r}: "
             f"{list(selves.values())} -- identity is ambiguous")
     ranked = est._rerank(list(merged.values()))[: est._top_k]
-    type_set = set(types)
-    same_type_prices = [
-        int(h.metadata.get("price_jpy", 0) or 0)
-        for h in ranked
-        if str(h.metadata.get("item_type", "") or "") in type_set
-        and int(h.metadata.get("price_jpy", 0) or 0) > 0
-    ]
+    same_type_prices = _same_type_prices(ranked, types)
     refs = "\n".join(est._format_reference(h) for h in ranked)
     return f"### Query: {query}\n{refs or '(no matches)'}", list(selves.values()), same_type_prices
 

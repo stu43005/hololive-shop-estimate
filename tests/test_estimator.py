@@ -529,3 +529,30 @@ def test_pipeline_floor_skipped_on_length_mismatch_long(caplog):
     assert any("anchor_floor skipped" in r.message for r in caplog.records)
     # no estimate was floored (both stay at their snapped model value)
     assert all("anchor floor" not in e.rationale for e in batch.estimates)
+
+
+def test_pipeline_floor_uses_primary_type_only():
+    # query "ぬいぐるみキーホルダー" matches both vocab entries:
+    #   キーホルダー (6 chars) > ぬいぐるみ (5 chars) -> types[0] = "キーホルダー" (PRIMARY)
+    # Floor must use ONLY the 5 PRIMARY-type (キーホルダー) prices, not the 10
+    # pooled prices (which include the broader ぬいぐるみ refs at higher prices).
+    kh_hits = [_hit(f"kh{i}", "キーホルダー", p, 0, 0.1 + i * 0.01)
+               for i, p in enumerate([1800, 2000, 2200, 2400, 2600])]
+    nui_hits = [_hit(f"nui{i}", "ぬいぐるみ", p, 0, 0.2 + i * 0.01)
+                for i, p in enumerate([3000, 3200, 3400, 3500, 3500])]
+    vs = RecordingVectorStore(kh_hits + nui_hits)
+    # chat returns suggested=2200 (below primary p60=2280; above broad-pool p60 if pooled)
+    chat = FakeChat([_est_full("ぬいぐるみキーホルダー", 2200, 1800, 2900)])
+    est = Estimator(
+        FakeEmbedder(), chat, vs,
+        typing_provider=FakeTypingProvider("キーホルダー"),
+        item_types=["ぬいぐるみ", "キーホルダー"], item_types_version=1,
+        top_k=10, recency_weight=0.05, diversity_weight=0.0, fetch_multiplier=1,
+        anchor_floor=_CFG,
+    )
+    out = est.estimate_products(["ぬいぐるみキーホルダー"], "u").estimates[0]
+    # Primary type (キーホルダー) prices: [1800,2000,2200,2400,2600], n=5.
+    # p60 (linear, n=5): pos=2.4, lo=2, frac=0.4 -> 2200 + 0.4*(2400-2200) = 2280
+    # floor 2280 > suggested 2200 -> lift; 2280 <= 2200*1.6 -> not clamped by ratio
+    assert "@p60, n=5]" in out.rationale       # only 5 primary-type refs counted, not 10
+    assert "->¥2280 @p60" in out.rationale     # floor from primary type p60, not broad pool

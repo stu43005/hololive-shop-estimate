@@ -868,9 +868,15 @@ item_type, price_jpy(int), published_at(epoch), detail_snippet, item_hash
    [estimator.py:270](../estimator_king/bot/estimator.py#L270) 在 `_reconcile` 後立即呼叫):
    `stores_config.yaml` 的 `estimator.anchor_floor` 區塊缺席時整步 no-op(兩階段上線 —— 功能
    先合入、評測通過後才用獨立 config commit 啟用)。啟用後,**以原始 query 行為鍵**,
-   對照同批次 `prices_by_name`(same-type top_k 參考價格,`item_type ∈ classify_query(query)`
-   且 `price_jpy > 0`)計算 `effective_pct` 百分位作為下限值(`floor_value`),若
+   對照同批次 `prices_by_name`(**主要類型** top_k 參考價格,`item_type ==
+   classify_query(query)[0]`(最長/最精確的詞表命中)且 `price_jpy > 0`)計算
+   `effective_pct` 百分位作為下限值(`floor_value`),若
    `suggested_price_jpy < floor_value` 則抬升之(raise-only)。
+   **僅用主要類型**:若 `classify_query` 回傳多個命中(例如 `キーホルダー` ⊂
+   `アクリルキーホルダー`、或複合名 `ぬいぐるみキーホルダー` 同時命中兩個詞),
+   用全部類型的並集計算 floor 會讓特定品被相鄰類別的價格硬拉高;
+   限定 `types[0]`(最長命中 = 最精確)確保 floor 語意一致。
+   **檢索仍用全部類型**(廣召回供 LLM 推理),只有 floor 證據縮窄到主要類型。
 
    **四道保護(任一觸發 → no-op)**:
 
