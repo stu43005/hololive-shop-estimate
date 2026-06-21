@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional, List
+from typing import TYPE_CHECKING, Any, Optional, List
 import yaml
 import os
 
@@ -101,6 +101,72 @@ class BundleSetPolicy:
             raise ValueError("bundle_set.price_ratio must be greater than 0")
 
 
+def _req_int(name: str, value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"anchor_floor.{name} must be an integer")
+    return value
+
+
+def _req_num(name: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"anchor_floor.{name} must be a number")
+    return float(value)
+
+
+def _req_str_list(name: str, value: object) -> list[str]:
+    if (not isinstance(value, list) or not value
+            or any(not isinstance(k, str) or not k for k in value)):
+        raise ValueError(f"anchor_floor.{name} must be a non-empty list of non-empty strings")
+    return list(value)
+
+
+@dataclass(frozen=True)
+class AnchorTier:
+    """One premium anchor-floor tier: a percentile + the keywords that select it."""
+
+    percentile: int
+    keywords: list[str]
+
+    def validate(self):
+        if isinstance(self.percentile, bool) or not isinstance(self.percentile, int):
+            raise ValueError("anchor_floor tier percentile must be an integer")
+        if not (0 <= self.percentile <= 100):
+            raise ValueError("anchor_floor tier percentile must be 0-100")
+        if not self.keywords or any(not isinstance(k, str) or not k for k in self.keywords):
+            raise ValueError("anchor_floor tier keywords must be a non-empty list of non-empty strings")
+
+
+@dataclass(frozen=True)
+class AnchorFloorConfig:
+    """Deterministic anchor-floor policy. Lifts a low suggested price toward a
+    percentile of same-type reference prices, guarded by sparse/clamp/outlier
+    checks. None on the AppConfig means the floor is disabled."""
+
+    general_percentile: int
+    min_refs: int = 3
+    full_percentile_min_refs: int = 5
+    max_lift_ratio: float = 1.6
+    premium_tiers: list[AnchorTier] = field(default_factory=list)
+
+    def validate(self):
+        for name in ("general_percentile", "min_refs", "full_percentile_min_refs"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise ValueError(f"anchor_floor.{name} must be an integer")
+        if isinstance(self.max_lift_ratio, bool) or not isinstance(self.max_lift_ratio, (int, float)):
+            raise ValueError("anchor_floor.max_lift_ratio must be a number")
+        if not (0 <= self.general_percentile <= 100):
+            raise ValueError("anchor_floor.general_percentile must be 0-100")
+        if self.min_refs < 1:
+            raise ValueError("anchor_floor.min_refs must be >= 1")
+        if self.full_percentile_min_refs < self.min_refs:
+            raise ValueError("anchor_floor.full_percentile_min_refs must be >= min_refs")
+        if self.max_lift_ratio < 1.0:
+            raise ValueError("anchor_floor.max_lift_ratio must be >= 1.0")
+        for tier in self.premium_tiers:
+            tier.validate()
+
+
 @dataclass
 class AppConfig:
     """Complete application configuration.
@@ -141,6 +207,7 @@ class AppConfig:
     estimator_recency_weight: float = 0.05
     estimator_diversity_weight: float = 0.05
     estimator_fetch_multiplier: int = 2
+    estimator_anchor_floor: "AnchorFloorConfig | None" = None
 
     # Typing provider (credentials, from env)
     typing_model: str = "gpt-4o-mini"
@@ -174,6 +241,9 @@ class AppConfig:
 
         # Validate bundle-set policy
         self.bundle_set.validate()
+
+        if self.estimator_anchor_floor is not None:
+            self.estimator_anchor_floor.validate()
 
     def build_provider_config(self) -> "ProviderConfig":
         from estimator_king.llm.config import ProviderConfig
@@ -211,6 +281,38 @@ class AppConfig:
             ValueError: If configuration is invalid
         """
         return load_config(path)
+
+
+def parse_anchor_floor(est: dict[str, Any]) -> "AnchorFloorConfig | None":
+    """Build AnchorFloorConfig from an `estimator` mapping's `anchor_floor` block,
+    or None if absent. Raises ValueError on malformed shape."""
+    af = est.get("anchor_floor")
+    if af is None:
+        return None
+    if not isinstance(af, dict):
+        raise ValueError("anchor_floor must be a mapping")
+    if "general_percentile" not in af:
+        raise ValueError("anchor_floor requires general_percentile")
+    raw_tiers = af.get("premium_tiers", [])
+    if raw_tiers is None:  # explicit `premium_tiers:` (null) means "no tiers"
+        raw_tiers = []
+    if not isinstance(raw_tiers, list):  # rejects scalar / false / 0, not silently empty
+        raise ValueError("anchor_floor.premium_tiers must be a list")
+    tiers: list[AnchorTier] = []
+    for t in raw_tiers:
+        if not isinstance(t, dict) or "percentile" not in t:
+            raise ValueError("each premium_tiers entry must be a mapping with a percentile")
+        tiers.append(AnchorTier(
+            percentile=_req_int("tier.percentile", t["percentile"]),
+            keywords=_req_str_list("tier.keywords", t.get("keywords", [])),
+        ))
+    return AnchorFloorConfig(
+        general_percentile=_req_int("general_percentile", af["general_percentile"]),
+        min_refs=_req_int("min_refs", af.get("min_refs", 3)),
+        full_percentile_min_refs=_req_int("full_percentile_min_refs", af.get("full_percentile_min_refs", 5)),
+        max_lift_ratio=_req_num("max_lift_ratio", af.get("max_lift_ratio", 1.6)),
+        premium_tiers=tiers,
+    )
 
 
 def load_config(config_path: Optional[str] = None) -> AppConfig:
@@ -288,6 +390,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         return int(raw) if raw.strip() != "" else None
 
     est = yaml_data.get("estimator", {}) or {}
+    anchor_floor = parse_anchor_floor(est)
     openai_api_key = os.getenv("OPENAI_API_KEY")
     openai_base_url = os.getenv("OPENAI_BASE_URL")
     config = AppConfig(
@@ -316,6 +419,7 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
         estimator_recency_weight=float(est.get("recency_weight", 0.05)),
         estimator_diversity_weight=float(est.get("diversity_weight", 0.05)),
         estimator_fetch_multiplier=int(est.get("fetch_multiplier", 2)),
+        estimator_anchor_floor=anchor_floor,
         typing_model=os.getenv("TYPING_MODEL", "gpt-4o-mini"),
         typing_base_url=os.getenv("TYPING_BASE_URL"),
         typing_api_key=os.getenv("TYPING_API_KEY"),
