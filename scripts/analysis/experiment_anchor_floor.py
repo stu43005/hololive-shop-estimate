@@ -89,15 +89,16 @@ def main() -> None:
     # rows[query] = (n, base_signed_mean, base_abs_mean, cand_signed_mean,
     #                cand_abs_mean, applied_any, base_sugg, cand_sugg)
     rows: dict[str, tuple[Any, ...]] = {}
+    unstable_queries: set[str] = set()
     for query, _ in FIXTURES:
-        n = len(runs[0][query][1]) if query in runs[0] else 0
+        run_ns: list[int] = []
         b_signed, b_abs, c_signed, c_abs = [], [], [], []
         applied_any = False
         last_base = last_cand = 0
         no_estimate = False
         for run in runs:
             est_obj, prices, off = run[query]
-            n = len(prices)
+            run_ns.append(len(prices))
             if est_obj.suggested_price_jpy == 0:  # no-estimate in ANY run -> drop the whole fixture
                 no_estimate = True
                 break
@@ -109,7 +110,12 @@ def main() -> None:
             b_abs.append(abs(bs - off) / off * 100.0)
             c_signed.append((cs - off) / off * 100.0)
             c_abs.append(abs(cs - off) / off * 100.0)
+        n = run_ns[0] if run_ns else 0
         if no_estimate or not b_signed:  # sentinel in any run, or no usable estimate
+            rows[query] = (n, None, None, None, None, False, 0, 0)
+            continue
+        if len(set(run_ns)) > 1:  # ref count not stable across runs -> can't band reliably, fail closed
+            unstable_queries.add(query)
             rows[query] = (n, None, None, None, None, False, 0, 0)
             continue
         rows[query] = (n, statistics.mean(b_signed), statistics.mean(b_abs),
@@ -123,7 +129,7 @@ def main() -> None:
     for query, _ in FIXTURES:
         n, _bs, _ba, _cs, _ca, applied, base_s, cand_s = rows[query]
         if _bs is None:
-            marker = "sentinel"
+            marker = "unstable" if query in unstable_queries else "sentinel"
         elif n < cfg.min_refs:
             marker = "skip:min_refs"
             skipped_min_refs += 1
@@ -143,6 +149,7 @@ def main() -> None:
 
     print(f"\n========== BANDS by same-type ref count (MIN_BUCKET_N={MIN_BUCKET_N}) ==========")
     print(f"  skipped by min_refs (n<{cfg.min_refs}): {skipped_min_refs} fixtures")
+    print(f"  excluded (ref count unstable across runs): {len(unstable_queries)} fixtures")
     print(f"  {'n':>3} {'N':>3} {'mrSkip':>6} {'applied':>7} {'baseSgn':>8} {'candSgn':>8} "
           f"{'baseMAPE':>8} {'candMAPE':>8} {'region':>7} {'verdict':>9}")
     for n in sorted(bands):
